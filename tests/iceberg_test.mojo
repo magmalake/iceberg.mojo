@@ -44,6 +44,27 @@ from iceberg.values import (
     int64_to_be_twos,
     be_twos_to_int64,
 )
+from iceberg.expressions import (
+    Expr,
+    parse_filter,
+    bind,
+    rewrite_not,
+    project_inclusive,
+    project_strict,
+    ManifestEvaluator,
+    InclusiveMetricsEvaluator,
+    ResidualEvaluator,
+    FieldSummary,
+    ColumnMetrics,
+    OP_EQ,
+    OP_LT_EQ,
+    OP_GT_EQ,
+    OP_IN,
+    OP_TRUE,
+    OP_FALSE,
+    OP_NOT_EQ,
+    op_name,
+)
 from iceberg.transforms import (
     Transform,
     parse_transform,
@@ -807,6 +828,341 @@ def test_snapshot_ref_and_schema_selection() raises:
         assert_true(len(s.columns()) > 0)
     var cur = m.schema()
     assert_equal(cur.schema_id, m.current_schema_id)
+
+
+
+# ══ expressions ═════════════════════════════════════════════════════════════
+comptime FILTER_SCHEMA = String(
+    '{"type":"struct","schema-id":0,"fields":['
+    '{"id":1,"name":"id","required":true,"type":"long"},'
+    '{"id":2,"name":"region","required":true,"type":"string"},'
+    '{"id":3,"name":"amount","required":false,"type":"double"},'
+    '{"id":4,"name":"ts","required":false,"type":"timestamp"},'
+    '{"id":5,"name":"ok","required":false,"type":"boolean"},'
+    '{"id":6,"name":"cnt","required":false,"type":"int"},'
+    '{"id":7,"name":"d","required":false,"type":"decimal(9, 2)"}]}'
+)
+
+
+def bound_filter(text: String) raises -> Expr:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    return bind(parse_filter(text), schema)
+
+
+def test_filter_dsl_parsing() raises:
+    var cases = [
+        String('["true"]'), String('["false"]'),
+        String('["=","region","eu"]'), String('["!=","id",3]'),
+        String('["<","id",5]'), String('["<=","id",5]'),
+        String('[">","id",5]'), String('[">=","id",5]'),
+        String('["is-null","amount"]'), String('["not-null","amount"]'),
+        String('["is-nan","amount"]'), String('["not-nan","amount"]'),
+        String('["in","region",["eu","us"]]'),
+        String('["not-in","region",["eu","us"]]'),
+        String('["starts-with","region","e"]'),
+        String('["not-starts-with","region","e"]'),
+        String('["and",[">","id",1],["is-null","amount"]]'),
+        String('["or",[">","id",1],["<","id",0]]'),
+        String('["not",["=","region","eu"]]'),
+        String('["and",[">","id",1],["<","id",9],["=","region","eu"]]'),
+    ]
+    for k in range(len(cases)):
+        var e = parse_filter(cases[k])
+        assert_true(e.root >= 0, "failed to parse " + cases[k])
+        _ = bound_filter(cases[k])
+    with assert_raises():
+        _ = parse_filter('["nope","id",1]')
+    with assert_raises():
+        _ = parse_filter("[]")
+
+
+def test_literal_typing() raises:
+    """A literal is typed by the column, not by its JSON shape."""
+    var e = bound_filter('["=","id",3]')
+    assert_equal(e.nodes[e.root].lits[0].kind, P_LONG)
+    var f = bound_filter('["=","cnt",3]')
+    assert_equal(f.nodes[f.root].lits[0].kind, P_INT)
+    # ISO strings on temporal columns.
+    var g = bound_filter('["<","ts","2017-11-16T22:31:08"]')
+    assert_equal(g.nodes[g.root].lits[0].i, 1510871468000000)
+    # and the raw integer, which the oracle DSL also allows.
+    var h = bound_filter('["<","ts",1510871468000000]')
+    assert_equal(h.nodes[h.root].lits[0].i, 1510871468000000)
+    # Decimal text at the column's scale.
+    var i = bound_filter('["=","d","14.20"]')
+    assert_equal(i.nodes[i.root].lits[0].i, 1420)
+
+
+def test_bind_folds_impossible_predicates() raises:
+    # `region` is required, so it is never null.
+    var a = bound_filter('["is-null","region"]')
+    assert_equal(a.nodes[a.root].op, OP_FALSE)
+    var b = bound_filter('["not-null","region"]')
+    assert_equal(b.nodes[b.root].op, OP_TRUE)
+    # `id` is a long, so it is never NaN.
+    var c = bound_filter('["is-nan","id"]')
+    assert_equal(c.nodes[c.root].op, OP_FALSE)
+    # A column that is not in the schema can never match...
+    var d = bound_filter('["=","nope","x"]')
+    assert_equal(d.nodes[d.root].op, OP_FALSE)
+    # ...but reads as all-null.
+    var e = bound_filter('["is-null","nope"]')
+    assert_equal(e.nodes[e.root].op, OP_TRUE)
+    # A one-element `in` collapses to `=`.
+    var f = bound_filter('["in","region",["eu"]]')
+    assert_equal(f.nodes[f.root].op, OP_EQ)
+    # starts-with on a non-string column is an error, not a silent mismatch.
+    with assert_raises():
+        _ = bound_filter('["starts-with","id","x"]')
+
+
+def test_rewrite_not() raises:
+    var e = rewrite_not(bound_filter('["not",["=","region","eu"]]'))
+    assert_equal(e.nodes[e.root].op, OP_NOT_EQ)
+    var f = rewrite_not(
+        bound_filter('["not",["and",[">","id",1],["<","id",9]]]')
+    )
+    # not(a and b) becomes (not a) or (not b).
+    assert_equal(op_name(f.nodes[f.root].op), "or")
+    var g = rewrite_not(bound_filter('["not",["not",["=","region","eu"]]]'))
+    assert_equal(g.nodes[g.root].op, OP_EQ)
+
+
+def spec_from(text: String) raises -> PartitionSpec:
+    var d = parse_json(text)
+    return PartitionSpec.from_json(d, d.root)
+
+
+def test_inclusive_projection_identity() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"identity","name":"region"}]}'
+    )
+    var p = project_inclusive(
+        rewrite_not(bound_filter('["=","region","eu"]')), spec, schema
+    )
+    assert_equal(p.nodes[p.root].op, OP_EQ)
+    assert_equal(p.nodes[p.root].field_id, 1000)
+    assert_equal(p.nodes[p.root].lits[0].s, "eu")
+    # A predicate on a column that is not a partition source says nothing.
+    var q = project_inclusive(
+        rewrite_not(bound_filter('[">","id",3]')), spec, schema
+    )
+    assert_equal(q.nodes[q.root].op, OP_TRUE)
+
+
+def test_inclusive_projection_bucket() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,'
+        '"transform":"bucket[4]","name":"id_bucket"}]}'
+    )
+    # Equality survives bucketing...
+    var p = project_inclusive(
+        rewrite_not(bound_filter('["=","id",34]')), spec, schema
+    )
+    assert_equal(p.nodes[p.root].op, OP_EQ)
+    assert_equal(p.nodes[p.root].lits[0].i, Int64(bucket_of(Datum.long_(34), 4)))
+    # ...as does `in`, mapped to the set of buckets.
+    var q = project_inclusive(
+        rewrite_not(bound_filter('["in","id",[1,4,7]]')), spec, schema
+    )
+    assert_equal(q.nodes[q.root].op, OP_IN)
+    assert_true(len(q.nodes[q.root].lits) <= 3)
+    # Ordering does not: bucketing is not monotonic.
+    var r = project_inclusive(
+        rewrite_not(bound_filter('[">","id",3]')), spec, schema
+    )
+    assert_equal(r.nodes[r.root].op, OP_TRUE)
+
+
+def test_inclusive_projection_truncate() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"truncate[3]","name":"region_trunc"}]}'
+    )
+    # A prefix no longer than the width stays a prefix predicate.
+    var p = project_inclusive(
+        rewrite_not(bound_filter('["starts-with","region","eu"]')), spec, schema
+    )
+    assert_equal(op_name(p.nodes[p.root].op), "starts-with")
+    # A longer prefix becomes equality on its own truncation.
+    var q = project_inclusive(
+        rewrite_not(bound_filter('["starts-with","region","europe"]')),
+        spec, schema,
+    )
+    assert_equal(q.nodes[q.root].op, OP_EQ)
+    assert_equal(q.nodes[q.root].lits[0].s, "eur")
+    # Truncation preserves order, so `<` becomes `<=` on the truncation.
+    var r = project_inclusive(
+        rewrite_not(bound_filter('["<","region","euxyz"]')), spec, schema
+    )
+    assert_equal(r.nodes[r.root].op, OP_LT_EQ)
+
+
+def test_inclusive_projection_time() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":4,"field-id":1000,'
+        '"transform":"day","name":"ts_day"}]}'
+    )
+    var p = project_inclusive(
+        rewrite_not(bound_filter('[">=","ts","2017-11-16T00:00:00"]')),
+        spec, schema,
+    )
+    assert_equal(p.nodes[p.root].op, OP_GT_EQ)
+    assert_equal(p.nodes[p.root].lits[0].i, 17486)
+    assert_equal(p.nodes[p.root].lits[0].kind, P_DATE)
+    # `<` on a day-partitioned column bounds the day of the value one micro
+    # earlier, which is still the same day here.
+    var q = project_inclusive(
+        rewrite_not(bound_filter('["<","ts","2017-11-17T00:00:00"]')),
+        spec, schema,
+    )
+    assert_equal(q.nodes[q.root].op, OP_LT_EQ)
+    assert_equal(q.nodes[q.root].lits[0].i, 17486)
+
+
+def test_projection_ignores_unknown_transform() raises:
+    """v3 requires readers to ignore partition fields they cannot interpret."""
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"chronomancy[7]","name":"weird"}]}'
+    )
+    var p = project_inclusive(
+        rewrite_not(bound_filter('["=","region","eu"]')), spec, schema
+    )
+    assert_equal(p.nodes[p.root].op, OP_TRUE)
+
+
+def test_strict_projection() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"identity","name":"region"}]}'
+    )
+    # Identity: every row of the partition matches exactly when the partition
+    # value does.
+    var p = project_strict(
+        rewrite_not(bound_filter('["=","region","eu"]')), spec, schema
+    )
+    assert_equal(p.nodes[p.root].op, OP_EQ)
+    # Bucketing can never guarantee a whole partition matches.
+    var bspec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,'
+        '"transform":"bucket[4]","name":"b"}]}'
+    )
+    var q = project_strict(
+        rewrite_not(bound_filter('["=","id",34]')), bspec, schema
+    )
+    assert_equal(q.nodes[q.root].op, OP_FALSE)
+
+
+def summary(var lo: List[UInt8], var hi: List[UInt8], nulls: Bool) -> FieldSummary:
+    return FieldSummary(nulls, False, False, lo^, True, hi^, True)
+
+
+def test_manifest_evaluator() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"identity","name":"region"}]}'
+    )
+    # This manifest holds partitions from "eu" through "us".
+    var s = List[FieldSummary]()
+    s.append(summary(hex_bytes("6575"), hex_bytes("7573"), False))
+    var keep = ManifestEvaluator(bound_filter('["=","region","eu"]'), spec, schema)
+    assert_true(keep.eval(s))
+    var drop = ManifestEvaluator(bound_filter('["=","region","zz"]'), spec, schema)
+    assert_false(drop.eval(s))
+    var below = ManifestEvaluator(bound_filter('["<","region","aa"]'), spec, schema)
+    assert_false(below.eval(s))
+    var above = ManifestEvaluator(bound_filter('[">","region","zz"]'), spec, schema)
+    assert_false(above.eval(s))
+    var isnull = ManifestEvaluator(bound_filter('["is-null","amount"]'), spec, schema)
+    assert_true(isnull.eval(s), "a non-partition predicate must not prune")
+    # A summary that says the field has no nulls kills an is-null on it.
+    var pspec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":3,"field-id":1000,'
+        '"transform":"identity","name":"amount"}]}'
+    )
+    var s2 = List[FieldSummary]()
+    s2.append(
+        summary(
+            hex_bytes("0000000000001a40"), hex_bytes("0000000000001a40"), False
+        )
+    )
+    var nulls = ManifestEvaluator(bound_filter('["is-null","amount"]'), pspec, schema)
+    assert_false(nulls.eval(s2))
+
+
+def metric(
+    field_id: Int, lo: String, hi: String, values: Int64, nulls: Int64
+) raises -> ColumnMetrics:
+    var lob = hex_bytes(lo)
+    var hib = hex_bytes(hi)
+    return ColumnMetrics(
+        field_id, values, True, nulls, True, 0, False,
+        lob^, True, hib^, True,
+    )
+
+
+def test_inclusive_metrics_evaluator() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    # id in [1, 5]; amount all null.
+    var m = List[ColumnMetrics]()
+    m.append(metric(1, "0100000000000000", "0500000000000000", 5, 0))
+    m.append(ColumnMetrics(3, 5, True, 5, True, 0, False, [], False, [], False))
+    var e1 = InclusiveMetricsEvaluator(bound_filter('["=","id",3]'), schema)
+    assert_true(e1.eval(5, m))
+    var e2 = InclusiveMetricsEvaluator(bound_filter('["=","id",9]'), schema)
+    assert_false(e2.eval(5, m))
+    var e3 = InclusiveMetricsEvaluator(bound_filter('[">","id",5]'), schema)
+    assert_false(e3.eval(5, m))
+    var e4 = InclusiveMetricsEvaluator(bound_filter('[">=","id",5]'), schema)
+    assert_true(e4.eval(5, m))
+    var e5 = InclusiveMetricsEvaluator(bound_filter('["<","id",1]'), schema)
+    assert_false(e5.eval(5, m))
+    var e6 = InclusiveMetricsEvaluator(bound_filter('["in","id",[7,8,9]]'), schema)
+    assert_false(e6.eval(5, m))
+    var e7 = InclusiveMetricsEvaluator(bound_filter('["in","id",[7,3]]'), schema)
+    assert_true(e7.eval(5, m))
+    # amount is entirely null.
+    var e8 = InclusiveMetricsEvaluator(bound_filter('["not-null","amount"]'), schema)
+    assert_false(e8.eval(5, m))
+    var e9 = InclusiveMetricsEvaluator(bound_filter('["is-null","amount"]'), schema)
+    assert_true(e9.eval(5, m))
+    var e10 = InclusiveMetricsEvaluator(bound_filter('[">","amount",1.0]'), schema)
+    assert_false(e10.eval(5, m), "an all-null column matches no value predicate")
+    # An empty file matches nothing.
+    assert_false(e1.eval(0, m))
+
+
+def test_residual_evaluator() raises:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"identity","name":"region"}]}'
+    )
+    var r = ResidualEvaluator(bound_filter('["=","region","eu"]'), spec, schema)
+    # In the "eu" partition every row matches, so nothing is left to check.
+    var eu = List[Datum]()
+    eu.append(Datum.string_("eu"))
+    assert_true(r.selects(eu))
+    var res = r.residual_for(eu)
+    assert_true(res.is_true(res.root))
+    # The "us" partition is excluded outright.
+    var us = List[Datum]()
+    us.append(Datum.string_("us"))
+    assert_false(r.selects(us))
+    # A filter that partitioning cannot decide survives into the residual.
+    var r2 = ResidualEvaluator(bound_filter('[">","id",3]'), spec, schema)
+    assert_true(r2.selects(eu))
+    var res2 = r2.residual_for(eu)
+    assert_false(res2.is_true(res2.root))
 
 
 def main() raises:
