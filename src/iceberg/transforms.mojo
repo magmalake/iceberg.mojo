@@ -259,7 +259,7 @@ def _to_micros(v: Datum) raises -> Int64:
 
 
 def time_of(v: Datum, kind: UInt8) raises -> Datum:
-    var days: Int64 = 0
+    var days: Int64
     if v.kind == P_DATE:
         days = v.i
         if kind == T_HOUR:
@@ -396,7 +396,7 @@ struct PartitionSpec(Copyable, Movable):
         var fields = List[NestedField]()
         for k in range(len(self.fields)):
             ref pf = self.fields[k]
-            var src = -1
+            var src: Int
             if schema.has_field(pf.source_id):
                 var af = schema.find_field(pf.source_id)
                 src = _copy_prim(schema.store, af.type, store)

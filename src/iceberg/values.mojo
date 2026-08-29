@@ -465,7 +465,7 @@ def decimal_from_text(s: String, precision: Int, scale: Int) raises -> Datum:
     var neg = s.startswith("-")
     var t = substr(s, 1, s.byte_length()) if (neg or s.startswith("+")) else s
     var dot = t.find(".")
-    var digits = String("")
+    var digits: String
     var frac = 0
     if dot < 0:
         digits = t
@@ -667,7 +667,7 @@ def _parse_time(s: String, per_sec: Int64) raises -> Int64:
         raise Error("iceberg: '" + s + "' is not a time")
     var b = s.find(":", a + 1)
     var h = parse_int64(String(substr(s, 0, a)))
-    var mi: Int64 = 0
+    var mi: Int64
     var sec: Int64 = 0
     var frac: Int64 = 0
     if b < 0:

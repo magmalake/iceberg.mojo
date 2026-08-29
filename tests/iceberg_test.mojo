@@ -5,12 +5,30 @@ values were produced by iceberg-rust 0.10.1 (through iceberg-rs.mojo) or by
 PyIceberg, never by this implementation. See `tests/fixtures/PROVENANCE.md`.
 """
 
+from std.os import makedirs
+from std.pathlib import Path
 from std.testing import TestSuite, assert_equal, assert_true, assert_false, assert_raises
 
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
 from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
-from iceberg.io import FileIO, basename, strip_scheme
+from iceberg.io import FileIO, basename, dirname, join_path, strip_scheme
+from iceberg.catalog.filesystem import (
+    FilesystemCatalog,
+    Table,
+    find_latest_metadata,
+    read_metadata_file,
+    read_version_hint,
+    gunzip,
+)
+from iceberg.catalog.rest import (
+    LoadTableResult,
+    RestCatalogConfig,
+    encode_namespace,
+    url_encode,
+    ACCESS_DELEGATION_HEADER,
+    VENDED_CREDENTIALS,
+)
 from iceberg.scan import TableScan, FileScanTask
 from iceberg.manifest import (
     ManifestFile,
@@ -729,7 +747,7 @@ def test_metadata_full_field_coverage() raises:
 
 
 def test_metadata_v1_forms() raises:
-    """v1's singular `schema` and bare `partition-spec` array."""
+    """The v1 singular `schema` and bare `partition-spec` array."""
     var text = String(
         '{"format-version":1,"table-uuid":"1517a9b0-0000-0000-0000-000000000000",'
         '"location":"file:///t","last-updated-ms":1,"last-column-id":2,'
@@ -1049,7 +1067,7 @@ def test_inclusive_projection_time() raises:
 
 
 def test_projection_ignores_unknown_transform() raises:
-    """v3 requires readers to ignore partition fields they cannot interpret."""
+    """Format version 3 requires readers to ignore partition fields they cannot interpret."""
     var schema = Schema.parse(FILTER_SCHEMA)
     var spec = spec_from(
         '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
@@ -1639,6 +1657,185 @@ def test_scan_residuals() raises:
     var t2 = scan.filter('[">","id",2]').plan_files()
     assert_true(len(t2) > 0)
     assert_true(t2[0].residual != '["true"]', "expected a surviving residual")
+
+
+
+# ══ catalogs ════════════════════════════════════════════════════════════════
+def test_find_latest_metadata() raises:
+    """Discovery from a table dir, a metadata dir, and a file path alike."""
+    var io = fixture_io()
+    var idx = fixture_index()
+    var tables = fixture_table_names()
+    for k in range(len(tables)):
+        var want = current_metadata_path(idx, tables[k])
+        var from_dir = find_latest_metadata(io, FIXTURES + "/" + tables[k])
+        assert_equal(
+            basename(from_dir),
+            basename(want),
+            tables[k] + ": discovery from the table dir",
+        )
+        var from_meta = find_latest_metadata(
+            io, FIXTURES + "/" + tables[k] + "/metadata"
+        )
+        assert_equal(basename(from_meta), basename(want))
+        var from_file = find_latest_metadata(io, want)
+        assert_equal(from_file, want)
+    # A directory with no metadata is an error, not an empty table.
+    with assert_raises():
+        _ = find_latest_metadata(io, FIXTURES)
+
+
+def test_table_load_and_scan() raises:
+    var t = Table.load(FIXTURES + "/ident_part", fixture_io())
+    assert_equal(t.metadata.format_version, 2)
+    assert_equal(t.name, "ident_part")
+    assert_true(t.metadata_location.endswith(".metadata.json"))
+    var tasks = t.scan().filter('["=","region","eu"]').plan_files()
+    assert_true(len(tasks) > 0)
+
+
+def test_filesystem_catalog() raises:
+    var cat = FilesystemCatalog(FIXTURES, fixture_io())
+    var names = cat.list_tables("")
+    assert_equal(len(names), 7, "expected 7 fixture tables")
+    assert_true(cat.table_exists("", "ident_part"))
+    assert_false(cat.table_exists("", "no_such_table"))
+    var t = cat.load_table("", "bucket_part")
+    assert_equal(t.name, "bucket_part")
+    assert_equal(len(t.metadata.partition_specs[0].fields), 1)
+
+
+def test_version_hint_discovery() raises:
+    """A `version-hint.text` table, which the fixtures do not use."""
+    var dir = String("build/hinted/metadata")
+    _ = _mkdirs(dir)
+    var meta = String(
+        '{"format-version":2,"table-uuid":"aaaaaaaa-0000-0000-0000-000000000000",'
+        '"location":"file:///t","last-sequence-number":0,"last-updated-ms":1,'
+        '"last-column-id":1,"current-schema-id":0,"schemas":[{"type":"struct",'
+        '"schema-id":0,"fields":[{"id":1,"name":"a","required":true,'
+        '"type":"long"}]}],"default-spec-id":0,"partition-specs":[{"spec-id":0,'
+        '"fields":[]}],"last-partition-id":999,"default-sort-order-id":0,'
+        '"sort-orders":[{"order-id":0,"fields":[]}],"properties":{},'
+        '"current-snapshot-id":-1,"snapshots":[]}'
+    )
+    _write_file(dir + "/v7.metadata.json", meta)
+    _write_file(dir + "/v2.metadata.json", meta)
+    _write_file(dir + "/version-hint.text", "7\n")
+    var io = FileIO.local()
+    assert_equal(read_version_hint(io, dir), 7)
+    assert_equal(basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json")
+    # Without the hint, the highest version still wins.
+    _write_file(dir + "/version-hint.text", "")
+    assert_equal(basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json")
+
+
+def _mkdirs(path: String) -> Bool:
+    """`std.pathlib.Path` has no mkdir on either toolchain; shell out."""
+    try:
+        makedirs(Path(path), exist_ok=True)
+        return True
+    except:
+        return False
+
+
+def _write_file(path: String, content: String) raises:
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def test_gunzip() raises:
+    """A gzip member produced by python's gzip module, decoded in-process."""
+    # "iceberg" gzipped: 1f8b header, deflate payload, crc32 + isize trailer.
+    var gz = hex_bytes(
+        "1f8b08000000000002ffcb4c4e4d4a2d4a07004d8a1c4d07000000"
+    )
+    var out = gunzip(gz)
+    assert_equal(String(StringSlice(unsafe_from_utf8=Span(out))), "iceberg")
+    with assert_raises():
+        _ = gunzip(hex_bytes("00010203"))
+
+
+def test_rest_url_and_header_shaping() raises:
+    var c = RestCatalogConfig("https://polaris.example.com/api/catalog/")
+    assert_equal(c.config_url(), "https://polaris.example.com/api/catalog/v1/config")
+    c.with_warehouse("my_wh")
+    assert_equal(
+        c.config_url(),
+        "https://polaris.example.com/api/catalog/v1/config?warehouse=my_wh",
+    )
+    assert_equal(
+        c.load_table_url("sales", "orders"),
+        "https://polaris.example.com/api/catalog/v1/namespaces/sales/tables/orders",
+    )
+    # A config response can insert a prefix into every later path.
+    c.apply_config('{"overrides":{"prefix":"ws/main"},"defaults":{}}')
+    assert_equal(c.prefix, "ws/main")
+    assert_equal(
+        c.tables_url("sales"),
+        "https://polaris.example.com/api/catalog/v1/ws/main/namespaces/sales/tables",
+    )
+    # Multipart namespaces travel as one segment joined by 0x1F.
+    assert_equal(url_encode(encode_namespace("a.b")), "a%1Fb")
+    # Headers: bearer token and credential vending.
+    c.with_token("tok123")
+    c.vend_credentials = True
+    var hs = c.headers()
+    var saw_auth = False
+    var saw_delegation = False
+    for k in range(len(hs)):
+        if hs[k].name == "Authorization":
+            assert_equal(hs[k].value, "Bearer tok123")
+            saw_auth = True
+        if hs[k].name == ACCESS_DELEGATION_HEADER:
+            assert_equal(hs[k].value, VENDED_CREDENTIALS)
+            saw_delegation = True
+    assert_true(saw_auth and saw_delegation)
+
+
+def test_rest_load_table_response() raises:
+    """A `loadTable` body parses into a real TableMetadata."""
+    var idx = fixture_index()
+    var inner = read_file(current_metadata_path(idx, "ident_part"))
+    var body = (
+        '{"metadata-location":"s3://b/t/metadata/00003-x.metadata.json",'
+        '"metadata":' + inner + ','
+        '"config":{"s3.access-key-id":"AK"},'
+        '"storage-credentials":[{"prefix":"s3://b/t",'
+        '"config":{"s3.session-token":"tok"}}]}'
+    )
+    var r = LoadTableResult.parse(body)
+    assert_true(r.has_metadata_location)
+    assert_equal(r.metadata_location, "s3://b/t/metadata/00003-x.metadata.json")
+    assert_equal(r.metadata.format_version, 2)
+    assert_equal(len(r.metadata.snapshots), 3)
+    assert_equal(r.config["s3.access-key-id"], "AK")
+    assert_equal(len(r.storage_credentials), 1)
+    assert_equal(r.storage_credentials[0].prefix, "s3://b/t")
+    assert_equal(r.storage_credentials[0].config["s3.session-token"], "tok")
+    with assert_raises():
+        _ = LoadTableResult.parse('{"metadata-location":"x"}')
+
+
+def test_rest_list_responses() raises:
+    assert_equal(
+        len(
+            RestCatalogConfig.parse_namespaces(
+                '{"namespaces":[["accounting"],["tax","ny"]]}'
+            )
+        ),
+        2,
+    )
+    var ns = RestCatalogConfig.parse_namespaces(
+        '{"namespaces":[["accounting"],["tax","ny"]]}'
+    )
+    assert_equal(ns[1], "tax.ny")
+    var ts = RestCatalogConfig.parse_tables(
+        '{"identifiers":[{"namespace":["a"],"name":"t1"},'
+        '{"namespace":["a"],"name":"t2"}]}'
+    )
+    assert_equal(len(ts), 2)
+    assert_equal(ts[0], "t1")
 
 
 def main() raises:

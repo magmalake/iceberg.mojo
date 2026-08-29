@@ -37,6 +37,16 @@ jobs:
           manifest-path: iceberg.mojo/pixi.toml
           environments: ${{ matrix.env }}
 
-      - name: Unit tests
+      - name: Unit tests and CLI build
         working-directory: iceberg.mojo
-        run: pixi run -e ${{ matrix.env }} test
+        run: pixi run -e ${{ matrix.env }} check
+
+      - name: CLI smoke
+        working-directory: iceberg.mojo
+        run: |
+          ./build/iceberg-mojo describe tests/fixtures/ident_part
+          ./build/iceberg-mojo schema tests/fixtures/evolved
+          ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
+          ./build/iceberg-mojo files tests/fixtures/ident_part \
+            --filter '["=","region","eu"]' \
+            --rebase 'file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db=tests/fixtures'
