@@ -17,8 +17,8 @@ platforms = ["osx-arm64", "linux-64"]
 # ("Precompiled file ... version 1.0.0 is older than compiler version
 # 1.1.0.dev..."), so a package dependency cannot satisfy both environments.
 # Consumers of *this* tin do the same: `-I ../iceberg.mojo/src`.
-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo -I src -I ../hashes.mojo/src -o build/iceberg-test && ./build/iceberg-test" }
-cli = { cmd = "mkdir -p build && mojo build src/main.mojo -I src -I ../hashes.mojo/src -o build/iceberg-mojo" }
+test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo -I src -I ../hashes.mojo/src -I ../avro.mojo/src -o build/iceberg-test && ./build/iceberg-test" }
+cli = { cmd = "mkdir -p build && mojo build src/main.mojo -I src -I ../hashes.mojo/src -I ../avro.mojo/src -o build/iceberg-mojo" }
 fmt = { cmd = "mojo format src tests" }
 format-check = { cmd = "mojo format --check src tests" }
 

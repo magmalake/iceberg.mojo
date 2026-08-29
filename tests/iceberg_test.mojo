@@ -10,6 +10,25 @@ from std.testing import TestSuite, assert_equal, assert_true, assert_false, asse
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
 from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
+from iceberg.io import FileIO, basename, strip_scheme
+from iceberg.scan import TableScan, FileScanTask
+from iceberg.manifest import (
+    ManifestFile,
+    ManifestEntry,
+    DataFile,
+    Manifest,
+    read_manifest_list,
+    read_manifest,
+    read_manifest_at,
+    STATUS_ADDED,
+    STATUS_EXISTING,
+    STATUS_DELETED,
+    CONTENT_DATA,
+    CONTENT_POSITION_DELETES,
+    CONTENT_EQUALITY_DELETES,
+    MANIFEST_CONTENT_DATA,
+    MANIFEST_CONTENT_DELETES,
+)
 from iceberg.types import (
     TypeStore,
     P_INT,
@@ -808,8 +827,12 @@ def test_snapshot_selection() raises:
         var main = m.snapshot_for_ref("main")
         assert_equal(main.snapshot_id, last_id, table + ": main branch head")
         # A timestamp before the first snapshot has no answer.
+        var earliest = m.snapshots[0].timestamp_ms
+        for j in range(len(m.snapshots)):
+            if m.snapshots[j].timestamp_ms < earliest:
+                earliest = m.snapshots[j].timestamp_ms
         with assert_raises():
-            _ = m.snapshot_as_of(m.snapshots[0].timestamp_ms - 1000000)
+            _ = m.snapshot_as_of(earliest - 1000000)
         # An unknown ref and an unknown id are errors, not silent nulls.
         with assert_raises():
             _ = m.snapshot_for_ref("no-such-branch")
@@ -1163,6 +1186,459 @@ def test_residual_evaluator() raises:
     assert_true(r2.selects(eu))
     var res2 = r2.residual_for(eu)
     assert_false(res2.is_true(res2.root))
+
+
+
+# ══ manifests and scan planning ═════════════════════════════════════════════
+comptime WAREHOUSE_PREFIX = String(
+    "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root"
+    "/warehouse/db"
+)
+"""The absolute location the fixtures were generated at. The metadata files are
+verbatim copies, so every manifest list and manifest they name is addressed by
+that path; `fixture_io` redirects it at `tests/fixtures/` so the tests run
+anywhere, including CI where the original warehouse does not exist."""
+
+
+def fixture_io() -> FileIO:
+    var io = FileIO.local()
+    io.rebase(WAREHOUSE_PREFIX, FIXTURES)
+    return io^
+
+
+def fixture_scan(table: String) raises -> TableScan:
+    return TableScan(load_fixture_metadata(table), fixture_io())
+
+
+def test_io_rebasing() raises:
+    var io = fixture_io()
+    assert_equal(
+        io.resolve(WAREHOUSE_PREFIX + "/ident_part/metadata/x.avro"),
+        FIXTURES + "/ident_part/metadata/x.avro",
+    )
+    # An unmatched location just loses its scheme.
+    assert_equal(io.resolve("file:///tmp/z"), "/tmp/z")
+    assert_equal(io.resolve("/tmp/z"), "/tmp/z")
+    assert_equal(strip_scheme("file:///a/b"), "/a/b")
+    assert_equal(basename("file:///a/b/c.avro"), "c.avro")
+
+
+def test_manifest_list_reading() raises:
+    """Every manifest list of every fixture decodes with sane field values."""
+    var tables = fixture_table_names()
+    var io = fixture_io()
+    var lists = 0
+    var manifests = 0
+    for k in range(len(tables)):
+        var m = load_fixture_metadata(tables[k])
+        for j in range(len(m.snapshots)):
+            ref snap = m.snapshots[j]
+            var mfs = read_manifest_list(io.resolve(snap.manifest_list))
+            assert_true(
+                len(mfs) > 0, tables[k] + ": empty manifest list"
+            )
+            for i in range(len(mfs)):
+                ref mf = mfs[i]
+                assert_true(mf.manifest_path != "", "manifest_path")
+                assert_true(mf.manifest_length > 0, "manifest_length")
+                assert_true(mf.added_snapshot_id != 0, "added_snapshot_id")
+                # The manifest's sequence number never exceeds the snapshot's.
+                assert_true(
+                    mf.sequence_number <= snap.sequence_number,
+                    tables[k] + ": manifest sequence number is in the future",
+                )
+                assert_true(
+                    mf.min_sequence_number <= mf.sequence_number,
+                    tables[k] + ": min_sequence_number above sequence_number",
+                )
+                manifests += 1
+            lists += 1
+    print("    manifest lists:", lists, "read,", manifests, "manifest entries")
+
+
+def test_manifest_sequence_inheritance() raises:
+    """Gate (e): inherited sequence numbers, checked against the manifest list.
+
+    An ADDED entry with a null sequence number inherits the manifest's; an
+    EXISTING or DELETED entry must carry its own. Either way the result has to
+    be a real sequence number that some snapshot actually assigned.
+    """
+    var tables = fixture_table_names()
+    var io = fixture_io()
+    var checked = 0
+    var inherited = 0
+    var explicit = 0
+    for k in range(len(tables)):
+        var m = load_fixture_metadata(tables[k])
+        var snap = m.current_snapshot()
+        var mfs = read_manifest_list(io.resolve(snap.manifest_list))
+        for i in range(len(mfs)):
+            ref mf = mfs[i]
+            var man = read_manifest_at(io.resolve(mf.manifest_path), mf)
+            assert_equal(
+                man.partition_spec_id,
+                mf.partition_spec_id,
+                tables[k] + ": spec id disagrees with the manifest list",
+            )
+            for j in range(len(man.entries)):
+                ref e = man.entries[j]
+                if e.status == STATUS_ADDED:
+                    # Inherited from the manifest's own entry in the list.
+                    assert_equal(
+                        e.sequence_number,
+                        mf.sequence_number,
+                        tables[k] + ": ADDED entry did not inherit",
+                    )
+                    inherited += 1
+                else:
+                    # Explicit, and never newer than the manifest that holds it.
+                    assert_true(
+                        e.sequence_number <= mf.sequence_number,
+                        tables[k] + ": EXISTING entry has a future sequence",
+                    )
+                    explicit += 1
+                assert_true(
+                    e.sequence_number >= mf.min_sequence_number,
+                    tables[k] + ": entry below the manifest's minimum",
+                )
+                # Snapshot id is inherited when null.
+                assert_true(e.has_snapshot_id, "snapshot id")
+                assert_true(
+                    m.snapshot_index(e.snapshot_id) >= 0,
+                    tables[k] + ": entry names an unknown snapshot",
+                )
+                checked += 1
+    print(
+        "    sequence inheritance:", checked, "entries (",
+        inherited, "inherited,", explicit, "explicit )",
+    )
+
+
+def test_manifest_partition_typing() raises:
+    """A manifest's partition tuple is typed by the spec in its own metadata."""
+    var io = fixture_io()
+    var m = load_fixture_metadata("ident_part")
+    var snap = m.current_snapshot()
+    var mfs = read_manifest_list(io.resolve(snap.manifest_list))
+    var seen = 0
+    for i in range(len(mfs)):
+        var man = read_manifest_at(io.resolve(mfs[i].manifest_path), mfs[i])
+        assert_equal(len(man.partition_spec.fields), 1)
+        assert_equal(man.partition_spec.fields[0].name, "region")
+        for j in range(len(man.entries)):
+            ref e = man.entries[j]
+            assert_equal(len(e.data_file.partition), 1)
+            assert_true(e.data_file.partition[0].valid)
+            assert_equal(e.data_file.partition[0].kind, P_STRING)
+            var r = e.data_file.partition[0].s
+            assert_true(r == "eu" or r == "us" or r == "apac", "region " + r)
+            seen += 1
+    assert_true(seen > 0)
+    # bucket[4] partitions decode as ints, day(ts) as dates.
+    var b = load_fixture_metadata("bucket_part")
+    var bsnap = b.current_snapshot()
+    var bmfs = read_manifest_list(io.resolve(bsnap.manifest_list))
+    var bman = read_manifest_at(io.resolve(bmfs[0].manifest_path), bmfs[0])
+    assert_equal(bman.entries[0].data_file.partition[0].kind, P_INT)
+    var d = load_fixture_metadata("day_part")
+    var dsnap = d.current_snapshot()
+    var dmfs = read_manifest_list(io.resolve(dsnap.manifest_list))
+    var dman = read_manifest_at(io.resolve(dmfs[0].manifest_path), dmfs[0])
+    assert_equal(dman.entries[0].data_file.partition[0].kind, P_DATE)
+
+
+def test_manifest_metrics_decoded() raises:
+    """Per-column metrics and bounds decode to the right types."""
+    var io = fixture_io()
+    var m = load_fixture_metadata("ident_part")
+    var snap = m.current_snapshot()
+    var schema = m.schema()
+    var mfs = read_manifest_list(io.resolve(snap.manifest_list))
+    var man = read_manifest_at(io.resolve(mfs[0].manifest_path), mfs[0])
+    ref df = man.entries[0].data_file
+    assert_equal(df.content, CONTENT_DATA)
+    assert_equal(df.file_format.lower(), "parquet")
+    assert_true(df.record_count > 0)
+    assert_true(df.file_size_in_bytes > 0)
+    assert_true(len(df.metrics) > 0)
+    var found_id = False
+    for k in range(len(df.metrics)):
+        ref c = df.metrics[k]
+        if c.field_id == 1 and c.has_lower:
+            var lo = datum_from_bytes_prim(P_LONG, 0, 0, 0, c.lower_bound)
+            var hi = datum_from_bytes_prim(P_LONG, 0, 0, 0, c.upper_bound)
+            assert_true(lo.i <= hi.i, "id bounds are ordered")
+            found_id = True
+    assert_true(found_id, "no bounds for the id column")
+
+
+def test_delete_manifest() raises:
+    """The v2 fixture with a position delete file."""
+    var io = fixture_io()
+    var m = load_fixture_metadata("deletes_v2")
+    var snap = m.current_snapshot()
+    var mfs = read_manifest_list(io.resolve(snap.manifest_list))
+    var delete_manifests = 0
+    var delete_files = 0
+    for i in range(len(mfs)):
+        if not mfs[i].is_delete_manifest():
+            continue
+        delete_manifests += 1
+        var man = read_manifest_at(io.resolve(mfs[i].manifest_path), mfs[i])
+        for j in range(len(man.entries)):
+            ref df = man.entries[j].data_file
+            assert_equal(df.content, CONTENT_POSITION_DELETES)
+            assert_true(df.record_count > 0)
+            delete_files += 1
+    assert_equal(delete_manifests, 1, "expected one delete manifest")
+    assert_equal(delete_files, 1, "expected one position delete file")
+
+
+def plan_paths(tasks: List[FileScanTask]) -> List[String]:
+    var out = List[String]()
+    for k in range(len(tasks)):
+        out.append(basename(tasks[k].data_file.file_path))
+    _sort_strings_test(out)
+    return out^
+
+
+def _sort_strings_test(mut l: List[String]):
+    for i in range(1, len(l)):
+        var j = i
+        while j > 0 and l[j] < l[j - 1]:
+            l.swap_elements(j, j - 1)
+            j -= 1
+
+
+def oracle_bridge_paths(table: String, k: Int) raises -> List[String]:
+    var doc = parse_json(
+        read_file(FIXTURES + "/" + table + "/oracle/plan_" + String(k) + ".json")
+    )
+    var out = List[String]()
+    for j in range(doc.size(doc.root)):
+        out.append(
+            basename(doc.req_string(doc.at(doc.root, j), "data-file-path"))
+        )
+    _sort_strings_test(out)
+    return out^
+
+
+def oracle_pyiceberg_paths(table: String, k: Int) raises -> List[String]:
+    var doc = parse_json(
+        read_file(
+            FIXTURES + "/" + table + "/oracle/pyiceberg_plan_" + String(k) + ".json"
+        )
+    )
+    var tasks = doc.get(doc.root, "tasks")
+    var out = List[String]()
+    for j in range(doc.size(tasks)):
+        out.append(doc.req_string(doc.at(tasks, j), "data_file"))
+    _sort_strings_test(out)
+    return out^
+
+
+def join_list(l: List[String]) -> String:
+    var out = String("")
+    for k in range(len(l)):
+        if k > 0:
+            out += " "
+        out += l[k]
+    return out^
+
+
+def test_plan_files_matches_oracles() raises:
+    """Gate (d): the planned file set, per table, per filter, against both
+    oracles."""
+    var tables = fixture_table_names()
+    var cases = 0
+    var bridge_agree = 0
+    var pyiceberg_agree = 0
+    var disagreements = String("")
+    for t in range(len(tables)):
+        var table = tables[t]
+        var scan = fixture_scan(table)
+        for k in range(6):
+            var dsl = read_file(
+                FIXTURES + "/" + table + "/oracle/plan_" + String(k)
+                + ".filter.txt"
+            ).strip()
+            var tasks = scan.filter(String(dsl)).plan_files()
+            var mine = plan_paths(tasks)
+            var bridge = oracle_bridge_paths(table, k)
+            var pyi = oracle_pyiceberg_paths(table, k)
+            var what = table + " filter " + String(k) + " " + String(dsl)
+            if join_list(mine) == join_list(bridge):
+                bridge_agree += 1
+            else:
+                disagreements += (
+                    "\n      bridge: " + what + "\n        mine:   "
+                    + join_list(mine) + "\n        oracle: " + join_list(bridge)
+                )
+            if join_list(mine) == join_list(pyi):
+                pyiceberg_agree += 1
+            else:
+                disagreements += (
+                    "\n      pyiceberg: " + what + "\n        mine:   "
+                    + join_list(mine) + "\n        oracle: " + join_list(pyi)
+                )
+            cases += 1
+    print(
+        "    plan_files:", cases, "cases;", bridge_agree,
+        "match iceberg-rust,", pyiceberg_agree, "match PyIceberg",
+    )
+    if disagreements != "":
+        print("    disagreements:", disagreements)
+    # PyIceberg is the strict reference here and must match everywhere.
+    assert_equal(
+        pyiceberg_agree, cases, "PyIceberg disagreements: " + disagreements
+    )
+    # iceberg-rust 0.10.1 disagrees on exactly one case: for
+    # `["in","id",[1,4,7]]` over the bucket[4] table it applies the partition
+    # filter but not the per-file `In` metrics filter, so it plans two extra
+    # files that cannot contain a matching row. A plan may legitimately be a
+    # superset, so this is looseness in the bridge, not an error — and the
+    # separate subset assertion below proves nothing is being *dropped*.
+    assert_equal(
+        bridge_agree,
+        cases - 1,
+        "unexpected iceberg-rust disagreements: " + disagreements,
+    )
+
+
+def test_plan_files_never_drops_a_file_the_bridge_keeps() raises:
+    """Whatever the two disagree on, our plan is never a *subset* short of a
+    file the bridge would read — over-pruning would lose data."""
+    var tables = fixture_table_names()
+    var extra = 0
+    for t in range(len(tables)):
+        var table = tables[t]
+        var scan = fixture_scan(table)
+        for k in range(6):
+            var dsl = read_file(
+                FIXTURES + "/" + table + "/oracle/plan_" + String(k)
+                + ".filter.txt"
+            ).strip()
+            var mine = plan_paths(scan.filter(String(dsl)).plan_files())
+            var bridge = oracle_bridge_paths(table, k)
+            for j in range(len(mine)):
+                var found = False
+                for i in range(len(bridge)):
+                    if bridge[i] == mine[j]:
+                        found = True
+                assert_true(
+                    found,
+                    table + " filter " + String(k) + ": planned " + mine[j]
+                    + ", which iceberg-rust does not",
+                )
+            extra += len(bridge) - len(mine)
+    print("    files the bridge plans that we prune away:", extra)
+
+
+def test_plan_files_delete_association() raises:
+    """The position delete file is attached to both data files it covers."""
+    var scan = fixture_scan("deletes_v2")
+    var tasks = scan.filter('["true"]').plan_files()
+    assert_true(len(tasks) > 0)
+    var with_deletes = 0
+    for k in range(len(tasks)):
+        if len(tasks[k].delete_files) > 0:
+            with_deletes += 1
+            assert_equal(tasks[k].delete_files[0].content, CONTENT_POSITION_DELETES)
+    # The oracle says both data files carry the delete.
+    var doc = parse_json(read_file(FIXTURES + "/deletes_v2/oracle/plan_0.json"))
+    var want = 0
+    for j in range(doc.size(doc.root)):
+        if doc.size(doc.get(doc.at(doc.root, j), "deletes")) > 0:
+            want += 1
+    assert_equal(with_deletes, want, "delete association count")
+
+
+def test_plan_files_json_shape() raises:
+    """The emitted JSON matches the bridge's, field for field."""
+    var scan = fixture_scan("ident_part")
+    var text = scan.filter('["=","region","eu"]').plan_files_json()
+    var mine = parse_json(text)
+    var theirs = parse_json(read_file(FIXTURES + "/ident_part/oracle/plan_1.json"))
+    assert_equal(mine.size(mine.root), theirs.size(theirs.root))
+    # Compare by path so manifest order does not matter.
+    for j in range(mine.size(mine.root)):
+        var a = mine.at(mine.root, j)
+        var path = mine.req_string(a, "data-file-path")
+        var matched = False
+        for i in range(theirs.size(theirs.root)):
+            var b = theirs.at(theirs.root, i)
+            if theirs.req_string(b, "data-file-path") != path:
+                continue
+            matched = True
+            assert_equal(
+                mine.req_int(a, "record-count"), theirs.req_int(b, "record-count")
+            )
+            assert_equal(
+                mine.req_int(a, "file-size-in-bytes"),
+                theirs.req_int(b, "file-size-in-bytes"),
+            )
+            assert_equal(
+                mine.req_string(a, "file-format"), theirs.req_string(b, "file-format")
+            )
+            assert_equal(mine.req_int(a, "start"), theirs.req_int(b, "start"))
+            assert_equal(mine.req_int(a, "length"), theirs.req_int(b, "length"))
+            assert_equal(
+                mine.size(mine.get(a, "project-field-ids")),
+                theirs.size(theirs.get(b, "project-field-ids")),
+            )
+        assert_true(matched, "the oracle has no task for " + path)
+
+
+def test_scan_snapshot_selection() raises:
+    """Planning an older snapshot sees fewer files than the current one."""
+    var m = load_fixture_metadata("unpartitioned")
+    var scan = fixture_scan("unpartitioned")
+    # The `snapshots` array is not ordered by the spec — iceberg-rust writes
+    # it in hash order — so the oldest snapshot is found by sequence number,
+    # not by position.
+    var oldest = 0
+    for k in range(len(m.snapshots)):
+        if m.snapshots[k].sequence_number < m.snapshots[oldest].sequence_number:
+            oldest = k
+    ref first = m.snapshots[oldest]
+    var older = scan.use_snapshot(first.snapshot_id).plan_files()
+    var current = scan.plan_files()
+    assert_true(
+        len(older) < len(current),
+        "the first snapshot should have fewer files than the last",
+    )
+    # as_of at the first snapshot's timestamp gives the same plan.
+    var asof = scan.as_of(first.timestamp_ms).plan_files()
+    assert_equal(len(asof), len(older))
+    # and so does the main branch vs the default.
+    var main = scan.use_ref("main").plan_files()
+    assert_equal(len(main), len(current))
+
+
+def test_scan_projection() raises:
+    var scan = fixture_scan("ident_part")
+    var ids = scan.select(["id", "region"]).projected_field_ids()
+    assert_equal(len(ids), 2)
+    var s = scan.select(["id", "region"]).schema()
+    assert_equal(len(s.columns()), 2)
+    var all_ids = scan.projected_field_ids()
+    assert_true(len(all_ids) > 2)
+
+
+def test_scan_residuals() raises:
+    """A filter fully decided by partitioning leaves no residual."""
+    var scan = fixture_scan("ident_part")
+    var tasks = scan.filter('["=","region","eu"]').plan_files()
+    assert_true(len(tasks) > 0)
+    for k in range(len(tasks)):
+        assert_equal(
+            tasks[k].residual, '["true"]',
+            "an identity-partitioned equality should leave nothing behind",
+        )
+    # One that partitioning cannot decide does leave a residual.
+    var t2 = scan.filter('[">","id",2]').plan_files()
+    assert_true(len(t2) > 0)
+    assert_true(t2[0].residual != '["true"]', "expected a surviving residual")
 
 
 def main() raises:

@@ -794,9 +794,10 @@ def _range_matches(
             return ROWS_CANNOT_MATCH
         return ROWS_MIGHT_MATCH
     if op == OP_NOT_EQ:
-        # Only excludable when every value is that one value.
-        if compare(lo, hi) == 0 and compare(lo, lits[0]) == 0:
-            return ROWS_CANNOT_MATCH
+        # Never prunes. A bound is not necessarily a value that occurs in the
+        # file — string upper bounds in particular are rounded *up* — so
+        # `lower == upper == X` does not prove every value is X. Both reference
+        # implementations return "might match" here for the same reason.
         return ROWS_MIGHT_MATCH
     if op == OP_IN:
         for k in range(len(lits)):
@@ -804,10 +805,7 @@ def _range_matches(
                 return ROWS_MIGHT_MATCH
         return ROWS_CANNOT_MATCH
     if op == OP_NOT_IN:
-        if compare(lo, hi) == 0:
-            for k in range(len(lits)):
-                if compare(lo, lits[k]) == 0:
-                    return ROWS_CANNOT_MATCH
+        # Same reasoning as `!=`: bounds cannot rule a value *in*.
         return ROWS_MIGHT_MATCH
     if op == OP_STARTS_WITH:
         if lo.kind != P_STRING or lits[0].kind != P_STRING:

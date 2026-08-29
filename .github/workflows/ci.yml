@@ -16,7 +16,8 @@ jobs:
         env: [default, stable]
     steps:
       # This repo consumes sibling magmalake tins by source path
-      # (`-I ../hashes.mojo/src`), so CI has to lay the siblings out next to it.
+      # (`-I ../hashes.mojo/src`, `-I ../avro.mojo/src`), so CI has to lay the
+      # siblings out next to it.
       - uses: actions/checkout@v4
         with:
           path: iceberg.mojo
@@ -25,6 +26,11 @@ jobs:
         with:
           repository: magmalake/hashes.mojo
           path: hashes.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/avro.mojo
+          path: avro.mojo
 
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:

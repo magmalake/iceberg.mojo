@@ -48,7 +48,9 @@ struct Schema(Copyable, Movable):
 
     def _index(mut self):
         var flat = List[AccessorField]()
-        self._walk_struct(self.root, "", flat)
+        # `root < 0` is the empty schema a manifest without a `schema` key gets.
+        if self.root >= 0:
+            self._walk_struct(self.root, "", flat)
         self.flat = flat^
 
     def _walk_struct(self, node: Int, prefix: String, mut out: List[AccessorField]):
