@@ -1,0 +1,1853 @@
+[
+ {
+  "transform": "bucket[4]",
+  "type": "int",
+  "input": 34,
+  "input_int": 34,
+  "output": 3,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "long",
+  "input": 34,
+  "input_int": 34,
+  "output": 3,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": 3,
+  "hash": -500754589
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 2,
+  "hash": -653330422
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "time",
+  "input": "22:31:08",
+  "input_int": 81068000000,
+  "output": 3,
+  "hash": -662762989
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 3,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "timestamptz",
+  "input": "2017-11-16T14:31:08-08:00",
+  "input_int": 1510871468000000,
+  "output": 3,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": 1,
+  "hash": 1210000089
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "uuid",
+  "input": "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+  "input_int": null,
+  "output": 0,
+  "hash": 1488055340
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "fixed[4]",
+  "input": "00010203",
+  "input_int": null,
+  "output": 1,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "binary",
+  "input": "00010203",
+  "input_int": null,
+  "output": 1,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "int",
+  "input": 34,
+  "input_int": 34,
+  "output": 3,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "long",
+  "input": 34,
+  "input_int": 34,
+  "output": 3,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": 3,
+  "hash": -500754589
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 10,
+  "hash": -653330422
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "time",
+  "input": "22:31:08",
+  "input_int": 81068000000,
+  "output": 3,
+  "hash": -662762989
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 7,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "timestamptz",
+  "input": "2017-11-16T14:31:08-08:00",
+  "input_int": 1510871468000000,
+  "output": 7,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": 9,
+  "hash": 1210000089
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "uuid",
+  "input": "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+  "input_int": null,
+  "output": 12,
+  "hash": 1488055340
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "fixed[4]",
+  "input": "00010203",
+  "input_int": null,
+  "output": 9,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "binary",
+  "input": "00010203",
+  "input_int": null,
+  "output": 9,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "int",
+  "input": 34,
+  "input_int": 34,
+  "output": 79,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "long",
+  "input": 34,
+  "input_int": 34,
+  "output": 79,
+  "hash": 2017239379
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": 59,
+  "hash": -500754589
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 26,
+  "hash": -653330422
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "time",
+  "input": "22:31:08",
+  "input_int": 81068000000,
+  "output": 59,
+  "hash": -662762989
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 7,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "timestamptz",
+  "input": "2017-11-16T14:31:08-08:00",
+  "input_int": 1510871468000000,
+  "output": 7,
+  "hash": -2047944441
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": 89,
+  "hash": 1210000089
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "uuid",
+  "input": "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+  "input_int": null,
+  "output": 40,
+  "hash": 1488055340
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "fixed[4]",
+  "input": "00010203",
+  "input_int": null,
+  "output": 41,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[100]",
+  "type": "binary",
+  "input": "00010203",
+  "input_int": null,
+  "output": 41,
+  "hash": -188683207
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "int",
+  "input": 0,
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "int",
+  "input": 0,
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "int",
+  "input": -1,
+  "input_int": -1,
+  "output": 0,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "int",
+  "input": -1,
+  "input_int": -1,
+  "output": 8,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "int",
+  "input": 2147483647,
+  "input_int": 2147483647,
+  "output": 2,
+  "hash": 1819228606
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "int",
+  "input": 2147483647,
+  "input_int": 2147483647,
+  "output": 14,
+  "hash": 1819228606
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "int",
+  "input": -2147483648,
+  "input_int": -2147483648,
+  "output": 0,
+  "hash": -2073034792
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "int",
+  "input": -2147483648,
+  "input_int": -2147483648,
+  "output": 8,
+  "hash": -2073034792
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "long",
+  "input": 0,
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "long",
+  "input": 0,
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "long",
+  "input": -1,
+  "input_int": -1,
+  "output": 0,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "long",
+  "input": -1,
+  "input_int": -1,
+  "output": 8,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "long",
+  "input": 9223372036854775807,
+  "input_int": 9223372036854775807,
+  "output": 3,
+  "hash": -2106506049
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "long",
+  "input": 9223372036854775807,
+  "input_int": 9223372036854775807,
+  "output": 15,
+  "hash": -2106506049
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "long",
+  "input": -9223372036854775808,
+  "input_int": -9223372036854775808,
+  "output": 1,
+  "hash": 1366273829
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "long",
+  "input": -9223372036854775808,
+  "input_int": -9223372036854775808,
+  "output": 5,
+  "hash": 1366273829
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "string",
+  "input": "",
+  "input_int": null,
+  "output": 0,
+  "hash": 0
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "string",
+  "input": "",
+  "input_int": null,
+  "output": 0,
+  "hash": 0
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "string",
+  "input": "a",
+  "input_int": null,
+  "output": 2,
+  "hash": 1009084850
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "string",
+  "input": "a",
+  "input_int": null,
+  "output": 2,
+  "hash": 1009084850
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": 2,
+  "hash": 1458310230
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": 6,
+  "hash": 1458310230
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "string",
+  "input": "\ud83d\ude00\ud83d\ude03",
+  "input_int": null,
+  "output": 1,
+  "hash": -1441669731
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "string",
+  "input": "\ud83d\ude00\ud83d\ude03",
+  "input_int": null,
+  "output": 13,
+  "hash": -1441669731
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "date",
+  "input": "1970-01-01",
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "date",
+  "input": "1970-01-01",
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": 0,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": 8,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "date",
+  "input": "1969-01-01",
+  "input_int": -365,
+  "output": 2,
+  "hash": 1923059926
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "date",
+  "input": "1969-01-01",
+  "input_int": -365,
+  "output": 6,
+  "hash": 1923059926
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "time",
+  "input": "00:00:00",
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "time",
+  "input": "00:00:00",
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "time",
+  "input": "23:59:59.999999",
+  "input_int": 86399999999,
+  "output": 0,
+  "hash": -506454392
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "time",
+  "input": "23:59:59.999999",
+  "input_int": 86399999999,
+  "output": 8,
+  "hash": -506454392
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": 0,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": 8,
+  "hash": 1651860712
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 0,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 12,
+  "hash": 1669671676
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "decimal(9,2)",
+  "input": "-14.20",
+  "input_int": -1420,
+  "output": 3,
+  "hash": 667775751
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "decimal(9,2)",
+  "input": "-14.20",
+  "input_int": -1420,
+  "output": 7,
+  "hash": 667775751
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "decimal(9,2)",
+  "input": "0.00",
+  "input_int": 0,
+  "output": 3,
+  "hash": 1364076727
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "decimal(9,2)",
+  "input": "0.00",
+  "input_int": 0,
+  "output": 7,
+  "hash": 1364076727
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "decimal(38,10)",
+  "input": "12345678901234567890.1234567890",
+  "input_int": 123456789012345678901234567890,
+  "output": 2,
+  "hash": -1339810698
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "decimal(38,10)",
+  "input": "12345678901234567890.1234567890",
+  "input_int": 123456789012345678901234567890,
+  "output": 6,
+  "hash": -1339810698
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "binary",
+  "input": "",
+  "input_int": null,
+  "output": 0,
+  "hash": 0
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "binary",
+  "input": "",
+  "input_int": null,
+  "output": 0,
+  "hash": 0
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "binary",
+  "input": "fffe",
+  "input_int": null,
+  "output": 0,
+  "hash": -1765250992
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "binary",
+  "input": "fffe",
+  "input_int": null,
+  "output": 0,
+  "hash": -1765250992
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "fixed[4]",
+  "input": "ffffffff",
+  "input_int": null,
+  "output": 0,
+  "hash": 1982413648
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "fixed[4]",
+  "input": "ffffffff",
+  "input_int": null,
+  "output": 0,
+  "hash": 1982413648
+ },
+ {
+  "transform": "bucket[4]",
+  "type": "uuid",
+  "input": "00000000-0000-0000-0000-000000000000",
+  "input_int": null,
+  "output": 0,
+  "hash": -2127245832
+ },
+ {
+  "transform": "bucket[16]",
+  "type": "uuid",
+  "input": "00000000-0000-0000-0000-000000000000",
+  "input_int": null,
+  "output": 8,
+  "hash": -2127245832
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": 1,
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": -1,
+  "input_int": -1,
+  "output": -10
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": 1,
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": -1,
+  "input_int": -1,
+  "output": -10
+ },
+ {
+  "transform": "truncate[50]",
+  "type": "decimal(9,2)",
+  "input": "10.65",
+  "input_int": 1065,
+  "output": "10.50"
+ },
+ {
+  "transform": "truncate[3]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": "ice"
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": 0,
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": 9,
+  "input_int": 9,
+  "output": 0
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": 10,
+  "input_int": 10,
+  "output": 10
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": 11,
+  "input_int": 11,
+  "output": 10
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": -10,
+  "input_int": -10,
+  "output": -10
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": -11,
+  "input_int": -11,
+  "output": -20
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "int",
+  "input": -2147483648,
+  "input_int": -2147483648,
+  "output": -2147483650
+ },
+ {
+  "transform": "truncate[7]",
+  "type": "int",
+  "input": 2147483647,
+  "input_int": 2147483647,
+  "output": 2147483646
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": -9223372036854775808,
+  "input_int": -9223372036854775808,
+  "output": -9223372036854775810
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": 9223372036854775807,
+  "input_int": 9223372036854775807,
+  "output": 9223372036854775800
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": -100,
+  "input_int": -100,
+  "output": -100
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "long",
+  "input": -101,
+  "input_int": -101,
+  "output": -110
+ },
+ {
+  "transform": "truncate[5]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": "icebe"
+ },
+ {
+  "transform": "truncate[10]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": "iceberg"
+ },
+ {
+  "transform": "truncate[1]",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": "i"
+ },
+ {
+  "transform": "truncate[5]",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": "\u0438\u0437\u043c\u0435\u0440"
+ },
+ {
+  "transform": "truncate[3]",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": "\u0438\u0437\u043c"
+ },
+ {
+  "transform": "truncate[20]",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435"
+ },
+ {
+  "transform": "truncate[3]",
+  "type": "string",
+  "input": "\ud83d\ude00\ud83d\ude03\ud83d\ude04\ud83d\ude01\ud83d\ude06",
+  "input_int": null,
+  "output": "\ud83d\ude00\ud83d\ude03\ud83d\ude04"
+ },
+ {
+  "transform": "truncate[1]",
+  "type": "string",
+  "input": "\ud83d\ude00\ud83d\ude03",
+  "input_int": null,
+  "output": "\ud83d\ude00"
+ },
+ {
+  "transform": "truncate[2]",
+  "type": "string",
+  "input": "a\u00e9\u4e2d\ud83d\ude00",
+  "input_int": null,
+  "output": "a\u00e9"
+ },
+ {
+  "transform": "truncate[4]",
+  "type": "string",
+  "input": "a\u00e9\u4e2d\ud83d\ude00",
+  "input_int": null,
+  "output": "a\u00e9\u4e2d\ud83d\ude00"
+ },
+ {
+  "transform": "truncate[3]",
+  "type": "string",
+  "input": "",
+  "input_int": null,
+  "output": ""
+ },
+ {
+  "transform": "truncate[2]",
+  "type": "binary",
+  "input": "01020304",
+  "input_int": null,
+  "output": "0102"
+ },
+ {
+  "transform": "truncate[4]",
+  "type": "binary",
+  "input": "0102",
+  "input_int": null,
+  "output": "0102"
+ },
+ {
+  "transform": "truncate[1]",
+  "type": "binary",
+  "input": "ff00ff",
+  "input_int": null,
+  "output": "ff"
+ },
+ {
+  "transform": "truncate[50]",
+  "type": "decimal(9,2)",
+  "input": "-10.65",
+  "input_int": -1065,
+  "output": "-11.00"
+ },
+ {
+  "transform": "truncate[50]",
+  "type": "decimal(9,2)",
+  "input": "0.00",
+  "input_int": 0,
+  "output": "0.00"
+ },
+ {
+  "transform": "truncate[100]",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": "14.00"
+ },
+ {
+  "transform": "truncate[100]",
+  "type": "decimal(9,2)",
+  "input": "-14.20",
+  "input_int": -1420,
+  "output": "-15.00"
+ },
+ {
+  "transform": "truncate[1000]",
+  "type": "decimal(38,10)",
+  "input": "12345.6789012345",
+  "input_int": 123456789012345,
+  "output": "12345.6789012000"
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1970-01-01",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1970-01-01",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1970-01-01",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1970-01-02",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1970-01-02",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1970-01-02",
+  "input_int": 1,
+  "output": 1
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1969-12-01",
+  "input_int": -31,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1969-12-01",
+  "input_int": -31,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1969-12-01",
+  "input_int": -31,
+  "output": -31
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1969-01-01",
+  "input_int": -365,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1969-01-01",
+  "input_int": -365,
+  "output": -12
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1969-01-01",
+  "input_int": -365,
+  "output": -365
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1968-12-31",
+  "input_int": -366,
+  "output": -2
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1968-12-31",
+  "input_int": -366,
+  "output": -13
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1968-12-31",
+  "input_int": -366,
+  "output": -366
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "1971-01-01",
+  "input_int": 365,
+  "output": 1
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "1971-01-01",
+  "input_int": 365,
+  "output": 12
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "1971-01-01",
+  "input_int": 365,
+  "output": 365
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 47
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 574
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": 17486
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "2023-11-14",
+  "input_int": 19675,
+  "output": 53
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "2023-11-14",
+  "input_int": 19675,
+  "output": 646
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "2023-11-14",
+  "input_int": 19675,
+  "output": 19675
+ },
+ {
+  "transform": "year",
+  "type": "date",
+  "input": "2024-02-29",
+  "input_int": 19782,
+  "output": 54
+ },
+ {
+  "transform": "month",
+  "type": "date",
+  "input": "2024-02-29",
+  "input_int": 19782,
+  "output": 649
+ },
+ {
+  "transform": "day",
+  "type": "date",
+  "input": "2024-02-29",
+  "input_int": 19782,
+  "output": 19782
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00.000001",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00.000001",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00.000001",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1970-01-01T00:00:00.000001",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1970-01-01T01:00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1970-01-01T01:00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1970-01-01T01:00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1970-01-01T01:00:00",
+  "input_int": 3600000000,
+  "output": 1
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1969-12-31T23:59:59.999999",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1969-12-31T23:00:00",
+  "input_int": -3600000000,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1969-12-31T23:00:00",
+  "input_int": -3600000000,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1969-12-31T23:00:00",
+  "input_int": -3600000000,
+  "output": -1
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1969-12-31T23:00:00",
+  "input_int": -3600000000,
+  "output": -1
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1969-12-31T00:00:00",
+  "input_int": -86400000000,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1969-12-31T00:00:00",
+  "input_int": -86400000000,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1969-12-31T00:00:00",
+  "input_int": -86400000000,
+  "output": -1
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1969-12-31T00:00:00",
+  "input_int": -86400000000,
+  "output": -24
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1969-12-01T00:00:00",
+  "input_int": -2678400000000,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1969-12-01T00:00:00",
+  "input_int": -2678400000000,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1969-12-01T00:00:00",
+  "input_int": -2678400000000,
+  "output": -31
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1969-12-01T00:00:00",
+  "input_int": -2678400000000,
+  "output": -744
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1969-01-01T00:00:00",
+  "input_int": -31536000000000,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1969-01-01T00:00:00",
+  "input_int": -31536000000000,
+  "output": -12
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1969-01-01T00:00:00",
+  "input_int": -31536000000000,
+  "output": -365
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1969-01-01T00:00:00",
+  "input_int": -31536000000000,
+  "output": -8760
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "1968-12-31T23:59:59.999999",
+  "input_int": -31536000000001,
+  "output": -2
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "1968-12-31T23:59:59.999999",
+  "input_int": -31536000000001,
+  "output": -13
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "1968-12-31T23:59:59.999999",
+  "input_int": -31536000000001,
+  "output": -366
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "1968-12-31T23:59:59.999999",
+  "input_int": -31536000000001,
+  "output": -8761
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 47
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 574
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 17486
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": 419686
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "2023-11-14T00:00:00",
+  "input_int": 1699920000000000,
+  "output": 53
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "2023-11-14T00:00:00",
+  "input_int": 1699920000000000,
+  "output": 646
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "2023-11-14T00:00:00",
+  "input_int": 1699920000000000,
+  "output": 19675
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "2023-11-14T00:00:00",
+  "input_int": 1699920000000000,
+  "output": 472200
+ },
+ {
+  "transform": "year",
+  "type": "timestamp",
+  "input": "2023-12-01T00:00:00",
+  "input_int": 1701388800000000,
+  "output": 53
+ },
+ {
+  "transform": "month",
+  "type": "timestamp",
+  "input": "2023-12-01T00:00:00",
+  "input_int": 1701388800000000,
+  "output": 647
+ },
+ {
+  "transform": "day",
+  "type": "timestamp",
+  "input": "2023-12-01T00:00:00",
+  "input_int": 1701388800000000,
+  "output": 19692
+ },
+ {
+  "transform": "hour",
+  "type": "timestamp",
+  "input": "2023-12-01T00:00:00",
+  "input_int": 1701388800000000,
+  "output": 472608
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00+00:00",
+  "input_int": 0,
+  "output": 0
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00.000001+00:00",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00.000001+00:00",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00.000001+00:00",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "1970-01-01T00:00:00.000001+00:00",
+  "input_int": 1,
+  "output": 0
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "1970-01-01T01:00:00+00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "1970-01-01T01:00:00+00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "1970-01-01T01:00:00+00:00",
+  "input_int": 3600000000,
+  "output": 0
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "1970-01-01T01:00:00+00:00",
+  "input_int": 3600000000,
+  "output": 1
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "1969-12-31T23:59:59.999999+00:00",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "1969-12-31T23:59:59.999999+00:00",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "1969-12-31T23:59:59.999999+00:00",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "1969-12-31T23:59:59.999999+00:00",
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "2023-11-14T00:00:00+00:00",
+  "input_int": 1699920000000000,
+  "output": 53
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "2023-11-14T00:00:00+00:00",
+  "input_int": 1699920000000000,
+  "output": 646
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "2023-11-14T00:00:00+00:00",
+  "input_int": 1699920000000000,
+  "output": 19675
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "2023-11-14T00:00:00+00:00",
+  "input_int": 1699920000000000,
+  "output": 472200
+ },
+ {
+  "transform": "year",
+  "type": "timestamptz",
+  "input": "2023-12-01T00:00:00+00:00",
+  "input_int": 1701388800000000,
+  "output": 53
+ },
+ {
+  "transform": "month",
+  "type": "timestamptz",
+  "input": "2023-12-01T00:00:00+00:00",
+  "input_int": 1701388800000000,
+  "output": 647
+ },
+ {
+  "transform": "day",
+  "type": "timestamptz",
+  "input": "2023-12-01T00:00:00+00:00",
+  "input_int": 1701388800000000,
+  "output": 19692
+ },
+ {
+  "transform": "hour",
+  "type": "timestamptz",
+  "input": "2023-12-01T00:00:00+00:00",
+  "input_int": 1701388800000000,
+  "output": 472608
+ },
+ {
+  "transform": "identity",
+  "type": "int",
+  "input": 34,
+  "input_int": 34,
+  "output": 34
+ },
+ {
+  "transform": "void",
+  "type": "int",
+  "input": 34,
+  "input_int": 34,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "int",
+  "input": -1,
+  "input_int": -1,
+  "output": -1
+ },
+ {
+  "transform": "void",
+  "type": "int",
+  "input": -1,
+  "input_int": -1,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "long",
+  "input": 9223372036854775807,
+  "input_int": 9223372036854775807,
+  "output": 9223372036854775807
+ },
+ {
+  "transform": "void",
+  "type": "long",
+  "input": 9223372036854775807,
+  "input_int": 9223372036854775807,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": "iceberg"
+ },
+ {
+  "transform": "void",
+  "type": "string",
+  "input": "iceberg",
+  "input_int": null,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435"
+ },
+ {
+  "transform": "void",
+  "type": "string",
+  "input": "\u0438\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0435",
+  "input_int": null,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": "2017-11-16"
+ },
+ {
+  "transform": "void",
+  "type": "date",
+  "input": "2017-11-16",
+  "input_int": 17486,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": "1969-12-31"
+ },
+ {
+  "transform": "void",
+  "type": "date",
+  "input": "1969-12-31",
+  "input_int": -1,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "time",
+  "input": "22:31:08",
+  "input_int": 81068000000,
+  "output": "22:31:08"
+ },
+ {
+  "transform": "void",
+  "type": "time",
+  "input": "22:31:08",
+  "input_int": 81068000000,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": "2017-11-16T22:31:08"
+ },
+ {
+  "transform": "void",
+  "type": "timestamp",
+  "input": "2017-11-16T22:31:08",
+  "input_int": 1510871468000000,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": "14.20"
+ },
+ {
+  "transform": "void",
+  "type": "decimal(9,2)",
+  "input": "14.20",
+  "input_int": 1420,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "binary",
+  "input": "00010203",
+  "input_int": null,
+  "output": "00010203"
+ },
+ {
+  "transform": "void",
+  "type": "binary",
+  "input": "00010203",
+  "input_int": null,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "fixed[4]",
+  "input": "00010203",
+  "input_int": null,
+  "output": "00010203"
+ },
+ {
+  "transform": "void",
+  "type": "fixed[4]",
+  "input": "00010203",
+  "input_int": null,
+  "output": null
+ },
+ {
+  "transform": "identity",
+  "type": "uuid",
+  "input": "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+  "input_int": null,
+  "output": "f79c3e09-677c-4bbd-a479-3f349cb785e7"
+ },
+ {
+  "transform": "void",
+  "type": "uuid",
+  "input": "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+  "input_int": null,
+  "output": null
+ }
+]
