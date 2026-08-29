@@ -66,7 +66,7 @@ def gunzip(data: List[UInt8]) raises -> List[UInt8]:
 def read_metadata_file(io: FileIO, location: String) raises -> TableMetadata:
     """Read one metadata file, transparently un-gzipping a `*.gz.metadata.json`.
     """
-    var text = String("")
+    var text: String
     if location.endswith(".gz") or location.endswith(GZ_METADATA_SUFFIX):
         var raw = io.read_all(location)
         var plain = gunzip(raw)
