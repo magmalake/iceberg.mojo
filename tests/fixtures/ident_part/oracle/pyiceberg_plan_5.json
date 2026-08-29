@@ -1,0 +1,15 @@
+{
+  "filter": "[\"starts-with\",\"region\",\"e\"]",
+  "tasks": [
+    {
+      "data_file": "iceberg-rs-mojo-00000-93556797-f94d-4048-8435-1c46fe0e0bfa.parquet",
+      "record_count": 2,
+      "delete_files": []
+    },
+    {
+      "data_file": "iceberg-rs-mojo-00001-95713f98-eb48-4b88-9c91-ad82e5011d87.parquet",
+      "record_count": 1,
+      "delete_files": []
+    }
+  ]
+}

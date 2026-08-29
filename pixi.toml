@@ -10,13 +10,15 @@ channels = [
 ]
 platforms = ["osx-arm64", "linux-64"]
 
-[dependencies]
-hashes-mojo = { path = "../hashes.mojo" }
-
 [tasks]
-# Pure Mojo, no FFI — consumers just `-I ../iceberg.mojo/src`.
-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo -I src -o build/iceberg-test && ./build/iceberg-test" }
-cli = { cmd = "mkdir -p build && mojo build src/main.mojo -I src -o build/iceberg-mojo" }
+# Pure Mojo, no FFI. hashes.mojo is consumed by *source path*, not as a pixi
+# package: pixi-build-mojo emits a precompiled `.mojopkg`/`.mojoc` built with
+# mojo-compiler 1.0.0, and the nightly compiler rejects those outright
+# ("Precompiled file ... version 1.0.0 is older than compiler version
+# 1.1.0.dev..."), so a package dependency cannot satisfy both environments.
+# Consumers of *this* tin do the same: `-I ../iceberg.mojo/src`.
+test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo -I src -I ../hashes.mojo/src -o build/iceberg-test && ./build/iceberg-test" }
+cli = { cmd = "mkdir -p build && mojo build src/main.mojo -I src -I ../hashes.mojo/src -o build/iceberg-mojo" }
 fmt = { cmd = "mojo format src tests" }
 format-check = { cmd = "mojo format --check src tests" }
 

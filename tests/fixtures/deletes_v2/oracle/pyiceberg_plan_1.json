@@ -1,0 +1,19 @@
+{
+  "filter": "[\"=\",\"region\",\"eu\"]",
+  "tasks": [
+    {
+      "data_file": "00000-0-cca24d08-3353-4c14-ae6c-c6761dc4aa8f.parquet",
+      "record_count": 2,
+      "delete_files": [
+        "00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet"
+      ]
+    },
+    {
+      "data_file": "00000-0-e5032a16-8d2c-4d85-af76-4848cc2aa9de.parquet",
+      "record_count": 3,
+      "delete_files": [
+        "00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet"
+      ]
+    }
+  ]
+}

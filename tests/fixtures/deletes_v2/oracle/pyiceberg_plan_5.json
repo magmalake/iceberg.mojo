@@ -1,0 +1,12 @@
+{
+  "filter": "[\"is-null\",\"amount\"]",
+  "tasks": [
+    {
+      "data_file": "00000-0-e5032a16-8d2c-4d85-af76-4848cc2aa9de.parquet",
+      "record_count": 3,
+      "delete_files": [
+        "00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet"
+      ]
+    }
+  ]
+}

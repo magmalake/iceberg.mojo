@@ -98,10 +98,16 @@ def make_evolved():
         )
     )
 
-    # schema evolution: add "extra", rename name -> label, promote cnt to long
+    # Schema evolution, one change per commit so the metadata carries a chain
+    # of schemas (0 original, 1 +extra, 2 renamed, 3 promoted) rather than one
+    # collapsed diff.
     with t.update_schema() as us:
         us.add_column("extra", StringType(), required=False)
+    t = catalog.load_table("db.evolved")
+    with t.update_schema() as us:
         us.rename_column("name", "label")
+    t = catalog.load_table("db.evolved")
+    with t.update_schema() as us:
         us.update_column("cnt", LongType())
     t = catalog.load_table("db.evolved")
 
@@ -152,6 +158,136 @@ def make_evolved():
 
 
 # ------------------------------------------------------------- deletes_v2 ---
+#
+# PyIceberg 0.11.1 cannot produce merge-on-read deletes: `Table.delete()` warns
+# "Merge on read is not yet supported, falling back to copy-on-write", and both
+# ManifestWriterV1.content() and ManifestWriterV2.content() are hard-wired to
+# ManifestContent.DATA, so there is no delete-manifest writer at all.
+#
+# So the position-delete snapshot below is assembled from PyIceberg's own
+# internals: a real position-delete Parquet file (file_path/pos with the
+# reserved field ids 2147483546/2147483545), a ManifestWriterV2 subclass that
+# reports ManifestContent.DELETES and stamps `content: deletes` into the Avro
+# metadata, and a _FastAppendFiles subclass that writes the added files into
+# that delete manifest and keeps the parent snapshot's data manifests.
+# Everything else - manifest list, snapshot summary, metadata commit - is
+# stock PyIceberg.
+
+import uuid as _uuid
+
+import pyarrow.parquet as pq
+from pyiceberg.manifest import (
+    DataFile,
+    DataFileContent,
+    FileFormat,
+    ManifestContent,
+    ManifestEntry,
+    ManifestEntryStatus,
+    ManifestWriterV2,
+)
+from pyiceberg.table.snapshots import Operation
+from pyiceberg.table.update.snapshot import _FastAppendFiles
+from pyiceberg.typedef import Record
+
+POS_DELETE_ARROW_SCHEMA = pa.schema(
+    [
+        pa.field(
+            "file_path",
+            pa.string(),
+            nullable=False,
+            metadata={b"PARQUET:field_id": b"2147483546"},
+        ),
+        pa.field(
+            "pos",
+            pa.int64(),
+            nullable=False,
+            metadata={b"PARQUET:field_id": b"2147483545"},
+        ),
+    ]
+)
+
+
+class _DeleteManifestWriterV2(ManifestWriterV2):
+    """A v2 manifest writer whose content is DELETES rather than DATA."""
+
+    def content(self) -> ManifestContent:
+        return ManifestContent.DELETES
+
+    @property
+    def _meta(self):
+        meta = dict(super()._meta)
+        meta["content"] = "deletes"
+        return meta
+
+
+class _AppendDeleteFiles(_FastAppendFiles):
+    """Fast-append, but the added files go into a *delete* manifest."""
+
+    def _manifests(self):
+        tm = self._transaction.table_metadata
+        out = []
+        if self._added_data_files:
+            with _DeleteManifestWriterV2(
+                spec=tm.spec(),
+                schema=tm.schema(),
+                output_file=self.new_manifest_output(),
+                snapshot_id=self._snapshot_id,
+                avro_compression=self._compression,
+            ) as writer:
+                for df in self._added_data_files:
+                    writer.add(
+                        ManifestEntry.from_args(
+                            status=ManifestEntryStatus.ADDED,
+                            snapshot_id=self._snapshot_id,
+                            sequence_number=None,
+                            file_sequence_number=None,
+                            data_file=df,
+                        )
+                    )
+            out.append(writer.to_manifest_file())
+        return out + self._existing_manifests()
+
+
+def write_position_delete_file(t, deletes):
+    """`deletes` is [(data_file_path, pos), ...] - sorted, spec order."""
+    deletes = sorted(deletes)
+    path = "%s/data/00000-0-position-deletes-%s.parquet" % (
+        t.location().rstrip("/"),
+        _uuid.uuid4(),
+    )
+    tbl = pa.Table.from_pydict(
+        {
+            "file_path": [d[0] for d in deletes],
+            "pos": [d[1] for d in deletes],
+        },
+        schema=POS_DELETE_ARROW_SCHEMA,
+    )
+    out = t.io.new_output(path)
+    with out.create(overwrite=True) as fh:
+        pq.write_table(tbl, fh)
+    size = len(t.io.new_input(path))
+    return DataFile.from_args(
+        _table_format_version=2,
+        content=DataFileContent.POSITION_DELETES,
+        file_path=path,
+        file_format=FileFormat.PARQUET,
+        partition=Record(),
+        record_count=len(deletes),
+        file_size_in_bytes=size,
+        spec_id=t.metadata.default_spec_id,
+        sort_order_id=None,
+        equality_ids=None,
+        key_metadata=None,
+        column_sizes={},
+        value_counts={},
+        null_value_counts={},
+        nan_value_counts={},
+        lower_bounds={},
+        upper_bounds={},
+        split_offsets=[],
+    )
+
+
 def make_deletes_v2():
     drop("deletes_v2")
     schema = Schema(
@@ -182,26 +318,65 @@ def make_deletes_v2():
     ]
     t.append(arrow(t, rows1))
     t.append(arrow(t, rows2))
+    t = catalog.load_table("db.deletes_v2")
 
-    # The delete that should become a positional delete file.
-    t.delete(EqualTo("id", 3))
+    # Which rows to shadow: id=3 (file 1, position 2) and id=4 (file 2,
+    # position 0).  One delete file referencing two data files.
+    files = sorted(
+        task.file.file_path for task in t.scan().plan_files()
+    )
+    if len(files) != 2:
+        raise SystemExit("expected 2 data files, got %r" % (files,))
+    by_first_id = {}
+    for f in files:
+        tbl = pq.read_table(f.replace("file://", ""))
+        by_first_id[tbl.column("id")[0].as_py()] = f
+    deletes = [(by_first_id[1], 2), (by_first_id[4], 0)]
+
+    delete_file = write_position_delete_file(t, deletes)
+    # Drive the snapshot producer directly: UpdateSnapshot has no hook for a
+    # custom producer class.
+    tx = t.transaction()
+    producer = _AppendDeleteFiles(
+        operation=Operation.DELETE,
+        transaction=tx,
+        io=t.io,
+        snapshot_properties={},
+    )
+    producer.append_data_file(delete_file)
+    updates, requirements = producer._commit()
+    tx._apply(updates, requirements)
+    tx.commit_transaction()
     t = catalog.load_table("db.deletes_v2")
 
     # Report exactly what came out.
     snap = t.current_snapshot()
     report = {
+        "pyiceberg_delete_api": (
+            "PyIceberg 0.11.1 Table.delete() falls back to copy-on-write "
+            "(UserWarning: 'Merge on read is not yet supported, falling back "
+            "to copy-on-write'); the position delete below was written with a "
+            "ManifestWriterV2 subclass reporting ManifestContent.DELETES."
+        ),
         "snapshots": len(t.metadata.snapshots),
-        "last_operation": snap.summary.operation.value
-        if snap and snap.summary
-        else None,
-        "last_summary": dict(snap.summary) if snap and snap.summary else {},
+        "format_version": t.metadata.format_version,
+        "last_operation": snap.summary.operation.value,
+        "last_summary": {k: v for k, v in snap.summary.additional_properties.items()},
         "delete_files": [],
         "data_files": [],
+        "manifests": [],
     }
-    from pyiceberg.manifest import ManifestContent
-
     io = t.io
     for mf in snap.manifests(io):
+        report["manifests"].append(
+            {
+                "path": mf.manifest_path.rsplit("/", 1)[-1],
+                "content": mf.content.name,
+                "added_files_count": mf.added_files_count,
+                "existing_files_count": mf.existing_files_count,
+                "sequence_number": mf.sequence_number,
+            }
+        )
         for entry in mf.fetch_manifest_entry(io, discard_deleted=True):
             d = entry.data_file
             rec = {
@@ -211,11 +386,23 @@ def make_deletes_v2():
                 "content": d.content.name,
                 "format": d.file_format.name,
                 "record_count": d.record_count,
+                "file_size_in_bytes": d.file_size_in_bytes,
+                "sequence_number": entry.sequence_number,
             }
-            if d.content.name == "DATA":
+            if d.content == DataFileContent.DATA:
                 report["data_files"].append(rec)
             else:
                 report["delete_files"].append(rec)
+                dt_ = pq.read_table(d.file_path.replace("file://", ""))
+                rec["rows"] = dt_.to_pylist()
+
+    # Prove the delete is actually applied on read.
+    report["rows_after_delete"] = sorted(
+        r["id"] for r in t.scan().to_arrow().to_pylist()
+    )
+    report["plan_delete_files"] = [
+        [df.file_path for df in task.delete_files] for task in t.scan().plan_files()
+    ]
     print("deletes_v2 report:", json.dumps(report, indent=2, default=str))
     with open(os.path.join(OUT, "deletes_v2_report.json"), "w") as f:
         json.dump(report, f, indent=2, default=str)

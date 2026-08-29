@@ -1,0 +1,10 @@
+{
+  "filter": "[\"=\",\"id\",3]",
+  "tasks": [
+    {
+      "data_file": "iceberg-rs-mojo-00000-07b7b9a8-8893-4643-a50f-d7fcd17ab59a.parquet",
+      "record_count": 1,
+      "delete_files": []
+    }
+  ]
+}

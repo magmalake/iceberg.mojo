@@ -1,0 +1,15 @@
+{
+  "filter": "[\"and\",[\">\",\"id\",1],[\"is-null\",\"amount\"]]",
+  "tasks": [
+    {
+      "data_file": "iceberg-rs-mojo-00000-1b31040e-5a2e-4490-87c9-9bd08bbbb517.parquet",
+      "record_count": 3,
+      "delete_files": []
+    },
+    {
+      "data_file": "iceberg-rs-mojo-00000-4e5b3227-30e3-4ec0-a9be-ab227026228e.parquet",
+      "record_count": 2,
+      "delete_files": []
+    }
+  ]
+}

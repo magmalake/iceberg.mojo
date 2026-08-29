@@ -1,0 +1,10 @@
+{
+  "filter": "[\"=\",\"label\",\"alpha\"]",
+  "tasks": [
+    {
+      "data_file": "00000-0-5bd3727b-5d89-4b4a-aa66-99e1852ea8ce.parquet",
+      "record_count": 3,
+      "delete_files": []
+    }
+  ]
+}

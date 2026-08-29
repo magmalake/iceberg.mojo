@@ -1,0 +1,20 @@
+{
+  "filter": "[\"in\",\"label\",[\"alpha\",\"delta\",\"zeta\"]]",
+  "tasks": [
+    {
+      "data_file": "00000-0-374075d4-17ba-42f4-96e0-93c26cc7ccc1.parquet",
+      "record_count": 1,
+      "delete_files": []
+    },
+    {
+      "data_file": "00000-0-4509ca4a-f95a-46a8-8bc8-52e301f7045c.parquet",
+      "record_count": 2,
+      "delete_files": []
+    },
+    {
+      "data_file": "00000-0-5bd3727b-5d89-4b4a-aa66-99e1852ea8ce.parquet",
+      "record_count": 3,
+      "delete_files": []
+    }
+  ]
+}

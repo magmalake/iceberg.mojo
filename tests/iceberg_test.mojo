@@ -9,6 +9,7 @@ from std.testing import TestSuite, assert_equal, assert_true, assert_false, asse
 
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
+from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
 from iceberg.types import (
     TypeStore,
     P_INT,
@@ -444,6 +445,368 @@ def test_partition_type() raises:
     assert_equal(pt.store.type_name(pt.find_field(1001).type), "date")
     assert_equal(pt.store.type_name(pt.find_field(1002).type), "string")
     assert_equal(pt.store.type_name(pt.find_field(1003).type), "long")
+
+
+
+# ══ table metadata ══════════════════════════════════════════════════════════
+comptime FIXTURE_TABLES = String(
+    "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,deletes_v2"
+)
+
+
+def fixture_table_names() -> List[String]:
+    var out = List[String]()
+    var t = FIXTURE_TABLES
+    var start = 0
+    while True:
+        var c = t.find(",", start)
+        if c < 0:
+            out.append(substr(t, start, t.byte_length()))
+            break
+        out.append(substr(t, start, c))
+        start = c + 1
+    return out^
+
+
+def fixture_index() raises -> Json:
+    return parse_json(read_file(FIXTURES + "/index.json"))
+
+
+def current_metadata_path(idx: Json, table: String) raises -> String:
+    var e = idx.get(idx.root, table)
+    return (
+        FIXTURES + "/" + table + "/metadata/"
+        + idx.req_string(e, "current_metadata")
+    )
+
+
+def load_fixture_metadata(table: String) raises -> TableMetadata:
+    var idx = fixture_index()
+    var m = TableMetadata.parse(read_file(current_metadata_path(idx, table)))
+    return m^
+
+
+def metadata_diff(a: TableMetadata, b: TableMetadata) raises -> String:
+    """First field on which two TableMetadata values differ, or "".
+
+    This is the field-by-field comparison gate (a) asks for: `a` comes from the
+    fixture file, `b` from the oracle's own rendering of the same table.
+    """
+    if a.format_version != b.format_version:
+        return "format-version"
+    if a.table_uuid != b.table_uuid:
+        return "table-uuid"
+    if a.location != b.location:
+        return "location"
+    if a.last_sequence_number != b.last_sequence_number:
+        return "last-sequence-number"
+    if a.last_updated_ms != b.last_updated_ms:
+        return "last-updated-ms"
+    if a.last_column_id != b.last_column_id:
+        return "last-column-id"
+    if a.current_schema_id != b.current_schema_id:
+        return "current-schema-id"
+    if len(a.schemas) != len(b.schemas):
+        return "schemas (count)"
+    for k in range(len(a.schemas)):
+        if a.schemas[k].to_json() != b.schemas[k].to_json():
+            return "schemas[" + String(k) + "]"
+    if a.default_spec_id != b.default_spec_id:
+        return "default-spec-id"
+    if len(a.partition_specs) != len(b.partition_specs):
+        return "partition-specs (count)"
+    for k in range(len(a.partition_specs)):
+        if a.partition_specs[k].to_json() != b.partition_specs[k].to_json():
+            return "partition-specs[" + String(k) + "]"
+    if a.last_partition_id != b.last_partition_id:
+        return "last-partition-id"
+    if a.default_sort_order_id != b.default_sort_order_id:
+        return "default-sort-order-id"
+    if len(a.sort_orders) != len(b.sort_orders):
+        return "sort-orders (count)"
+    for k in range(len(a.sort_orders)):
+        if a.sort_orders[k].to_json() != b.sort_orders[k].to_json():
+            return "sort-orders[" + String(k) + "]"
+    if a.has_current_snapshot != b.has_current_snapshot:
+        return "current-snapshot-id (presence)"
+    if a.has_current_snapshot and a.current_snapshot_id != b.current_snapshot_id:
+        return "current-snapshot-id"
+    if len(a.snapshots) != len(b.snapshots):
+        return "snapshots (count)"
+    for k in range(len(a.snapshots)):
+        if a.snapshots[k].to_json() != b.snapshots[k].to_json():
+            return "snapshots[" + String(k) + "]"
+    if len(a.snapshot_log) != len(b.snapshot_log):
+        return "snapshot-log (count)"
+    for k in range(len(a.snapshot_log)):
+        if (
+            a.snapshot_log[k].snapshot_id != b.snapshot_log[k].snapshot_id
+            or a.snapshot_log[k].timestamp_ms != b.snapshot_log[k].timestamp_ms
+        ):
+            return "snapshot-log[" + String(k) + "]"
+    if len(a.refs) != len(b.refs):
+        return "refs (count)"
+    for k in range(len(a.refs)):
+        var j = b.ref_index(a.refs[k].name)
+        if j < 0 or a.refs[k].to_json() != b.refs[j].to_json():
+            return "refs['" + a.refs[k].name + "']"
+    if len(a.properties) != len(b.properties):
+        return "properties (count)"
+    for e in a.properties.items():
+        if e.key not in b.properties:
+            return "properties['" + e.key + "'] (missing)"
+        if b.properties[e.key] != e.value:
+            return "properties['" + e.key + "']"
+    if len(a.statistics) != len(b.statistics):
+        return "statistics (count)"
+    if len(a.partition_statistics) != len(b.partition_statistics):
+        return "partition-statistics (count)"
+    if a.has_next_row_id != b.has_next_row_id:
+        return "next-row-id (presence)"
+    if a.has_next_row_id and a.next_row_id != b.next_row_id:
+        return "next-row-id"
+    if len(a.encryption_keys) != len(b.encryption_keys):
+        return "encryption-keys (count)"
+    return ""
+
+
+def test_metadata_round_trip() raises:
+    """Gate (a), first half: parse -> serialize -> parse is lossless."""
+    var tables = fixture_table_names()
+    var idx = fixture_index()
+    var n = 0
+    for k in range(len(tables)):
+        var path = current_metadata_path(idx, tables[k])
+        var m1 = TableMetadata.parse(read_file(path))
+        var m2 = TableMetadata.parse(m1.to_json())
+        var d = metadata_diff(m1, m2)
+        assert_equal(d, "", tables[k] + ": round trip lost " + d)
+        # And a second pass is byte-identical, so serialization is stable.
+        assert_equal(m1.to_json(), m2.to_json(), tables[k] + ": unstable output")
+        n += 1
+    print("    metadata round-trip:", n, "tables")
+
+
+def test_metadata_matches_oracle() raises:
+    """Gate (a), second half: field-by-field against the oracle rendering."""
+    var tables = fixture_table_names()
+    var idx = fixture_index()
+    var n = 0
+    for k in range(len(tables)):
+        var mine = TableMetadata.parse(
+            read_file(current_metadata_path(idx, tables[k]))
+        )
+        var theirs = TableMetadata.parse(
+            read_file(FIXTURES + "/" + tables[k] + "/oracle/metadata.json")
+        )
+        var d = metadata_diff(mine, theirs)
+        assert_equal(d, "", tables[k] + ": differs from the oracle at " + d)
+        n += 1
+    print("    metadata vs oracle:", n, "tables, field by field")
+
+
+def test_metadata_full_field_coverage() raises:
+    """Every field of the spec's table-metadata table, on a synthetic v3 file.
+
+    The fixtures are all v2, so the v3-only fields (`next-row-id`,
+    `encryption-keys`, snapshot `first-row-id`/`added-rows`/`key-id`) and the
+    optional statistics blocks need a hand-written case.
+    """
+    var text = String(
+        '{"format-version":3,"table-uuid":"9c12d441-03fe-4693-9a96-a0705ddf69c1",'
+        '"location":"s3://b/t","last-sequence-number":34,'
+        '"last-updated-ms":1602638573590,"last-column-id":3,'
+        '"current-schema-id":1,"schemas":[{"type":"struct","schema-id":1,'
+        '"fields":[{"id":1,"name":"x","required":true,"type":"long"}]}],'
+        '"default-spec-id":0,"partition-specs":[{"spec-id":0,"fields":['
+        '{"source-id":1,"field-id":1000,"transform":"identity","name":"x"}]}],'
+        '"last-partition-id":1000,"default-sort-order-id":3,'
+        '"sort-orders":[{"order-id":3,"fields":[{"transform":"identity",'
+        '"source-id":1,"direction":"desc","null-order":"nulls-last"}]}],'
+        '"properties":{"read.split.target.size":"134217728"},'
+        '"current-snapshot-id":3055729675574597004,'
+        '"refs":{"main":{"snapshot-id":3055729675574597004,"type":"branch"},'
+        '"tag1":{"snapshot-id":3051729675574597004,"type":"tag",'
+        '"max-ref-age-ms":10000000}},'
+        '"snapshots":[{"snapshot-id":3051729675574597004,"timestamp-ms":1515100955770,'
+        '"sequence-number":0,"summary":{"operation":"append"},'
+        '"manifest-list":"s3://b/t/m1.avro","first-row-id":0,"added-rows":100},'
+        '{"snapshot-id":3055729675574597004,"parent-snapshot-id":3051729675574597004,'
+        '"timestamp-ms":1555100955770,"sequence-number":1,'
+        '"summary":{"operation":"append"},"manifest-list":"s3://b/t/m2.avro",'
+        '"schema-id":1,"first-row-id":100,"added-rows":50,"key-id":"k1"}],'
+        '"statistics":[{"snapshot-id":3055729675574597004,'
+        '"statistics-path":"s3://b/t/s.puffin","file-size-in-bytes":413,'
+        '"file-footer-size-in-bytes":42,"blob-metadata":[{"type":"ndv",'
+        '"snapshot-id":3055729675574597004,"sequence-number":1,"fields":[1]}]}],'
+        '"partition-statistics":[{"snapshot-id":3055729675574597004,'
+        '"statistics-path":"s3://b/t/p.parquet","file-size-in-bytes":43}],'
+        '"snapshot-log":[{"snapshot-id":3051729675574597004,"timestamp-ms":1515100955770},'
+        '{"snapshot-id":3055729675574597004,"timestamp-ms":1555100955770}],'
+        '"metadata-log":[{"metadata-file":"s3://b/t/m/v1.json","timestamp-ms":1515100}],'
+        '"next-row-id":150,"encryption-keys":[{"key-id":"k1",'
+        '"encrypted-key-metadata":"AAAA","encrypted-by-id":"kek"}],'
+        '"unknown-future-field":{"a":1}}'
+    )
+    var m = TableMetadata.parse(text)
+    assert_equal(m.format_version, 3)
+    assert_equal(m.table_uuid, "9c12d441-03fe-4693-9a96-a0705ddf69c1")
+    assert_equal(m.location, "s3://b/t")
+    assert_equal(m.last_sequence_number, 34)
+    assert_equal(m.last_updated_ms, 1602638573590)
+    assert_equal(m.last_column_id, 3)
+    assert_equal(m.current_schema_id, 1)
+    assert_equal(m.default_spec_id, 0)
+    assert_equal(m.last_partition_id, 1000)
+    assert_equal(m.default_sort_order_id, 3)
+    assert_equal(m.property_("read.split.target.size", ""), "134217728")
+    assert_equal(m.current_snapshot_id, 3055729675574597004)
+    assert_equal(len(m.snapshots), 2)
+    assert_equal(len(m.refs), 2)
+    assert_equal(len(m.statistics), 1)
+    assert_equal(len(m.statistics[0].blob_metadata), 1)
+    assert_equal(m.statistics[0].blob_metadata[0].type, "ndv")
+    assert_equal(len(m.partition_statistics), 1)
+    assert_equal(len(m.snapshot_log), 2)
+    assert_equal(len(m.metadata_log), 1)
+    assert_true(m.has_next_row_id)
+    assert_equal(m.next_row_id, 150)
+    assert_equal(len(m.encryption_keys), 1)
+    assert_equal(m.encryption_keys[0].encrypted_key_metadata, "AAAA")
+    assert_equal(m.encryption_keys[0].encrypted_by_id, "kek")
+    # v3 snapshot fields.
+    var cur = m.current_snapshot()
+    assert_true(cur.has_first_row_id)
+    assert_equal(cur.first_row_id, 100)
+    assert_equal(cur.added_rows, 50)
+    assert_equal(cur.key_id, "k1")
+    # Unknown top-level keys survive the round trip.
+    assert_equal(len(m.extra_keys), 1)
+    var back = TableMetadata.parse(m.to_json())
+    assert_equal(metadata_diff(m, back), "")
+    var bd = parse_json(back.to_json())
+    assert_true(bd.has(bd.root, "unknown-future-field"))
+
+
+def test_metadata_v1_forms() raises:
+    """v1's singular `schema` and bare `partition-spec` array."""
+    var text = String(
+        '{"format-version":1,"table-uuid":"1517a9b0-0000-0000-0000-000000000000",'
+        '"location":"file:///t","last-updated-ms":1,"last-column-id":2,'
+        '"schema":{"type":"struct","schema-id":7,"fields":['
+        '{"id":1,"name":"a","required":true,"type":"int"},'
+        '{"id":2,"name":"b","required":false,"type":"string"}]},'
+        '"partition-spec":[{"source-id":2,"transform":"identity","name":"b"},'
+        '{"source-id":1,"transform":"bucket[8]","name":"a_bucket"}],'
+        '"properties":{},"current-snapshot-id":-1,"snapshots":[]}'
+    )
+    var m = TableMetadata.parse(text)
+    assert_equal(m.format_version, 1)
+    assert_equal(len(m.schemas), 1)
+    assert_equal(m.current_schema_id, 7)
+    assert_equal(len(m.partition_specs), 1)
+    # v1 assigned partition field ids sequentially from 1000.
+    assert_equal(m.partition_specs[0].fields[0].field_id, 1000)
+    assert_equal(m.partition_specs[0].fields[1].field_id, 1001)
+    assert_equal(m.last_partition_id, 1001)
+    assert_false(m.has_current_snapshot)
+    # A v1 file with no sort orders gets the reserved unsorted order 0.
+    assert_equal(len(m.sort_orders), 1)
+    assert_equal(m.sort_orders[0].order_id, 0)
+
+
+def test_metadata_rejects_future_version() raises:
+    with assert_raises():
+        _ = TableMetadata.parse(
+            '{"format-version":9,"location":"x","last-updated-ms":0,'
+            '"last-column-id":0,"schemas":[],"current-schema-id":0}'
+        )
+
+
+def test_snapshot_selection() raises:
+    """Gate (b): current / by-id / by-ref / as-of against the oracle."""
+    var tables = fixture_table_names()
+    var idx = fixture_index()
+    var checked = 0
+    for k in range(len(tables)):
+        var table = tables[k]
+        var m = load_fixture_metadata(table)
+        var oracle = parse_json(
+            read_file(FIXTURES + "/" + table + "/oracle/snapshots.json")
+        )
+        var n = oracle.size(oracle.root)
+        assert_equal(
+            len(m.snapshots), n, table + ": snapshot count"
+        )
+        # The oracle lists snapshots oldest first.
+        var last_id: Int64 = 0
+        for j in range(n):
+            var o = oracle.at(oracle.root, j)
+            var id = oracle.req_int(o, "snapshot-id")
+            var s = m.snapshot_by_id(id)
+            assert_equal(
+                s.sequence_number,
+                oracle.req_int(o, "sequence-number"),
+                table + ": sequence-number of " + String(id),
+            )
+            assert_equal(
+                s.timestamp_ms,
+                oracle.req_int(o, "timestamp-ms"),
+                table + ": timestamp-ms of " + String(id),
+            )
+            assert_equal(
+                s.manifest_list,
+                oracle.req_string(o, "manifest-list"),
+                table + ": manifest-list of " + String(id),
+            )
+            assert_equal(
+                s.operation(),
+                oracle.req_string(o, "operation"),
+                table + ": operation of " + String(id),
+            )
+            var p = oracle.get(o, "parent-snapshot-id")
+            if p >= 0 and not oracle.is_null(p):
+                assert_true(s.has_parent, table + ": missing parent")
+                assert_equal(
+                    s.parent_snapshot_id,
+                    oracle.as_int(p),
+                    table + ": parent of " + String(id),
+                )
+            else:
+                assert_false(s.has_parent, table + ": unexpected parent")
+            # as-of at this snapshot's own timestamp must select it.
+            var asof = m.snapshot_as_of(s.timestamp_ms)
+            assert_equal(
+                asof.snapshot_id, id, table + ": as-of at " + String(s.timestamp_ms)
+            )
+            last_id = id
+            checked += 1
+        # The newest snapshot is the current one and the head of `main`.
+        var cur = m.current_snapshot()
+        assert_equal(cur.snapshot_id, last_id, table + ": current snapshot")
+        var main = m.snapshot_for_ref("main")
+        assert_equal(main.snapshot_id, last_id, table + ": main branch head")
+        # A timestamp before the first snapshot has no answer.
+        with assert_raises():
+            _ = m.snapshot_as_of(m.snapshots[0].timestamp_ms - 1000000)
+        # An unknown ref and an unknown id are errors, not silent nulls.
+        with assert_raises():
+            _ = m.snapshot_for_ref("no-such-branch")
+        with assert_raises():
+            _ = m.snapshot_by_id(1)
+    print("    snapshot selection:", checked, "snapshots across", len(tables), "tables")
+
+
+def test_snapshot_ref_and_schema_selection() raises:
+    var m = load_fixture_metadata("evolved")
+    # Schema evolution: several schemas, and each snapshot names the one that
+    # was current when it was written.
+    assert_true(len(m.schemas) >= 2, "evolved should have several schemas")
+    for k in range(len(m.snapshots)):
+        var s = m.schema_for_snapshot(m.snapshots[k])
+        assert_true(len(s.columns()) > 0)
+    var cur = m.schema()
+    assert_equal(cur.schema_id, m.current_schema_id)
 
 
 def main() raises:

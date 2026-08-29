@@ -1,0 +1,164 @@
+{
+  "format-version": 2,
+  "table-uuid": "01a04f59-51b8-7503-8df7-b0c1f26791db",
+  "location": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned",
+  "last-sequence-number": 3,
+  "last-updated-ms": 1788037648947,
+  "last-column-id": 6,
+  "schemas": [
+    {
+      "schema-id": 0,
+      "type": "struct",
+      "fields": [
+        {
+          "id": 1,
+          "name": "id",
+          "required": true,
+          "type": "long"
+        },
+        {
+          "id": 2,
+          "name": "region",
+          "required": true,
+          "type": "string"
+        },
+        {
+          "id": 3,
+          "name": "amount",
+          "required": false,
+          "type": "double"
+        },
+        {
+          "id": 4,
+          "name": "ts",
+          "required": false,
+          "type": "timestamp"
+        },
+        {
+          "id": 5,
+          "name": "ok",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "id": 6,
+          "name": "cnt",
+          "required": false,
+          "type": "int"
+        }
+      ]
+    }
+  ],
+  "current-schema-id": 0,
+  "partition-specs": [
+    {
+      "spec-id": 0,
+      "fields": []
+    }
+  ],
+  "default-spec-id": 0,
+  "last-partition-id": 999,
+  "current-snapshot-id": 5657005327490298786,
+  "snapshot-log": [
+    {
+      "snapshot-id": 7700751301259195809,
+      "timestamp-ms": 1788037648909
+    },
+    {
+      "snapshot-id": 7756567004595518868,
+      "timestamp-ms": 1788037648927
+    },
+    {
+      "snapshot-id": 5657005327490298786,
+      "timestamp-ms": 1788037648947
+    }
+  ],
+  "metadata-log": [
+    {
+      "metadata-file": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/00000-f3618140-06aa-42a0-92c7-6a7b677185aa.metadata.json",
+      "timestamp-ms": 1788037648824
+    },
+    {
+      "metadata-file": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/00001-c72d644d-8b8b-42e2-98a3-364c3ba6bb30.metadata.json",
+      "timestamp-ms": 1788037648909
+    },
+    {
+      "metadata-file": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/00002-3aa8df91-5080-4074-a95f-45b46b5649e1.metadata.json",
+      "timestamp-ms": 1788037648927
+    }
+  ],
+  "sort-orders": [
+    {
+      "order-id": 0,
+      "fields": []
+    }
+  ],
+  "default-sort-order-id": 0,
+  "refs": {
+    "main": {
+      "snapshot-id": 5657005327490298786,
+      "type": "branch"
+    }
+  },
+  "snapshots": [
+    {
+      "snapshot-id": 5657005327490298786,
+      "parent-snapshot-id": 7756567004595518868,
+      "sequence-number": 3,
+      "timestamp-ms": 1788037648947,
+      "manifest-list": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/snap-5657005327490298786-0-01a04f59-522a-74c1-a5a6-7cab229d6665.avro",
+      "summary": {
+        "operation": "append",
+        "added-records": "2",
+        "total-files-size": "6889",
+        "total-data-files": "3",
+        "total-position-deletes": "0",
+        "added-data-files": "1",
+        "added-files-size": "2284",
+        "total-equality-deletes": "0",
+        "total-delete-files": "0",
+        "total-records": "7"
+      },
+      "schema-id": 0
+    },
+    {
+      "snapshot-id": 7700751301259195809,
+      "sequence-number": 1,
+      "timestamp-ms": 1788037648909,
+      "manifest-list": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/snap-7700751301259195809-0-01a04f59-51ff-7631-89c2-fbf724d2c6a8.avro",
+      "summary": {
+        "operation": "append",
+        "total-files-size": "2312",
+        "total-equality-deletes": "0",
+        "added-files-size": "2312",
+        "total-delete-files": "0",
+        "total-data-files": "1",
+        "added-records": "3",
+        "added-data-files": "1",
+        "total-records": "3",
+        "total-position-deletes": "0"
+      },
+      "schema-id": 0
+    },
+    {
+      "snapshot-id": 7756567004595518868,
+      "parent-snapshot-id": 7700751301259195809,
+      "sequence-number": 2,
+      "timestamp-ms": 1788037648927,
+      "manifest-list": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/unpartitioned/metadata/snap-7756567004595518868-0-01a04f59-5216-7961-a870-a510e38bf0ff.avro",
+      "summary": {
+        "operation": "append",
+        "total-delete-files": "0",
+        "added-records": "2",
+        "total-data-files": "2",
+        "total-files-size": "4605",
+        "added-data-files": "1",
+        "added-files-size": "2293",
+        "total-records": "5",
+        "total-equality-deletes": "0",
+        "total-position-deletes": "0"
+      },
+      "schema-id": 0
+    }
+  ]
+}

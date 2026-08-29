@@ -1,0 +1,115 @@
+{
+ "bucket_part": {
+  "current_metadata": "00003-216a0fca-d810-4438-ac65-541e4bf30d0b.metadata.json",
+  "current_snapshot_id": 2881895818033074749,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-247b1cc1-6989-471d-a720-3baf889c1b87.metadata.json",
+   "00001-8df29331-78a6-4e9a-8a36-b854f924a528.metadata.json",
+   "00002-06108a13-c610-4f7a-a5d7-3e8ef05ea8c5.metadata.json",
+   "00003-216a0fca-d810-4438-ac65-541e4bf30d0b.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "01a04f59-528a-72a2-8be2-3b9b4204c719"
+ },
+ "day_part": {
+  "current_metadata": "00003-a2d2b7ac-37a9-48dc-9309-78d9598e8c68.metadata.json",
+  "current_snapshot_id": 3467175167895616285,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-3f56d77c-782a-490f-84b4-23fcc4ff4bfc.metadata.json",
+   "00001-ae2e53e7-c9f4-4da6-848a-2015e5a5ae37.metadata.json",
+   "00002-3f9650fc-0da2-4716-b313-c727267ce36c.metadata.json",
+   "00003-a2d2b7ac-37a9-48dc-9309-78d9598e8c68.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "01a04f59-52d4-7603-ab35-759dbb4a17ff"
+ },
+ "deletes_v2": {
+  "current_metadata": "00003-4778400f-cf1a-4a70-9adb-1e8cad720dcf.metadata.json",
+  "current_snapshot_id": 1857656291423077900,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-006fb7e6-3579-49ad-ab71-2a247fa10027.metadata.json",
+   "00000-08b70aa9-7b5c-494f-9cac-cb7c052a8571.metadata.json",
+   "00000-1374abcc-43cf-4541-80c4-18c5e506f0c8.metadata.json",
+   "00001-1c0be95a-03ea-4ae8-90c0-ed2d26b7c5ca.metadata.json",
+   "00001-b4b0a633-1b6f-43d3-9acf-767789e4e03c.metadata.json",
+   "00001-c3ff1485-489e-4f4f-9bd2-70fafeca48d7.metadata.json",
+   "00002-00d1688f-589b-4e4d-99bb-3dad6e872a7e.metadata.json",
+   "00002-2ae2b150-496a-45a6-96eb-3112a9aca2d9.metadata.json",
+   "00002-6365a3f2-07e8-45ad-9db6-40e674576a4b.metadata.json",
+   "00003-4778400f-cf1a-4a70-9adb-1e8cad720dcf.metadata.json",
+   "00003-d28ffeff-1103-49fd-a2f9-6db6231b0632.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "6edf9b93-df02-4975-958a-052d07498f87"
+ },
+ "evolved": {
+  "current_metadata": "00006-4cdfbfe2-4744-467a-ac28-fbeccf64f2ba.metadata.json",
+  "current_snapshot_id": 1959063423059298568,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-4bb1aa91-7d53-4e29-bb7d-34e7a758fe45.metadata.json",
+   "00000-6341466b-2236-4082-8972-b212fe9b783c.metadata.json",
+   "00000-e7e4ff8c-00d9-44d4-b67e-466f1a224c0f.metadata.json",
+   "00001-312af052-374f-4af9-ac41-91a3fb6b464e.metadata.json",
+   "00001-75d75850-0947-498a-86a9-e5cf2be9aeec.metadata.json",
+   "00001-7ca7c02c-66d9-4cf1-b19d-6f5442ccf7d5.metadata.json",
+   "00002-3428aa38-3d18-4159-be35-2e44c9288066.metadata.json",
+   "00002-6fd53d66-5907-4cad-8921-14704cb26632.metadata.json",
+   "00002-e352c244-ef79-4943-af41-1f93b0b5170d.metadata.json",
+   "00003-98ff1b81-2333-4bd5-9f1e-fc2d62d17805.metadata.json",
+   "00003-ed595859-0484-496d-adbd-6600d7797789.metadata.json",
+   "00003-f63e5d84-1a73-4580-9228-a37bbf0bed96.metadata.json",
+   "00004-0d78cc92-01be-4d4c-9284-aaa8808ee157.metadata.json",
+   "00004-25355e01-b404-4e53-8d79-795862065d63.metadata.json",
+   "00004-584eafeb-cfcd-4069-a11a-10ec096daeaf.metadata.json",
+   "00005-173a7d1e-35f4-41cc-aaff-4e0f075b8728.metadata.json",
+   "00005-478f8df8-591c-49b9-9855-58914c96098a.metadata.json",
+   "00006-4cdfbfe2-4744-467a-ac28-fbeccf64f2ba.metadata.json",
+   "00006-f36a041a-a388-4488-9047-fde1e5162f37.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "fb1777be-3c1a-4167-b2ee-da88b7cd46fc"
+ },
+ "ident_part": {
+  "current_metadata": "00003-370c8eea-e4fc-488c-8b84-2ecc36d5eb1e.metadata.json",
+  "current_snapshot_id": 7164457342194366606,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-2e119ea7-aef1-4a12-9c2f-d4daac4581d8.metadata.json",
+   "00001-6f746b83-767e-4c29-9237-83453edcf97c.metadata.json",
+   "00002-dc7ff980-56b8-4e2b-9392-f4cca97c5a28.metadata.json",
+   "00003-370c8eea-e4fc-488c-8b84-2ecc36d5eb1e.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "01a04f59-523f-7292-9509-b9b6653e5dac"
+ },
+ "trunc_part": {
+  "current_metadata": "00003-f9008911-7f3e-4185-aad0-cb2580132eb3.metadata.json",
+  "current_snapshot_id": 4437512400196923242,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-d402bdf4-58bc-49ca-bbe9-ce89b823baf1.metadata.json",
+   "00001-590b03ed-fdb5-421c-a5f6-7c45f10ceb80.metadata.json",
+   "00002-ea625570-1f10-4ff6-a4ab-477f84c979b7.metadata.json",
+   "00003-f9008911-7f3e-4185-aad0-cb2580132eb3.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "01a04f59-5331-7753-a094-443b38c3cfbb"
+ },
+ "unpartitioned": {
+  "current_metadata": "00003-a21b4d75-51ce-4d39-b78e-fc2d3e91e2c8.metadata.json",
+  "current_snapshot_id": 5657005327490298786,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-f3618140-06aa-42a0-92c7-6a7b677185aa.metadata.json",
+   "00001-c72d644d-8b8b-42e2-98a3-364c3ba6bb30.metadata.json",
+   "00002-3aa8df91-5080-4074-a95f-45b46b5649e1.metadata.json",
+   "00003-a21b4d75-51ce-4d39-b78e-fc2d3e91e2c8.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "01a04f59-51b8-7503-8df7-b0c1f26791db"
+ }
+}

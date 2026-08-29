@@ -1,0 +1,98 @@
+{
+  "pyiceberg_delete_api": "PyIceberg 0.11.1 Table.delete() falls back to copy-on-write (UserWarning: 'Merge on read is not yet supported, falling back to copy-on-write'); the position delete below was written with a ManifestWriterV2 subclass reporting ManifestContent.DELETES.",
+  "snapshots": 3,
+  "format_version": 2,
+  "last_operation": "delete",
+  "last_summary": {
+    "added-files-size": "1716",
+    "added-position-delete-files": "1",
+    "added-delete-files": "1",
+    "added-position-deletes": "2",
+    "total-data-files": "2",
+    "total-delete-files": "1",
+    "total-records": "5",
+    "total-files-size": "5665",
+    "total-position-deletes": "2",
+    "total-equality-deletes": "0"
+  },
+  "delete_files": [
+    {
+      "manifest": "37f8cead-c54c-42e9-abf4-b923f373f2a3-m0.avro",
+      "manifest_content": "DELETES",
+      "path": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet",
+      "content": "POSITION_DELETES",
+      "format": "PARQUET",
+      "record_count": 2,
+      "file_size_in_bytes": 1716,
+      "sequence_number": 3,
+      "rows": [
+        {
+          "file_path": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-cca24d08-3353-4c14-ae6c-c6761dc4aa8f.parquet",
+          "pos": 0
+        },
+        {
+          "file_path": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-e5032a16-8d2c-4d85-af76-4848cc2aa9de.parquet",
+          "pos": 2
+        }
+      ]
+    }
+  ],
+  "data_files": [
+    {
+      "manifest": "cca24d08-3353-4c14-ae6c-c6761dc4aa8f-m0.avro",
+      "manifest_content": "DATA",
+      "path": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-cca24d08-3353-4c14-ae6c-c6761dc4aa8f.parquet",
+      "content": "DATA",
+      "format": "PARQUET",
+      "record_count": 2,
+      "file_size_in_bytes": 1971,
+      "sequence_number": 2
+    },
+    {
+      "manifest": "e5032a16-8d2c-4d85-af76-4848cc2aa9de-m0.avro",
+      "manifest_content": "DATA",
+      "path": "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-e5032a16-8d2c-4d85-af76-4848cc2aa9de.parquet",
+      "content": "DATA",
+      "format": "PARQUET",
+      "record_count": 3,
+      "file_size_in_bytes": 1978,
+      "sequence_number": 1
+    }
+  ],
+  "manifests": [
+    {
+      "path": "37f8cead-c54c-42e9-abf4-b923f373f2a3-m0.avro",
+      "content": "DELETES",
+      "added_files_count": 1,
+      "existing_files_count": 0,
+      "sequence_number": 3
+    },
+    {
+      "path": "cca24d08-3353-4c14-ae6c-c6761dc4aa8f-m0.avro",
+      "content": "DATA",
+      "added_files_count": 1,
+      "existing_files_count": 0,
+      "sequence_number": 2
+    },
+    {
+      "path": "e5032a16-8d2c-4d85-af76-4848cc2aa9de-m0.avro",
+      "content": "DATA",
+      "added_files_count": 1,
+      "existing_files_count": 0,
+      "sequence_number": 1
+    }
+  ],
+  "rows_after_delete": [
+    1,
+    2,
+    5
+  ],
+  "plan_delete_files": [
+    [
+      "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet"
+    ],
+    [
+      "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db/deletes_v2/data/00000-0-position-deletes-0f4d771a-b9a1-49ac-9625-13a2bf6f7913.parquet"
+    ]
+  ]
+}

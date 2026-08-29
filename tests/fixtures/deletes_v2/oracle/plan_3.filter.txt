@@ -1,0 +1,1 @@
+["and",["=","region","us"],["not-null","amount"]]

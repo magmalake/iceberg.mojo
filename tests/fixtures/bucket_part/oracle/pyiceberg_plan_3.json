@@ -1,0 +1,10 @@
+{
+  "filter": "[\"and\",[\"=\",\"id\",1],[\"=\",\"region\",\"eu\"]]",
+  "tasks": [
+    {
+      "data_file": "iceberg-rs-mojo-00001-07b7b9a8-8893-4643-a50f-d7fcd17ab59a.parquet",
+      "record_count": 2,
+      "delete_files": []
+    }
+  ]
+}
