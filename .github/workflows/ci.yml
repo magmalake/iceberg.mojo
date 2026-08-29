@@ -15,8 +15,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         env: [default, stable]
     steps:
-      # This repo takes sibling magmalake tins as pixi *path* dependencies
-      # (`../hashes.mojo`), so CI has to lay the siblings out next to it.
+      # This repo consumes sibling magmalake tins by source path
+      # (`-I ../hashes.mojo/src`), so CI has to lay the siblings out next to it.
       - uses: actions/checkout@v4
         with:
           path: iceberg.mojo
