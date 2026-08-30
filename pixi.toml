@@ -41,12 +41,12 @@ check = { depends-on = ["test", "cli"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
 bench = { cmd = "bash bench/run_bench.sh" }
-# Builds the ten tables `tools/verify_written.py` checks against PyIceberg and
-# DuckDB. Used by `pixi run verify-writes`.
-build-write-tables = { cmd = "mkdir -p build && mojo build tools/write_tables.mojo $ICEBERG_INCLUDES -I tools -o build/write-tables" }
+# Writes ten tables with this library and has PyIceberg and DuckDB read them
+# back — then lets PyIceberg append to two of them and reads the result here.
+# Needs `uv`, which builds the venv; CI runs it as a fifth job.
 verify-writes = { cmd = "bash tools/verify_writes.sh" }
-fmt = { cmd = "mojo format src tests bench" }
-format-check = { cmd = "mojo format --check src tests bench" }
+fmt = { cmd = "mojo format src tests bench tools" }
+format-check = { cmd = "mojo format --check src tests bench tools" }
 
 [feature.nightly.dependencies]
 modular = ">=26.6.0.dev2026082605,<27"

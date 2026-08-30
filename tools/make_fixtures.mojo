@@ -79,14 +79,16 @@ def emit_oracle(
     for k in range(len(filters)):
         var s = t.scan("", filters[k])
         write_text(out_dir + "/plan_" + String(k) + ".json", s.plan_files())
-        write_text(
-            out_dir + "/plan_" + String(k) + ".filter.txt", filters[k]
-        )
+        write_text(out_dir + "/plan_" + String(k) + ".filter.txt", filters[k])
     print("  oracle written:", out_dir, "(", len(filters), "filters )")
 
 
-def fill(mut t: Table, imm regions1: List[String], imm regions2: List[String],
-         imm regions3: List[String]) raises -> Int:
+def fill(
+    mut t: Table,
+    imm regions1: List[String],
+    imm regions2: List[String],
+    imm regions3: List[String],
+) raises -> Int:
     """Three appends -> three snapshots.  Row ids 1..7."""
     var s1 = append_rows(
         t,
@@ -200,7 +202,9 @@ def main() raises:
         String('["true"]'),
         String('[">=","ts","2023-11-16T00:00:00"]'),
         String('["<","ts","2023-11-16T00:00:00"]'),
-        String('["and",[">=","ts","2023-11-15T00:00:00"],["<","ts","2023-11-18T00:00:00"]]'),
+        String(
+            '["and",[">=","ts","2023-11-15T00:00:00"],["<","ts","2023-11-18T00:00:00"]]'
+        ),
         String('["is-null","ts"]'),
         String('["=","region","eu"]'),
     ]
