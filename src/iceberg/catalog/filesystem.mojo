@@ -208,6 +208,14 @@ def find_latest_metadata(io: FileIO, table_location: String) raises -> String:
     return best^
 
 
+def _metadata_version_of(name: String) -> Int:
+    """The version prefix of a metadata file name, or -1."""
+    try:
+        return _version_of(name)
+    except:
+        return -1
+
+
 def _sort_names(mut l: List[String]):
     """Sort so that an unreadable-candidate fallback stays deterministic."""
     for i in range(1, len(l)):
@@ -293,10 +301,43 @@ struct Table(Copyable, Movable):
         exactly the way every other filesystem-table writer is.
         """
         var dir = dirname(self.metadata_location)
+        # The version we are about to write is derived from the file we read,
+        # so that file has to still be the newest one. A `<V>-<uuid>` name
+        # cannot collide on its own — the uuid makes every writer's name
+        # unique — so this comparison, not the create, is what detects a
+        # concurrent commit. It is a check-then-act and therefore racy in the
+        # window between them; the spec says as much about filesystem tables,
+        # which is why a catalog exists.
+        var latest = find_latest_metadata(self.io, dir)
+        if basename(latest) != basename(self.metadata_location):
+            raise Error(
+                "iceberg: another writer committed "
+                + basename(latest)
+                + " while this commit was based on "
+                + basename(self.metadata_location)
+            )
         var version = next_metadata_version(result.metadata)
         var path = join_path(dir, metadata_file_name(version))
         var doc = result.metadata.to_json()
         self.io.write_new(path, doc.as_bytes())
+        # And nobody else claimed the same version in the meantime.
+        var clashes = 0
+        var names = self.io.list_names(dir)
+        for k in range(len(names)):
+            if _metadata_version_of(names[k]) == version:
+                clashes += 1
+        if clashes > 1:
+            try:
+                self.io.delete(path)
+            except:
+                pass
+            raise Error(
+                "iceberg: "
+                + String(clashes)
+                + " writers wrote version "
+                + String(version)
+                + "; reload and retry"
+            )
         # `version-hint.text` is advisory: a reader that cannot find the file
         # it names falls back to listing, which is why it is written after.
         try:

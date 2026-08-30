@@ -30,6 +30,7 @@ from iceberg.catalog.filesystem import (
 )
 from iceberg.catalog.rest import (
     LoadTableResult,
+    commit_append_body,
     RestCatalog,
     RestCatalogConfig,
     encode_namespace,
@@ -58,13 +59,37 @@ from iceberg.read import (
     ScanResult,
     arrow_type_of,
 )
+from iceberg.append import (
+    metadata_file_name,
+    next_metadata_version,
+    prepare_append,
+)
+from iceberg.batch import ColumnBuilder, batch_of
+from iceberg.util import now_ms
+from iceberg.manifest_write import (
+    manifest_entry_schema_json,
+    manifest_list_schema_json,
+    PartitionTyping,
+)
 from iceberg.scan import TableScan, FileScanTask
+from iceberg.transforms import parse_transform
+from iceberg.write import (
+    WriteOptions,
+    write_data_files,
+    escape_path,
+    human_partition_value,
+    partition_path,
+    truncate_lower,
+    truncate_upper,
+)
+from parquet import RecordBatch
 from iceberg.manifest import (
     ManifestFile,
     ManifestEntry,
     DataFile,
     Manifest,
     read_manifest_list,
+    read_manifest_list_io,
     read_manifest,
     read_manifest_at,
     STATUS_ADDED,
@@ -2104,8 +2129,11 @@ def test_rest_catalog_over_http() raises:
     assert_true(cat.config.namespaces_url().endswith("/v1/ws/namespaces"))
 
     var namespaces = cat.list_namespaces()
-    assert_equal(len(namespaces), 1)
+    # `db` is the read-only fixture corpus; `wr` is the scratch namespace the
+    # commit tests write into.
+    assert_equal(len(namespaces), 2)
     assert_equal(namespaces[0], "db")
+    assert_equal(namespaces[1], "wr")
 
     var tables = cat.list_tables("db")
     var found = False
@@ -3009,6 +3037,794 @@ def test_projection_falls_back_to_partition_value() raises:
         assert_equal(rows.value(r, 0).s, "apac", "from the partition tuple")
         # 101 has neither a matching id, a mapping, nor a default: null.
         assert_false(rows.value(r, 1).valid)
+
+
+# ── the write path ──────────────────────────────────────────────────────────
+#
+# Everything below writes into build/write-tests/<case>/ and reads it back
+# through this library. The *external* gate — PyIceberg 0.11.1 and DuckDB
+# 1.5.5 reading the same tables, and PyIceberg appending to them — lives in
+# tools/verify_written.py, which `pixi run verify-writes` runs; it needs a
+# PyIceberg venv, which the unit suite deliberately does not.
+comptime WRITE_ROOT = String("build/write-tests")
+
+comptime WRITE_SCHEMA = String(
+    '{"schema-id":0,"type":"struct","fields":['
+    '{"id":1,"name":"id","required":true,"type":"long"},'
+    '{"id":2,"name":"region","required":true,"type":"string"},'
+    '{"id":3,"name":"amount","required":false,"type":"double"},'
+    '{"id":4,"name":"ts","required":false,"type":"timestamp"},'
+    '{"id":5,"name":"ok","required":false,"type":"boolean"}]}'
+)
+
+comptime WRITE_DAY: Int64 = 19723
+comptime WRITE_MICROS_PER_DAY: Int64 = 86400000000
+
+
+def write_region(i: Int) raises -> String:
+    var names = String("eu,us,apac,latam,emea").split(",")
+    return String(names[i % 5])
+
+
+def write_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    var amount = ColumnBuilder.of(schema, 3)
+    var ts = ColumnBuilder.of(schema, 4)
+    var ok = ColumnBuilder.of(schema, 5)
+    for k in range(n):
+        var i = start + k
+        ids.add(Datum.long_(Int64(i)))
+        region.add(Datum.string_(write_region(i)))
+        if i % 4 == 0:
+            amount.add_null()
+        else:
+            amount.add(Datum.double_(Float64(i) * 1.5))
+        ts.add(
+            Datum.integral(
+                ts.kind,
+                (WRITE_DAY + Int64(i % 3)) * WRITE_MICROS_PER_DAY
+                + Int64(i) * 1000,
+            )
+        )
+        if i % 5 == 0:
+            ok.add_null()
+        else:
+            ok.add(Datum.bool_(i % 2 == 0))
+    return batch_of([ids^, region^, amount^, ts^, ok^])
+
+
+def fresh_catalog(scenario: String) raises -> FilesystemCatalog:
+    """A warehouse of this test's own, emptied first."""
+    var root = WRITE_ROOT + "/" + scenario
+    var io = FileIO.local()
+    try:
+        var existing = io.list(root)
+        for k in range(len(existing)):
+            io.delete(existing[k])
+    except:
+        pass
+    makedirs(root, exist_ok=True)
+    return FilesystemCatalog.local(root)
+
+
+def build_written_table(
+    scenario: String, shape: String, format_version: Int, appends: Int = 3
+) raises -> Table:
+    var catalog = fresh_catalog(scenario)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec.unpartitioned()
+    if shape == "ident":
+        spec = PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    2, 1000, String("region"), parse_transform("identity")
+                )
+            ],
+        )
+    elif shape == "bucket":
+        spec = PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    1, 1000, String("id_bucket"), parse_transform("bucket[4]")
+                )
+            ],
+        )
+    elif shape == "day":
+        spec = PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    4, 1000, String("ts_day"), parse_transform("day")
+                )
+            ],
+        )
+    var table = catalog.create_table(
+        String("db"),
+        String("t"),
+        schema,
+        spec,
+        Dict[String, String](),
+        format_version,
+    )
+    for b in range(appends):
+        var batches = List[RecordBatch]()
+        batches.append(write_batch(schema, b * 6, 6))
+        var tx = table.new_append()
+        tx.add_batches(batches)
+        _ = tx.commit()
+        table.refresh()
+    return table^
+
+
+def test_create_table_writes_a_v2_metadata_file() raises:
+    var catalog = fresh_catalog(String("create"))
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var table = catalog.create_table(String("db"), String("t"), schema)
+    assert_equal(table.metadata.format_version, 2)
+    assert_true(table.metadata.table_uuid != "")
+    assert_false(table.metadata.has_current_snapshot)
+    assert_equal(table.metadata.last_column_id, 5)
+    assert_equal(len(table.metadata.schemas), 1)
+    assert_equal(len(table.metadata.partition_specs), 1)
+    assert_equal(len(table.metadata.sort_orders), 1)
+    assert_true(
+        basename(table.metadata_location).startswith("00000-"),
+        "the first metadata file is 00000-<uuid>.metadata.json",
+    )
+    # Discoverable again from the directory alone, and empty.
+    var again = catalog.load_table(String("db"), String("t"))
+    assert_equal(again.metadata.table_uuid, table.metadata.table_uuid)
+    assert_equal(again.scan().to_table().num_rows(), 0)
+    assert_equal(
+        read_version_hint(catalog.io, dirname(table.metadata_location)), 0
+    )
+    # A second create must not silently take over the first.
+    with assert_raises():
+        _ = catalog.create_table(String("db"), String("t"), schema)
+
+
+def test_append_round_trips_through_our_own_reader() raises:
+    var table = build_written_table(
+        String("append_v2"), String("unpartitioned"), 2
+    )
+    assert_equal(len(table.metadata.snapshots), 3)
+    assert_equal(table.metadata.last_sequence_number, 3)
+    var rows = table.scan().to_table()
+    assert_equal(rows.num_rows(), 18)
+    assert_equal(rows.num_columns(), 5)
+
+    # Every id 0..17 exactly once, with the values the batches carried.
+    var seen = List[Bool](length=18, fill=False)
+    for r in range(rows.num_rows()):
+        var id = Int(rows.value(r, 0).i)
+        assert_false(seen[id], "id " + String(id) + " came back twice")
+        seen[id] = True
+        assert_equal(rows.value(r, 1).s, write_region(id))
+        if id % 4 == 0:
+            assert_false(rows.value(r, 2).valid, "amount should be null")
+        else:
+            assert_equal(rows.value(r, 2).f, Float64(id) * 1.5)
+        assert_equal(
+            rows.value(r, 3).i,
+            (WRITE_DAY + Int64(id % 3)) * WRITE_MICROS_PER_DAY
+            + Int64(id) * 1000,
+        )
+        if id % 5 == 0:
+            assert_false(rows.value(r, 4).valid, "ok should be null")
+        else:
+            assert_equal(rows.value(r, 4).i != 0, id % 2 == 0)
+    for k in range(18):
+        assert_true(seen[k], "id " + String(k) + " is missing")
+
+    # Three snapshots, chained, each an append whose counts accumulate.
+    var parent_seen = False
+    for k in range(len(table.metadata.snapshots)):
+        ref s = table.metadata.snapshots[k]
+        assert_equal(s.operation(), "append")
+        assert_equal(s.summary_int("added-records", -1), 6)
+        assert_true(s.summary_int("added-files-size", -1) > 0)
+        assert_equal(s.summary_int("total-records", -1), Int64(6 * (k + 1)))
+        assert_equal(s.sequence_number, Int64(k + 1))
+        if s.has_parent:
+            parent_seen = True
+    assert_true(parent_seen, "later snapshots must name a parent")
+    assert_equal(len(table.metadata.snapshot_log), 3)
+    assert_equal(len(table.metadata.metadata_log), 3)
+    assert_equal(table.metadata.ref_index(String("main")) >= 0, True)
+
+    # Each snapshot's own scan sees only what had been committed by then.
+    for k in range(len(table.metadata.snapshots)):
+        var at = table.scan().use_snapshot(
+            table.metadata.snapshots[k].snapshot_id
+        )
+        assert_equal(
+            at.to_table().num_rows(),
+            Int(table.metadata.snapshots[k].summary_int("total-records", 0)),
+        )
+
+
+def test_append_carries_the_parent_manifests_forward() raises:
+    var table = build_written_table(String("carry"), String("unpartitioned"), 2)
+    var snap = table.metadata.current_snapshot()
+    var manifests = read_manifest_list_io(table.io, snap.manifest_list)
+    assert_equal(len(manifests), 3, "one manifest per append, all live")
+    var seqs = List[Int64]()
+    for k in range(len(manifests)):
+        assert_equal(manifests[k].added_files_count, 1)
+        assert_equal(manifests[k].added_rows_count, 6)
+        assert_equal(manifests[k].existing_files_count, 0)
+        assert_equal(manifests[k].deleted_files_count, 0)
+        assert_false(manifests[k].is_delete_manifest())
+        seqs.append(manifests[k].sequence_number)
+    # The carried-over manifests keep the sequence numbers they were
+    # committed with; only the newest has the newest.
+    var found_1 = False
+    var found_3 = False
+    for k in range(len(seqs)):
+        if seqs[k] == 1:
+            found_1 = True
+        if seqs[k] == 3:
+            found_3 = True
+    assert_true(found_1, "the first commit's manifest keeps sequence 1")
+    assert_true(found_3, "the newest manifest has sequence 3")
+
+
+def test_written_manifest_has_the_statistics_it_claims() raises:
+    var table = build_written_table(String("stats"), String("unpartitioned"), 2)
+    var tasks = table.scan().plan_files()
+    assert_equal(len(tasks), 3)
+    for k in range(len(tasks)):
+        ref df = tasks[k].data_file
+        assert_equal(df.record_count, 6)
+        assert_true(df.file_size_in_bytes > 0)
+        assert_equal(df.file_format.lower(), "parquet")
+        assert_true(len(df.split_offsets) > 0, "split_offsets")
+        assert_true(len(df.column_sizes) > 0, "column_sizes")
+        assert_equal(len(df.metrics), 5, "one metric entry per column")
+        for c in range(len(df.metrics)):
+            ref m = df.metrics[c]
+            assert_true(m.has_value_count, "value_count")
+            assert_equal(m.value_count, 6)
+            assert_true(m.has_null_value_count, "null_value_count")
+            assert_true(m.has_lower, "lower_bound")
+            assert_true(m.has_upper, "upper_bound")
+            if m.field_id == 1:
+                assert_equal(m.null_value_count, 0)
+                var lo = datum_from_bytes_prim(P_LONG, 0, 0, 0, m.lower_bound)
+                var hi = datum_from_bytes_prim(P_LONG, 0, 0, 0, m.upper_bound)
+                assert_true(lo.i <= hi.i, "id bounds are ordered")
+                assert_equal(hi.i - lo.i, 5)
+            if m.field_id == 3:
+                # `amount` is null wherever id % 4 == 0.
+                assert_true(m.null_value_count >= 1)
+
+
+def test_append_partitions_by_the_spec() raises:
+    var table = build_written_table(String("ident_part"), String("ident"), 2)
+    var rows = table.scan().to_table()
+    assert_equal(rows.num_rows(), 18)
+    var tasks = table.scan().plan_files()
+    # Five regions across three batches of six rows: 15 files.
+    assert_equal(len(tasks), 15)
+    for k in range(len(tasks)):
+        ref t = tasks[k]
+        assert_equal(len(t.data_file.partition), 1)
+        assert_true(t.data_file.partition[0].valid)
+        var region = t.data_file.partition[0].s
+        assert_true(
+            t.data_file.file_path.find("/region=" + region + "/") > 0,
+            "the file path should carry its partition: "
+            + t.data_file.file_path,
+        )
+        # Every row in the file really is in that partition.
+        var one = read_data_file_table(
+            table.io,
+            t.data_file,
+            List[DataFile](),
+            t.data_sequence_number,
+            table.metadata.spec(),
+            table.metadata.schema(),
+            [1, 2],
+            List[String](),
+            NameMapping(),
+            String('["true"]'),
+            True,
+            ScanOptions(),
+        )
+        for r in range(one.num_rows()):
+            assert_equal(one.value(r, 1).s, region)
+
+    # A partition predicate must prune to exactly that partition's files.
+    var eu = table.scan().filter('["=","region","eu"]')
+    assert_equal(len(eu.plan_files()), 3)
+    var eu_rows = eu.to_table()
+    assert_true(eu_rows.num_rows() > 0)
+    for r in range(eu_rows.num_rows()):
+        assert_equal(eu_rows.value(r, 1).s, "eu")
+
+
+def test_append_bucket_and_day_partitions() raises:
+    var bucket = build_written_table(String("bucket"), String("bucket"), 2)
+    assert_equal(bucket.scan().to_table().num_rows(), 18)
+    var btasks = bucket.scan().plan_files()
+    for k in range(len(btasks)):
+        var v = btasks[k].data_file.partition[0].copy()
+        assert_true(v.valid and v.i >= 0 and v.i < 4, "bucket in 0..3")
+        assert_true(
+            btasks[k].data_file.file_path.find("/id_bucket=") > 0,
+            btasks[k].data_file.file_path,
+        )
+
+    var day = build_written_table(String("day"), String("day"), 2)
+    assert_equal(day.scan().to_table().num_rows(), 18)
+    var dtasks = day.scan().plan_files()
+    # Three distinct days across three batches.
+    assert_equal(len(dtasks), 9)
+    for k in range(len(dtasks)):
+        var v = dtasks[k].data_file.partition[0].copy()
+        assert_true(v.valid)
+        assert_true(
+            v.i >= WRITE_DAY and v.i <= WRITE_DAY + 2,
+            "day partition value " + String(v.i),
+        )
+        assert_true(
+            dtasks[k].data_file.file_path.find("/ts_day=2024-01-0") > 0,
+            dtasks[k].data_file.file_path,
+        )
+
+
+def test_v3_append_assigns_row_lineage() raises:
+    var table = build_written_table(String("v3"), String("unpartitioned"), 3)
+    assert_equal(table.metadata.format_version, 3)
+    assert_true(table.metadata.has_next_row_id)
+    assert_equal(table.metadata.next_row_id, 18)
+    var at: Int64 = 0
+    for k in range(len(table.metadata.snapshots)):
+        ref s = table.metadata.snapshots[k]
+        assert_true(s.has_first_row_id, "a v3 snapshot carries first-row-id")
+        assert_true(s.has_added_rows, "a v3 snapshot carries added-rows")
+        assert_equal(s.added_rows, 6)
+    # The three ranges tile 0..18 with no overlap.
+    var firsts = List[Int64]()
+    for k in range(len(table.metadata.snapshots)):
+        firsts.append(table.metadata.snapshots[k].first_row_id)
+    for i in range(1, len(firsts)):
+        var j = i
+        while j > 0 and firsts[j] < firsts[j - 1]:
+            firsts.swap_elements(j, j - 1)
+            j -= 1
+    for k in range(len(firsts)):
+        assert_equal(firsts[k], at)
+        at += 6
+    assert_equal(at, table.metadata.next_row_id)
+
+    # And the reader's inheritance produces exactly those ids.
+    var rows = table.scan().select([String("id"), String("_row_id")]).to_table()
+    assert_equal(rows.num_rows(), 18)
+    for r in range(rows.num_rows()):
+        assert_true(rows.value(r, 1).valid, "every v3 row has a _row_id")
+        assert_equal(rows.value(r, 1).i, rows.value(r, 0).i)
+
+    # A v2 table must not carry row lineage at all.
+    var v2 = build_written_table(
+        String("v2_lineage"), String("unpartitioned"), 2, 1
+    )
+    assert_false(v2.metadata.has_next_row_id)
+    assert_false(v2.metadata.snapshots[0].has_first_row_id)
+
+
+def test_append_retries_when_another_writer_wins() raises:
+    """Two transactions opened against the same version; both must land."""
+    var catalog = fresh_catalog(String("race"))
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var table = catalog.create_table(String("db"), String("t"), schema)
+    var a = table.new_append()
+    var b = table.new_append()
+    a.add(write_batch(schema, 0, 6))
+    b.add(write_batch(schema, 6, 6))
+    assert_equal(a.commit(), 6)
+    # `b` still believes the table has no snapshot; its create-mode write of
+    # 00001-*.metadata.json collides, so it reloads and retries.
+    assert_equal(b.commit(), 6)
+    var loaded = catalog.load_table(String("db"), String("t"))
+    assert_equal(len(loaded.metadata.snapshots), 2)
+    assert_equal(loaded.scan().to_table().num_rows(), 12)
+    assert_equal(loaded.metadata.last_sequence_number, 2)
+
+
+def test_written_tables_reread_by_the_cli_layout() raises:
+    """`version-hint.text` and the file listing must agree after a commit."""
+    var table = build_written_table(String("hint"), String("unpartitioned"), 2)
+    var dir = dirname(table.metadata_location)
+    assert_equal(read_version_hint(table.io, dir), 3)
+    var found = find_latest_metadata(table.io, dir)
+    assert_equal(basename(found), basename(table.metadata_location))
+    # And from the table directory, which is what the CLI is given.
+    var from_root = find_latest_metadata(table.io, dirname(dir))
+    assert_equal(basename(from_root), basename(table.metadata_location))
+
+
+def test_next_metadata_version_reads_the_file_name() raises:
+    var m = TableMetadata()
+    m.metadata_file_location = String(
+        "/w/db/t/metadata/00007-abc.metadata.json"
+    )
+    assert_equal(next_metadata_version(m), 8)
+    m.metadata_file_location = String("/w/db/t/metadata/v3.metadata.json")
+    assert_equal(next_metadata_version(m), 1, "no leading digits: fall back")
+    m.metadata_file_location = String("")
+    assert_equal(next_metadata_version(m), 1)
+    assert_true(metadata_file_name(12).startswith("00012-"))
+    assert_true(metadata_file_name(12).endswith(".metadata.json"))
+
+
+def test_manifest_schemas_match_the_format_version() raises:
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    var typing = PartitionTyping.of(spec, schema)
+    assert_equal(len(typing), 1)
+    assert_equal(typing.kinds[0], P_STRING)
+
+    var v1 = manifest_entry_schema_json(1, typing)
+    var v2 = manifest_entry_schema_json(2, typing)
+    var v3 = manifest_entry_schema_json(3, typing)
+
+    # v1: required snapshot_id, block_size_in_bytes, no content.
+    assert_true(v1.find('"block_size_in_bytes"') > 0)
+    assert_true(v1.find('"content"') < 0)
+    assert_true(v1.find('"sequence_number"') < 0)
+    assert_true(v1.find('"equality_ids"') < 0)
+    # v2: content, sequence numbers, equality ids; no block size, no v3 fields.
+    assert_true(v2.find('"content"') > 0)
+    assert_true(v2.find('"sequence_number"') > 0)
+    assert_true(v2.find('"file_sequence_number"') > 0)
+    assert_true(v2.find('"equality_ids"') > 0)
+    assert_true(v2.find('"block_size_in_bytes"') < 0)
+    assert_true(v2.find('"first_row_id"') < 0)
+    # v3 adds row lineage and the deletion-vector fields.
+    assert_true(v3.find('"first_row_id"') > 0)
+    assert_true(v3.find('"referenced_data_file"') > 0)
+    assert_true(v3.find('"content_offset"') > 0)
+    assert_true(v3.find('"content_size_in_bytes"') > 0)
+    # The partition record is typed by the spec, under field id 102.
+    assert_true(v2.find('"name":"r102"') > 0)
+    assert_true(v2.find('"field-id":1000') > 0)
+
+    var l1 = manifest_list_schema_json(1)
+    var l2 = manifest_list_schema_json(2)
+    var l3 = manifest_list_schema_json(3)
+    assert_true(l1.find('"content"') < 0)
+    assert_true(l1.find('"sequence_number"') < 0)
+    assert_true(l2.find('"min_sequence_number"') > 0)
+    assert_true(l2.find('"first_row_id"') < 0)
+    assert_true(l3.find('"first_row_id"') > 0)
+    # And every one of them parses as Avro.
+    for k in range(3):
+        var v = k + 1
+        _ = parse_json(manifest_entry_schema_json(v, typing))
+        _ = parse_json(manifest_list_schema_json(v))
+
+
+def test_metric_bounds_are_truncated() raises:
+    """`write.metadata.metrics.default = truncate(16)`, both directions."""
+    var short_ = List[UInt8]()
+    short_.extend(String("abc").as_bytes())
+    assert_equal(len(truncate_lower(short_, P_STRING, 16)), 3)
+    var kept = truncate_upper(short_, P_STRING, 16)
+    assert_true(kept[1])
+    assert_equal(len(kept[0]), 3, "a short value is not truncated at all")
+
+    var long_ = List[UInt8]()
+    long_.extend(String("abcdefghijklmnopqrstuvwxyz").as_bytes())
+    var lower = truncate_lower(long_, P_STRING, 16)
+    assert_equal(len(lower), 16)
+    assert_equal(
+        String(StringSlice(unsafe_from_utf8=Span(lower))), "abcdefghijklmnop"
+    )
+    var upper = truncate_upper(long_, P_STRING, 16)
+    assert_true(upper[1])
+    assert_equal(
+        String(StringSlice(unsafe_from_utf8=Span(upper[0]))),
+        "abcdefghijklmnoq",
+        "an upper bound is incremented so it still bounds",
+    )
+
+    # Multi-byte code points count as one unit, and the increment stays valid
+    # UTF-8.
+    var utf8 = List[UInt8]()
+    utf8.extend(String("ααααααααααααααααββ").as_bytes())
+    var u_lower = truncate_lower(utf8, P_STRING, 16)
+    assert_equal(len(u_lower), 32, "16 two-byte code points")
+    var u_upper = truncate_upper(utf8, P_STRING, 16)
+    assert_true(u_upper[1])
+    assert_equal(
+        String(StringSlice(unsafe_from_utf8=Span(u_upper[0]))),
+        "αααααααααααααααβ",
+    )
+
+    # Binary increments the last byte below 0xFF; all-0xFF cannot be bounded.
+    var bytes = List[UInt8]()
+    for _ in range(20):
+        bytes.append(0x41)
+    var b_upper = truncate_upper(bytes, P_BINARY, 16)
+    assert_true(b_upper[1])
+    assert_equal(len(b_upper[0]), 16)
+    assert_equal(b_upper[0][15], 0x42)
+    var maxed = List[UInt8]()
+    for _ in range(20):
+        maxed.append(0xFF)
+    var m_upper = truncate_upper(maxed, P_BINARY, 16)
+    assert_false(m_upper[1], "an all-0xFF prefix has no truncated upper bound")
+
+
+def test_partition_paths_are_hive_shaped() raises:
+    assert_equal(escape_path(String("a b/c")), "a%20b%2Fc")
+    assert_equal(
+        human_partition_value(Datum.integral(P_DATE, 19723), 5), "2024-01-01"
+    )
+    assert_equal(
+        human_partition_value(Datum.int_(54), 3), "2024", "year(1970+54)"
+    )
+    assert_equal(human_partition_value(Datum.int_(648), 4), "2024-01")
+    assert_equal(human_partition_value(Datum.int_(473352), 6), "2024-01-01-00")
+    assert_equal(
+        human_partition_value(Datum.none(), 0), "__HIVE_DEFAULT_PARTITION__"
+    )
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    assert_equal(
+        partition_path(spec, [Datum.string_(String("eu"))]), "region=eu"
+    )
+    assert_equal(
+        partition_path(spec, [Datum.none()]),
+        "region=__HIVE_DEFAULT_PARTITION__",
+    )
+
+
+def test_written_table_survives_a_rewrite_of_its_location() raises:
+    """The metadata records absolute paths; a rebase must still read them."""
+    var table = build_written_table(
+        String("rebase"), String("unpartitioned"), 2, 1
+    )
+    var io = FileIO.local()
+    io.rebase(table.metadata.location, table.metadata.location)
+    var scan = table.scan().with_io(io^)
+    assert_equal(scan.to_table().num_rows(), 6)
+
+
+# ── REST commits ────────────────────────────────────────────────────────────
+def rest_write_catalog() raises -> RestCatalog:
+    var config = RestCatalogConfig(getenv("ICEBERG_TEST_REST", ""))
+    config.with_token(getenv("ICEBERG_TEST_REST_TOKEN", "test-token"))
+    var catalog = RestCatalog(config^, FileIO.local())
+    catalog.connect()
+    return catalog^
+
+
+def test_rest_create_table_and_commit_append() raises:
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    for v in [2, 3]:
+        var name = String("commit_v") + String(v)
+        var created = catalog.create_table(
+            String("wr"), name, schema, spec, Dict[String, String](), v
+        )
+        assert_equal(created.metadata.format_version, v)
+        assert_false(created.metadata.has_current_snapshot)
+
+        var total = 0
+        for b in range(2):
+            var batches = List[RecordBatch]()
+            batches.append(write_batch(schema, b * 6, 6))
+            var after = catalog.append(String("wr"), name, batches)
+            total += 6
+            assert_equal(len(after.metadata.snapshots), b + 1)
+            assert_equal(after.metadata.last_sequence_number, Int64(b + 1))
+            if v >= 3:
+                # The server derives `next-row-id` from the snapshot, since
+                # the spec has no TableUpdate that sets it.
+                assert_equal(after.metadata.next_row_id, Int64(total))
+        var back = catalog.load_table(String("wr"), name)
+        var rows = back.scan().to_table()
+        assert_equal(rows.num_rows(), 12)
+        assert_equal(len(back.metadata.snapshots), 2)
+        if v >= 3:
+            # Row ids are assigned per *file*, in manifest order, so they do
+            # not track `id` once the rows are spread over five partitions.
+            # What must hold is that the twelve rows carry exactly the twelve
+            # ids 0..11, each once.
+            var lineage = (
+                back.scan().select([String("id"), String("_row_id")]).to_table()
+            )
+            assert_equal(lineage.num_rows(), 12)
+            var seen_row_id = List[Bool](length=12, fill=False)
+            for r in range(lineage.num_rows()):
+                assert_true(lineage.value(r, 1).valid, "_row_id is assigned")
+                var rid = Int(lineage.value(r, 1).i)
+                assert_true(
+                    rid >= 0 and rid < 12,
+                    "_row_id " + String(rid) + " in range",
+                )
+                assert_false(
+                    seen_row_id[rid], "_row_id " + String(rid) + " twice"
+                )
+                seen_row_id[rid] = True
+
+
+def test_rest_commit_retries_a_409() raises:
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    # The mock answers 409 to this table's first commit, then accepts.
+    var name = String("conflict_once_a")
+    _ = catalog.create_table(
+        String("wr"), name, schema, PartitionSpec.unpartitioned()
+    )
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 6))
+    var after = catalog.append(String("wr"), name, batches)
+    assert_equal(len(after.metadata.snapshots), 1, "the retry must land")
+    assert_equal(
+        catalog.load_table(String("wr"), name).scan().to_table().num_rows(), 6
+    )
+
+
+def test_rest_commit_state_unknown_on_5xx() raises:
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    # This table's commit is applied and *then* answered with 500.
+    var name = String("unknown_state_a")
+    _ = catalog.create_table(
+        String("wr"), name, schema, PartitionSpec.unpartitioned()
+    )
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 6))
+    var raised = String("")
+    try:
+        _ = catalog.append(String("wr"), name, batches)
+    except e:
+        raised = String(e)
+    assert_true(
+        raised.find("CommitStateUnknown") >= 0,
+        "a 5xx must not be retried; it is reported as unknown state: " + raised,
+    )
+    # And it really is unknown: the server had applied it.
+    assert_equal(
+        catalog.load_table(String("wr"), name).scan().to_table().num_rows(), 6
+    )
+
+
+def test_s3_write_round_trips() raises:
+    """Create, append and read back entirely over `s3://`.
+
+    MinIO verifies the SigV4 signatures, so every PUT here is a real signed
+    request. The commit itself is *not* safe over an object store — there is
+    no atomic create-if-absent to lose a race against — which is exactly what
+    the spec says about filesystem tables and why this only ever has one
+    writer.
+    """
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_write_round_trips: no ICEBERG_TEST_S3")
+        return
+    var prefix = getenv("ICEBERG_TEST_S3_PREFIX", "")
+    if prefix == "":
+        return
+    var io = FileIO.local()
+    io.set(String("s3.endpoint"), getenv("AWS_ENDPOINT_URL_S3", ""))
+    io.set(String("s3.access-key-id"), getenv("AWS_ACCESS_KEY_ID", ""))
+    io.set(String("s3.secret-access-key"), getenv("AWS_SECRET_ACCESS_KEY", ""))
+    io.set(String("s3.region"), String("us-east-1"))
+    var warehouse = prefix + "written"
+    var catalog = FilesystemCatalog(warehouse, io^)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    # A fresh table name each run: an object store has no atomic create, so a
+    # leftover from a previous run would be indistinguishable from a race.
+    var name = String("t") + String(now_ms())
+    var table = catalog.create_table(String("db"), name, schema, spec)
+    assert_true(table.metadata.location.startswith("s3://"))
+    for b in range(2):
+        var batches = List[RecordBatch]()
+        batches.append(write_batch(schema, b * 6, 6))
+        var tx = table.new_append()
+        tx.add_batches(batches)
+        assert_equal(tx.commit(), 6)
+        table.refresh()
+    assert_equal(len(table.metadata.snapshots), 2)
+
+    var back = catalog.load_table(String("db"), name)
+    var rows = back.scan().to_table()
+    assert_equal(rows.num_rows(), 12)
+    for r in range(rows.num_rows()):
+        var id = Int(rows.value(r, 0).i)
+        assert_equal(rows.value(r, 1).s, write_region(id))
+    var tasks = back.scan().plan_files()
+    for k in range(len(tasks)):
+        assert_true(
+            tasks[k].data_file.file_path.startswith("s3://"),
+            tasks[k].data_file.file_path,
+        )
+    # And a partition filter still prunes over the network.
+    var eu = back.scan().filter('["=","region","eu"]').to_table()
+    assert_true(eu.num_rows() > 0)
+    for r in range(eu.num_rows()):
+        assert_equal(eu.value(r, 1).s, "eu")
+
+
+def test_rest_commit_rejects_a_stale_requirement() raises:
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var name = String("requirements")
+    var created = catalog.create_table(
+        String("wr"), name, schema, PartitionSpec.unpartitioned()
+    )
+    # A hand-built body whose `assert-table-uuid` is wrong must be refused,
+    # which is what proves the server is checking rather than accepting.
+    var files = write_data_files(
+        created.io,
+        created.metadata.location,
+        [write_batch(schema, 0, 3)],
+        schema,
+        PartitionSpec.unpartitioned(),
+        0,
+        WriteOptions(),
+    )
+    var result = prepare_append(
+        created.io, created.metadata, files^, Dict[String, String]()
+    )
+    var stale = created.metadata.copy()
+    stale.table_uuid = String("00000000-0000-4000-8000-000000000000")
+    var body = commit_append_body(String("wr"), name, stale, result)
+    var headers = catalog.config.headers()
+    var resp = catalog.client.post(
+        catalog.config.commit_table_url(String("wr"), name),
+        body.as_bytes(),
+        headers,
+    )
+    assert_equal(resp.status, 409, "a wrong table uuid is a conflict")
+    assert_true(resp.text().find("assert-table-uuid") >= 0, resp.text())
 
 
 def main() raises:

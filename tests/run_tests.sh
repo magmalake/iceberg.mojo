@@ -5,8 +5,9 @@
 #
 # Two servers:
 #   * tests/rest_server.py — a mock Iceberg REST catalog serving `/v1/config`
-#     and `loadTable` out of the checked-in fixtures. Always available; python
-#     is a workspace dependency.
+#     and `loadTable` out of the checked-in fixtures, and `createTable` /
+#     `commitTable` into a scratch warehouse under $WORK. Always available;
+#     python is a workspace dependency.
 #   * an S3 server for the end-to-end read over `s3://`. MinIO is strongly
 #     preferred because it actually *verifies* SigV4 signatures. Found in this
 #     order: $MINIO_BINARY, build/minio, `minio` on PATH, then `moto_server`.
@@ -103,6 +104,10 @@ fi
 
 # ── REST catalog mock ──────────────────────────────────────────────────────
 export ICEBERG_TEST_REST_TOKEN=test-token
+# The `wr` namespace the commit tests write into. Under $WORK so it is torn
+# down with everything else.
+export ICEBERG_TEST_REST_WAREHOUSE="$WORK/rest-warehouse"
+mkdir -p "$ICEBERG_TEST_REST_WAREHOUSE"
 python tests/rest_server.py tests/fixtures > "$WORK/rest.url" 2>"$WORK/rest.log" &
 PIDS+=($!)
 for _ in $(seq 1 100); do

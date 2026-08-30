@@ -16,22 +16,13 @@ from std.memory import bitcast
 from std.sys import argv
 
 from parquet import RecordBatch
-from parquet.arrow import (
-    AT_BOOL,
-    AT_FLOAT64,
-    AT_INT64,
-    AT_TIMESTAMP,
-    AT_UTF8,
-    TU_MICRO,
-    ArrayData,
-    ArrowType,
-    bit_set,
-)
 
+from iceberg.batch import ColumnBuilder, batch_of
 from iceberg.catalog.filesystem import FilesystemCatalog, Table
 from iceberg.io import FileIO
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionField, PartitionSpec, parse_transform
+from iceberg.values import Datum
 
 
 comptime SCHEMA_JSON = String(
@@ -45,97 +36,6 @@ comptime SCHEMA_JSON = String(
 
 comptime DAY_2024_01_01: Int64 = 19723
 comptime MICROS_PER_DAY: Int64 = 86400000000
-
-
-def _finish(mut a: ArrayData, n: Int):
-    while len(a.validity) < (n + 7) // 8:
-        a.validity.append(0)
-
-
-def i64_col(
-    name: String, fid: Int, values: List[Int64], valid: List[Bool]
-) raises -> ArrayData:
-    var a = ArrayData(ArrowType(AT_INT64), name)
-    a.field_id = Int32(fid)
-    a.length = len(values)
-    for k in range(len(values)):
-        bit_set(a.validity, k, valid[k])
-        if not valid[k]:
-            a.null_count += 1
-        var v = UInt64(values[k])
-        for b in range(8):
-            a.values.append(UInt8((v >> UInt64(8 * b)) & 0xFF))
-    _finish(a, len(values))
-    return a^
-
-
-def ts_col(
-    name: String, fid: Int, values: List[Int64], valid: List[Bool]
-) raises -> ArrayData:
-    var a = i64_col(name, fid, values, valid)
-    var t = ArrowType(AT_TIMESTAMP)
-    t.unit = TU_MICRO
-    a.type = t^
-    return a^
-
-
-def f64_col(
-    name: String, fid: Int, values: List[Float64], valid: List[Bool]
-) raises -> ArrayData:
-    var a = ArrayData(ArrowType(AT_FLOAT64), name)
-    a.field_id = Int32(fid)
-    a.length = len(values)
-    for k in range(len(values)):
-        bit_set(a.validity, k, valid[k])
-        if not valid[k]:
-            a.null_count += 1
-        var bits = UInt64(0)
-        if valid[k]:
-            bits = bitcast[DType.uint64](values[k])
-        for b in range(8):
-            a.values.append(UInt8((bits >> UInt64(8 * b)) & 0xFF))
-    _finish(a, len(values))
-    return a^
-
-
-def bool_col(
-    name: String, fid: Int, values: List[Bool], valid: List[Bool]
-) raises -> ArrayData:
-    var a = ArrayData(ArrowType(AT_BOOL), name)
-    a.field_id = Int32(fid)
-    a.length = len(values)
-    for k in range(len(values)):
-        bit_set(a.validity, k, valid[k])
-        if not valid[k]:
-            a.null_count += 1
-        while len(a.values) <= k // 8:
-            a.values.append(0)
-        if valid[k] and values[k]:
-            a.values[k // 8] |= UInt8(1) << UInt8(k % 8)
-    while len(a.values) < (len(values) + 7) // 8:
-        a.values.append(0)
-    _finish(a, len(values))
-    return a^
-
-
-def str_col(
-    name: String, fid: Int, values: List[String], valid: List[Bool]
-) raises -> ArrayData:
-    var a = ArrayData(ArrowType(AT_UTF8), name)
-    a.field_id = Int32(fid)
-    a.length = len(values)
-    a.offsets.append(0)
-    for k in range(len(values)):
-        bit_set(a.validity, k, valid[k])
-        if valid[k]:
-            a.values.extend(values[k].as_bytes())
-        else:
-            a.null_count += 1
-        a.offsets.append(Int32(len(a.values)))
-    _finish(a, len(values))
-    return a^
-
-
 comptime REGIONS = String("eu,us,apac,latam,emea")
 
 
@@ -144,47 +44,33 @@ def region_of(i: Int) raises -> String:
     return String(parts[i % 5])
 
 
-def make_batch(start: Int, n: Int) raises -> RecordBatch:
-    """`n` rows starting at `start`, with a null in `amount` and in `ok`."""
-    var ids = List[Int64]()
-    var regions = List[String]()
-    var amounts = List[Float64]()
-    var amount_valid = List[Bool]()
-    var timestamps = List[Int64]()
-    var ts_valid = List[Bool]()
-    var oks = List[Bool]()
-    var ok_valid = List[Bool]()
-    var all_valid = List[Bool]()
+def make_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
+    """`n` rows starting at `start`, with nulls in `amount` and in `ok`."""
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    var amount = ColumnBuilder.of(schema, 3)
+    var ts = ColumnBuilder.of(schema, 4)
+    var ok = ColumnBuilder.of(schema, 5)
     for k in range(n):
         var i = start + k
-        ids.append(Int64(i))
-        regions.append(region_of(i))
-        amounts.append(Float64(i) * 1.5)
-        amount_valid.append(i % 4 != 0)
-        timestamps.append((DAY_2024_01_01 + Int64(i % 3)) * MICROS_PER_DAY + Int64(i) * 1000)
-        ts_valid.append(True)
-        oks.append(i % 2 == 0)
-        ok_valid.append(i % 5 != 0)
-        all_valid.append(True)
-
-    var batch = RecordBatch()
-    batch.num_rows = n
-    batch.roots.append(
-        batch.arena.add(i64_col(String("id"), 1, ids, all_valid))
-    )
-    batch.roots.append(
-        batch.arena.add(str_col(String("region"), 2, regions, all_valid))
-    )
-    batch.roots.append(
-        batch.arena.add(f64_col(String("amount"), 3, amounts, amount_valid))
-    )
-    batch.roots.append(
-        batch.arena.add(ts_col(String("ts"), 4, timestamps, ts_valid))
-    )
-    batch.roots.append(
-        batch.arena.add(bool_col(String("ok"), 5, oks, ok_valid))
-    )
-    return batch^
+        ids.add(Datum.long_(Int64(i)))
+        region.add(Datum.string_(region_of(i)))
+        if i % 4 == 0:
+            amount.add_null()
+        else:
+            amount.add(Datum.double_(Float64(i) * 1.5))
+        ts.add(
+            Datum.integral(
+                ts.kind,
+                (DAY_2024_01_01 + Int64(i % 3)) * MICROS_PER_DAY
+                + Int64(i) * 1000,
+            )
+        )
+        if i % 5 == 0:
+            ok.add_null()
+        else:
+            ok.add(Datum.bool_(i % 2 == 0))
+    return batch_of([ids^, region^, amount^, ts^, ok^])
 
 
 def spec_for(kind: String) raises -> PartitionSpec:
@@ -263,7 +149,7 @@ def main() raises:
             var total: Int64 = 0
             for b in range(3):
                 var batches = List[RecordBatch]()
-                batches.append(make_batch(b * 6, 6))
+                batches.append(make_batch(schema, b * 6, 6))
                 var tx = table.new_append()
                 tx.add_batches(batches)
                 total += tx.commit()

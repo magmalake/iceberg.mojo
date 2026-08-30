@@ -198,7 +198,18 @@ struct FileIO(Copyable, Movable):
         self.write_all(location, text.as_bytes())
 
     def delete(self, location: String) raises:
-        self.resolver.delete(self.absolute(location))
+        """Remove one object. A missing one is not an error.
+
+        The location is resolved to a bare filesystem path first when it is
+        local: `list()` hands back `file://` plus whatever path it was given,
+        and `file://build/x` is not a well-formed URI — a URI parser reads
+        `build` as the host — so a *relative* local location has to lose its
+        scheme before an object store's URI parsing gets hold of it.
+        """
+        var target = self.resolver.resolve(self.absolute(location))
+        if is_local_location(target):
+            target = strip_scheme(target)
+        self.resolver.delete(target)
 
     # ── listing ────────────────────────────────────────────────────────────
     def list(self, prefix: String) raises -> List[String]:

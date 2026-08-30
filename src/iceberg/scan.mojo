@@ -163,14 +163,29 @@ struct TableScan(Copyable, Movable):
         return s^
 
     # ── resolution ─────────────────────────────────────────────────────────
+    def has_any_snapshot(self) -> Bool:
+        """False for a table that has been created but never written to.
+
+        Such a table is not an error to scan — it has a schema and no rows —
+        so every path below falls back to the table's current schema rather
+        than demanding a snapshot that does not exist.
+        """
+        if self.has_snapshot:
+            return True
+        return self.metadata.has_current_snapshot
+
     def snapshot(self) raises -> Snapshot:
         if self.has_snapshot:
             return self.metadata.snapshot_by_id(self.snapshot_id)
         return self.metadata.current_snapshot()
 
+    def current_schema(self) raises -> Schema:
+        if not self.has_any_snapshot():
+            return self.metadata.schema()
+        return self.metadata.schema_for_snapshot(self.snapshot())
+
     def schema(self) raises -> Schema:
-        var s = self.snapshot()
-        var full = self.metadata.schema_for_snapshot(s)
+        var full = self.current_schema()
         if len(self.selected) == 0:
             return full^
         var ids = List[Int]()
@@ -181,8 +196,7 @@ struct TableScan(Copyable, Movable):
         return full.select(ids)
 
     def projected_field_ids(self) raises -> List[Int]:
-        var s = self.snapshot()
-        var full = self.metadata.schema_for_snapshot(s)
+        var full = self.current_schema()
         var out = List[Int]()
         if len(self.selected) == 0:
             var cols = full.columns()
@@ -197,6 +211,8 @@ struct TableScan(Copyable, Movable):
 
     # ── planning ───────────────────────────────────────────────────────────
     def plan_files(self) raises -> List[FileScanTask]:
+        if not self.has_any_snapshot():
+            return List[FileScanTask]()
         var snap = self.snapshot()
         var schema = self.metadata.schema_for_snapshot(snap)
         var row_filter = bind(
@@ -338,8 +354,7 @@ struct TableScan(Copyable, Movable):
         """The selected columns, split into schema field ids and the metadata
         columns (`_file`, `_pos`, `_spec_id`, `_partition`, `_row_id`,
         `_last_updated_sequence_number`), which have no field id."""
-        var snap = self.snapshot()
-        var full = self.metadata.schema_for_snapshot(snap)
+        var full = self.current_schema()
         var ids = List[Int]()
         var meta = List[String]()
         if len(self.selected) == 0:
@@ -367,8 +382,7 @@ struct TableScan(Copyable, Movable):
     ) raises -> ScanResult:
         """Read every planned file and return the rows, projected and filtered.
         """
-        var snap = self.snapshot()
-        var schema = self.metadata.schema_for_snapshot(snap)
+        var schema = self.current_schema()
         var split = self._split_selection()
         var ids = split[0].copy()
         var meta_columns = split[1].copy()
@@ -416,8 +430,7 @@ struct TableScan(Copyable, Movable):
         One batch per Parquet batch read, not one per data file: nothing is
         concatenated on the way out, which is what makes this the fast path.
         """
-        var snap = self.snapshot()
-        var schema = self.metadata.schema_for_snapshot(snap)
+        var schema = self.current_schema()
         var split = self._split_selection()
         var ids = split[0].copy()
         var meta_columns = split[1].copy()

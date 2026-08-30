@@ -8,6 +8,19 @@ Enough of the spec to exercise the client end to end and nothing more:
     GET  /v1/<prefix>/namespaces/db/tables   -> ListTablesResponse
     GET  /v1/<prefix>/namespaces/db/tables/X -> LoadTableResult
     HEAD (same)                              -> 200 / 404
+    POST /v1/<prefix>/namespaces/wr/tables   -> CreateTableRequest
+    POST /v1/<prefix>/namespaces/wr/tables/X -> CommitTableRequest
+
+The `db` namespace is the read-only fixture corpus. The `wr` namespace is a
+scratch warehouse ($ICEBERG_TEST_REST_WAREHOUSE, or a temp dir) that accepts
+`createTable` and `commitTable`: requirements are **checked**, updates are
+applied to the stored metadata, and a new `<V>-<uuid>.metadata.json` is
+written, so a commit against this server is a real optimistic commit.
+
+Two tables are rigged so the client's error paths can be exercised for real:
+`conflict_once` answers **409** to the first commit it sees (and accepts the
+retry), and `unknown_state` answers **500** *after* applying the commit, which
+is exactly the case the spec calls `CommitStateUnknown`.
 
 The `metadata` in a LoadTableResult is the fixture's real current
 `*.metadata.json`, inlined, so the client parses genuine table metadata. Every
@@ -21,7 +34,10 @@ Prints its base URL on stdout and then serves forever.
 import json
 import os
 import sys
+import tempfile
 import threading
+import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
@@ -29,6 +45,140 @@ FIXTURES = sys.argv[1] if len(sys.argv) > 1 else "tests/fixtures"
 TOKEN = os.environ.get("ICEBERG_TEST_REST_TOKEN", "test-token")
 PREFIX = "ws"
 NAMESPACE = "db"
+WRITE_NAMESPACE = "wr"
+WAREHOUSE = os.environ.get("ICEBERG_TEST_REST_WAREHOUSE") or tempfile.mkdtemp(
+    prefix="iceberg-rest-wh-")
+
+# {table -> (metadata_location, metadata)}, plus the rigged-failure bookkeeping.
+WRITTEN = {}
+SEEN_409 = set()
+LOCK = threading.Lock()
+
+
+def _write_metadata(table, doc, version):
+    """Persist a metadata file the way a catalog does, and remember it."""
+    d = os.path.join(WAREHOUSE, WRITE_NAMESPACE, table, "metadata")
+    os.makedirs(d, exist_ok=True)
+    name = "%05d-%s.metadata.json" % (version, uuid.uuid4())
+    path = os.path.join(d, name)
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+    WRITTEN[table] = ("file://" + path, doc, version)
+    return "file://" + path
+
+
+def _new_metadata(req, table):
+    """The metadata of a table this server is being asked to create."""
+    props = dict(req.get("properties") or {})
+    version = int(props.pop("format-version", "2"))
+    location = req.get("location") or os.path.join(
+        WAREHOUSE, WRITE_NAMESPACE, table)
+    schema = dict(req["schema"])
+    schema["schema-id"] = 0
+    spec = dict(req.get("partition-spec") or {"spec-id": 0, "fields": []})
+    spec["spec-id"] = 0
+    last_partition_id = max(
+        [999] + [f["field-id"] for f in spec.get("fields", [])])
+    now = int(time.time() * 1000)
+    doc = {
+        "format-version": version,
+        "table-uuid": str(uuid.uuid4()),
+        "location": location,
+        "last-sequence-number": 0,
+        "last-updated-ms": now,
+        "last-column-id": max(
+            [0] + [f["id"] for f in schema.get("fields", [])]),
+        "schemas": [schema],
+        "current-schema-id": 0,
+        "partition-specs": [spec],
+        "default-spec-id": 0,
+        "last-partition-id": last_partition_id,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "default-sort-order-id": 0,
+        "properties": props,
+        "current-snapshot-id": -1,
+        "refs": {},
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+    }
+    if version >= 3:
+        doc["next-row-id"] = 0
+    return doc
+
+
+def _check_requirements(doc, requirements):
+    """Every requirement the spec defines for an append, actually checked."""
+    for r in requirements or []:
+        kind = r.get("type")
+        if kind == "assert-create":
+            if doc is not None:
+                return "table already exists"
+        elif kind == "assert-table-uuid":
+            if doc is None or doc.get("table-uuid") != r.get("uuid"):
+                return "assert-table-uuid: %s != %s" % (
+                    None if doc is None else doc.get("table-uuid"),
+                    r.get("uuid"))
+        elif kind == "assert-ref-snapshot-id":
+            ref = r.get("ref")
+            want = r.get("snapshot-id")
+            got = None
+            if doc is not None:
+                entry = (doc.get("refs") or {}).get(ref)
+                got = entry.get("snapshot-id") if entry else None
+            if got != want:
+                return "assert-ref-snapshot-id %s: %r != %r" % (ref, got, want)
+        elif kind == "assert-current-schema-id":
+            if doc.get("current-schema-id") != r.get("current-schema-id"):
+                return "assert-current-schema-id"
+        elif kind == "assert-default-spec-id":
+            if doc.get("default-spec-id") != r.get("default-spec-id"):
+                return "assert-default-spec-id"
+    return None
+
+
+def _apply_updates(doc, updates):
+    """The `TableUpdate` actions a commit from this client can send."""
+    for u in updates or []:
+        action = u.get("action")
+        if action == "add-snapshot":
+            s = u["snapshot"]
+            doc["snapshots"] = doc.get("snapshots", []) + [s]
+            doc["last-sequence-number"] = max(
+                doc.get("last-sequence-number", 0), s.get("sequence-number", 0))
+            doc["last-updated-ms"] = s.get(
+                "timestamp-ms", int(time.time() * 1000))
+            doc["snapshot-log"] = doc.get("snapshot-log", []) + [
+                {"timestamp-ms": s["timestamp-ms"],
+                 "snapshot-id": s["snapshot-id"]}]
+            # v3 row lineage: the server derives `next-row-id`; there is no
+            # TableUpdate that sets it.
+            if doc.get("format-version", 2) >= 3 and "first-row-id" in s:
+                doc["next-row-id"] = s["first-row-id"] + s.get("added-rows", 0)
+        elif action == "set-snapshot-ref":
+            refs = doc.setdefault("refs", {})
+            refs[u["ref-name"]] = {
+                "snapshot-id": u["snapshot-id"],
+                "type": u.get("type", "branch"),
+            }
+            if u["ref-name"] == "main":
+                doc["current-snapshot-id"] = u["snapshot-id"]
+        elif action == "add-schema":
+            doc["schemas"] = doc.get("schemas", []) + [u["schema"]]
+        elif action == "set-current-schema":
+            doc["current-schema-id"] = u["schema-id"]
+        elif action == "set-properties":
+            doc.setdefault("properties", {}).update(u["updates"])
+        elif action == "remove-properties":
+            for k in u["removals"]:
+                doc.get("properties", {}).pop(k, None)
+        elif action == "set-location":
+            doc["location"] = u["location"]
+        elif action == "upgrade-format-version":
+            doc["format-version"] = u["format-version"]
+        else:
+            return "unsupported update action %r" % action
+    return None
 
 TABLES = sorted(
     d for d in os.listdir(FIXTURES)
@@ -85,8 +235,82 @@ class Handler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization", "")
         return auth == "Bearer " + TOKEN
 
+    def _body(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        return json.loads(self.rfile.read(n) or b"{}")
+
     def do_HEAD(self):
         self.do_GET()
+
+    def do_POST(self):
+        path = unquote(urlparse(self.path).path)
+        base = "/v1/" + PREFIX
+        if not path.startswith(base):
+            return self._error(404, "NoSuchEndpointException", "bad prefix")
+        if not self._authorized():
+            return self._error(401, "NotAuthorizedException", "no bearer")
+        parts = [p for p in path[len(base):].split("/") if p]
+        if len(parts) < 3 or parts[0] != "namespaces" or parts[2] != "tables":
+            return self._error(404, "NoSuchEndpointException", "unknown " + path)
+        if parts[1] != WRITE_NAMESPACE:
+            return self._error(
+                403, "ForbiddenException",
+                "namespace %r is read-only; write to %r"
+                % (parts[1], WRITE_NAMESPACE))
+        try:
+            req = self._body()
+        except Exception as e:
+            return self._error(400, "BadRequestException", str(e))
+
+        with LOCK:
+            if len(parts) == 3:
+                return self._create_table(req)
+            return self._commit_table(parts[3], req)
+
+    def _create_table(self, req):
+        name = req.get("name")
+        if not name:
+            return self._error(400, "BadRequestException", "no name")
+        if name in WRITTEN:
+            return self._error(
+                409, "AlreadyExistsException", "table exists: " + name)
+        doc = _new_metadata(req, name)
+        loc = _write_metadata(name, doc, 0)
+        return self._send(200, {"metadata-location": loc, "metadata": doc,
+                                "config": {}})
+
+    def _commit_table(self, name, req):
+        entry = WRITTEN.get(name)
+        if entry is None:
+            return self._error(
+                404, "NoSuchTableException", "no table " + name)
+        loc, doc, version = entry
+        # `conflict_once` answers 409 the first time, so the client's reload
+        # and retry is exercised against a server that really did refuse.
+        if name.startswith("conflict_once") and name not in SEEN_409:
+            SEEN_409.add(name)
+            return self._error(
+                409, "CommitFailedException",
+                "the requirements are not met (rigged, once)")
+        why = _check_requirements(doc, req.get("requirements"))
+        if why is not None:
+            return self._error(409, "CommitFailedException", why)
+        updated = json.loads(json.dumps(doc))
+        why = _apply_updates(updated, req.get("updates"))
+        if why is not None:
+            return self._error(400, "BadRequestException", why)
+        updated["metadata-log"] = (updated.get("metadata-log") or []) + [
+            {"timestamp-ms": doc["last-updated-ms"],
+             "metadata-file": loc}]
+        new_loc = _write_metadata(name, updated, version + 1)
+        # `unknown_state` applies the commit and *then* fails, which is the
+        # only way to test that the client reports CommitStateUnknown instead
+        # of retrying.
+        if name.startswith("unknown_state"):
+            return self._error(
+                500, "ServerErrorException", "applied, then died (rigged)")
+        return self._send(200, {"metadata-location": new_loc,
+                                "metadata": updated})
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)
@@ -100,6 +324,8 @@ class Handler(BaseHTTPRequestHandler):
                     "GET /v1/{prefix}/namespaces",
                     "GET /v1/{prefix}/namespaces/{namespace}/tables",
                     "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}",
+                    "POST /v1/{prefix}/namespaces/{namespace}/tables",
+                    "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
                 ],
             })
 
@@ -111,7 +337,8 @@ class Handler(BaseHTTPRequestHandler):
         rest = path[len(base):]
 
         if rest == "/namespaces":
-            return self._send(200, {"namespaces": [[NAMESPACE]]})
+            return self._send(
+                200, {"namespaces": [[NAMESPACE], [WRITE_NAMESPACE]]})
 
         parts = [p for p in rest.split("/") if p]
         if len(parts) == 3 and parts[0] == "namespaces" and parts[2] == "tables":
@@ -120,6 +347,21 @@ class Handler(BaseHTTPRequestHandler):
                     404, "NoSuchNamespaceException", "no namespace " + parts[1])
             return self._send(200, {"identifiers": [
                 {"namespace": [NAMESPACE], "name": t} for t in TABLES]})
+
+        if (len(parts) == 4 and parts[0] == "namespaces"
+                and parts[2] == "tables" and parts[1] == WRITE_NAMESPACE):
+            entry = WRITTEN.get(parts[3])
+            if entry is None:
+                return self._error(
+                    404, "NoSuchTableException", "no table " + parts[3])
+            return self._send(200, {"metadata-location": entry[0],
+                                    "metadata": entry[1], "config": {}})
+
+        if (len(parts) == 3 and parts[0] == "namespaces"
+                and parts[2] == "tables" and parts[1] == WRITE_NAMESPACE):
+            return self._send(200, {"identifiers": [
+                {"namespace": [WRITE_NAMESPACE], "name": t}
+                for t in sorted(WRITTEN)]})
 
         if len(parts) == 4 and parts[0] == "namespaces" and parts[2] == "tables":
             if parts[1] != NAMESPACE:
@@ -165,6 +407,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print("http://127.0.0.1:%d" % server.server_address[1], flush=True)
+    print("warehouse: %s" % WAREHOUSE, file=sys.stderr, flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Event().wait()
 

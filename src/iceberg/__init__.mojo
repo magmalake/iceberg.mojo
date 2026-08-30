@@ -25,6 +25,7 @@ from iceberg.append import (
     prepare_append,
     write_and_prepare_append,
 )
+from iceberg.batch import ColumnBuilder, array_from_datums, batch_of
 from iceberg.expressions import (
     ColumnMetrics,
     Expr,
