@@ -152,8 +152,14 @@ unknown transforms).
 - **Metadata columns** on request: `_file`, `_pos`, `_spec_id`, `_partition`,
   `_last_updated_sequence_number`, and v3's `_row_id` through `first_row_id`
   inheritance.
-- **Output** as an Arrow `RecordBatch` (`export_c` hands it to anything
-  speaking the Arrow C Data Interface), as CSV, or as Appendix-D JSON.
+- **Output** as Arrow, throughout. A scan's columns are parquet.mojo
+  `ArrayData` from the moment they are decoded: `iceberg.kernels` casts them to
+  the table's current type, builds constant arrays for the columns a file does
+  not have, turns deletes and the residual into one selection bitmap and
+  applies it with a single filter pass per column. `to_batches()` hands back
+  `RecordBatch`es (`export_c` gives them to anything speaking the Arrow C Data
+  Interface); `to_table()` concatenates them; CSV and Appendix-D JSON are
+  formatted on demand. No tagged value is materialised per cell.
 - **Lazy IO** as an option: fetch the footer, then only the byte ranges of the
   row groups that survive statistics pruning, into a buffer the size of the
   file with everything else left zero. Parquet addresses everything by absolute
@@ -275,23 +281,52 @@ headers are proved rather than assumed.
 
 ## Performance
 
-`pixi run bench` builds a one-million-row table and times whole `to_table()`
-calls — metadata, plan, Parquet decode, value materialisation — then runs the
-same scans through PyIceberg. M4, one core:
+`pixi run bench` builds a one-million-row table and times whole scans —
+metadata, plan, Parquet decode, casts, deletes, filter — then runs the same
+scans through PyIceberg. M4, one core, six columns (two longs, a string, a
+double, a timestamp, a boolean):
 
-| Scan | iceberg.mojo | PyIceberg 0.11.1 |
-|---|---|---|
-| full scan, 1 M rows × 6 columns | 911 ms — **1.10 M rows/s** | 13 ms — 75 M rows/s |
-| projection to 2 of 6 columns | 381 ms — **2.62 M rows/s** | 6 ms — 162 M rows/s |
-| `region = 'eu'` → 200 k rows | 725 ms — 0.28 M rows/s | 12 ms — 17 M rows/s |
-| `id > 900000` → 100 k rows | 185 ms — 0.54 M rows/s | 6 ms — 16 M rows/s |
-| full scan, lazy IO | 838 ms — 1.19 M rows/s | — |
+| Scan | before (`Datum` per cell) | **now (Arrow fast path)** | PyIceberg 0.11.1 |
+|---|---|---|---|
+| full scan, 1 M rows × 6 columns | 911 ms — 1.10 M rows/s | **305 ms — 3.28 M rows/s** | 24 ms — 41 M rows/s |
+| projection to 2 of 6 columns | 381 ms — 2.62 M rows/s | **87 ms — 11.5 M rows/s** | 6 ms — 165 M rows/s |
+| `region = 'eu'` → 200 k rows | 725 ms — 0.28 M rows/s | **293 ms — 0.68 M rows/s** | 13 ms — 15 M rows/s |
+| `id > 900000` → 100 k rows | 185 ms — 0.54 M rows/s | **70 ms — 1.41 M rows/s** | 7 ms — 15 M rows/s |
+| full scan, lazy IO | 838 ms — 1.19 M rows/s | **284 ms — 3.52 M rows/s** | — |
 
-PyIceberg is roughly 70× faster, and the reason is structural rather than
-subtle: `to_arrow()` hands Arrow buffers straight out of Arrow C++, while this
-reader materialises a tagged `Datum` per cell on the way through. That is what
-makes one code path serve every Iceberg type, every promotion and every delete
-rule — and it is the obvious thing for a later pass to remove.
+3.0× to 4.4× faster, and the reason the full scan stops at 3.28 M rows/s is no
+longer anything this repository does. Decoding the *same four Parquet files*
+with parquet.mojo alone — `ParquetReader.read_batch()` in a loop, no Iceberg at
+all — takes **293 ms**. The Iceberg layer on top of it now costs **4 %**. Every
+cast on this table is a retag (the buffers are already the right width), the
+selection is a single `List[Bool]`, and the decoded buffers are *moved* into the
+output batch rather than copied.
+
+So the remaining ~10× to PyIceberg is parquet.mojo's decoder against Arrow C++,
+which is a different repository's problem. The two-column projection, where
+decoding is cheap enough to stop dominating, reaches **11.5 M rows/s**.
+
+`to_batches()` is the fast path and is what the numbers above measure;
+`to_table()` concatenates those batches into one `ScanResult` and costs one
+extra copy of each buffer, which on this table is under 5 %.
+
+### What still falls back to `Datum`
+
+The kernels cover every comparison (`=`, `!=`, `<`, `<=`, `>`, `>=`), `in`,
+`not-in`, `is-null`, `not-null`, `is-nan`, `not-nan`, `starts-with` and
+`not-starts-with` over integral, floating-point and byte-shaped columns, and
+`and`/`or`/`not` over the resulting bitmaps. Three shapes still build a `Datum`,
+and only for the leaf that needs one:
+
+1. **any predicate on a `decimal` column.** Arrow stores a decimal as a 16-byte
+   little-endian two's complement, which a byte compare does not order.
+2. **`starts-with` on a column that is not byte-shaped** — which the binder
+   should already have rejected, so this is belt and braces.
+3. **`ScanResult.value`, `to_csv` and `to_json`**, which are asking for a tagged
+   value by definition.
+
+A predicate on a *constant* column — an identity partition value, an
+`initial-default` — is evaluated once for the whole batch rather than per row.
 
 ## Install
 
@@ -332,6 +367,7 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 | `iceberg.metadata` | `TableMetadata`, `Snapshot`, `SnapshotRef`, snapshot selection |
 | `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile` |
 | `iceberg.puffin` | `PuffinFile`, `BlobMetadata`, `read_deletion_vector` |
+| `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.read` | `ScanResult`, `ScanOptions`, `NameMapping`, the metadata columns |
 | `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `to_table`, `to_batches` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
@@ -358,7 +394,7 @@ def main() raises:
     print(rows.num_rows(), "rows")
     print(rows.to_json())
 
-    for batch in t.scan().to_batches():      # Arrow, one per data file
+    for batch in t.scan().to_batches():      # Arrow, straight off the kernels
         print(batch.num_rows, batch.num_columns())
 ```
 

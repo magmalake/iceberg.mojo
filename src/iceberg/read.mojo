@@ -4,7 +4,7 @@ This is the half of a scan that `plan_files()` stops short of. For each
 `FileScanTask` it opens the data file through the `FileIO`, decodes it with
 [parquet.mojo](https://github.com/magmalake/parquet.mojo), resolves every
 projected column **by field id**, applies the deletes the planner associated,
-evaluates whatever is left of the filter, and appends the surviving rows.
+evaluates whatever is left of the filter, and hands back Arrow arrays.
 
 Column projection follows the spec's order exactly. For each projected field
 id, in turn:
@@ -20,23 +20,25 @@ id, in turn:
 
 Schema evolution falls out of that: a renamed column is found by id under its
 new name, a column added after the file was written resolves to its default or
-null, and a promoted column (`int`→`long`, `float`→`double`, a decimal whose
-precision grew) is read at the file's physical width and produced at the
-table's current type, because the value, not the encoding, is what is
-projected.
+null, and a promoted column (`int`->`long`, `float`->`double`, a decimal whose
+precision grew) is read at the file's physical width and *cast* to the table's
+current type by a columnar kernel.
+
+**Nothing is materialised per cell.** The rows a scan returns are Arrow arrays
+throughout: `iceberg.kernels` casts them, builds constant arrays for the
+columns a file does not have, and applies deletes and the residual predicate as
+one `List[Bool]` per batch followed by a single filter pass per column. A
+`Datum` is built only when a caller asks for one — `ScanResult.value`, CSV and
+JSON output — or for the handful of predicate shapes no kernel covers, which
+`_vector_leaf` names.
 
 Deletes are applied in the order the spec implies. A deletion vector, when one
 applies, replaces every position delete file for that data file; otherwise
 position delete files are read and their `pos` values collected for this file
 path. Equality deletes are matched last, on the columns named by
-`equality_ids`, with `null` equal to `null` as the spec requires. The planner
-has already scoped every delete by sequence number and partition.
-
-Values are carried as `Datum`, the same tagged value the rest of this library
-compares and encodes, which is what makes one code path serve every Iceberg
-primitive. `ScanResult.to_batch()` converts a result to parquet.mojo's Arrow
-`RecordBatch`, which `export_c` hands to anything speaking the Arrow C Data
-Interface.
+`equality_ids`, through a hashed lookup over canonically encoded keys, with
+`null` equal to `null` as the spec requires. The planner has already scoped
+every delete by sequence number and partition.
 """
 
 from std.collections import Dict
@@ -113,6 +115,31 @@ from .expressions import (
 )
 from .io import FileIO
 from .json import Json, json_quote, parse_json, substr
+from .kernels import (
+    CMP_BYTES,
+    CMP_FLOAT,
+    CMP_INT,
+    CMP_NONE,
+    append_key,
+    arrow_type_for,
+    bytes_at,
+    cast_array,
+    compare_class,
+    concat_into,
+    constant_array,
+    decimal_le16,
+    empty_array,
+    filter_array,
+    float_at,
+    hash_key,
+    int64_array,
+    int_at,
+    is_binary_type,
+    is_large_binary_type,
+    is_var_width,
+    keys_equal,
+    value_extent,
+)
 from .manifest import DataFile
 from .metadata import TableMetadata
 from .puffin import deleted_positions
@@ -173,10 +200,16 @@ def is_metadata_column(name: String) -> Bool:
     )
 
 
+def arrow_type_of(
+    kind: UInt8, precision: Int, scale: Int, length: Int
+) raises -> ArrowType:
+    """The Arrow type an Iceberg primitive is produced at."""
+    return arrow_type_for(kind, precision, scale, length)
+
+
 # ── a scan's rows ───────────────────────────────────────────────────────────
-@fieldwise_init
 struct ScanColumn(Copyable, Movable):
-    """One output column: its name, its Iceberg type, and its values."""
+    """One output column: its name, its Iceberg type, and its Arrow array."""
 
     var name: String
     var field_id: Int
@@ -184,11 +217,67 @@ struct ScanColumn(Copyable, Movable):
     var precision: Int
     var scale: Int
     var length: Int
-    var values: List[Datum]
+    var array: ArrayData
+
+    def __init__(
+        out self,
+        var name: String,
+        field_id: Int,
+        kind: UInt8,
+        precision: Int,
+        scale: Int,
+        length: Int,
+        var array: ArrayData,
+    ):
+        self.name = name^
+        self.field_id = field_id
+        self.kind = kind
+        self.precision = precision
+        self.scale = scale
+        self.length = length
+        self.array = array^
+
+    @staticmethod
+    def empty(
+        var name: String,
+        field_id: Int,
+        kind: UInt8,
+        precision: Int,
+        scale: Int,
+        length: Int,
+    ) raises -> Self:
+        var a = empty_array(
+            name, field_id, arrow_type_for(kind, precision, scale, length)
+        )
+        return Self(name^, field_id, kind, precision, scale, length, a^)
+
+    def __init__(out self, *, copy: Self):
+        self.name = copy.name.copy()
+        self.field_id = copy.field_id
+        self.kind = copy.kind
+        self.precision = copy.precision
+        self.scale = copy.scale
+        self.length = copy.length
+        self.array = copy.array.copy()
+
+    def __init__(out self, *, deinit move: Self):
+        self.name = move.name^
+        self.field_id = move.field_id
+        self.kind = move.kind
+        self.precision = move.precision
+        self.scale = move.scale
+        self.length = move.length
+        self.array = move.array^
+
+    def num_rows(self) -> Int:
+        return self.array.length
+
+    def take_array(deinit self) -> ArrayData:
+        return self.array^
 
 
 struct ScanResult(Copyable, Defaultable, Movable):
-    """The rows a scan returned, column-major."""
+    """The rows a scan returned, column-major, as Arrow arrays."""
 
     var columns: List[ScanColumn]
 
@@ -198,30 +287,46 @@ struct ScanResult(Copyable, Defaultable, Movable):
     def __init__(out self, var columns: List[ScanColumn]):
         self.columns = columns^
 
+    def __init__(out self, *, copy: Self):
+        self.columns = copy.columns.copy()
+
+    def __init__(out self, *, deinit move: Self):
+        self.columns = move.columns^
+
     def num_columns(self) -> Int:
         return len(self.columns)
 
     def num_rows(self) -> Int:
         if len(self.columns) == 0:
             return 0
-        return len(self.columns[0].values)
+        return self.columns[0].array.length
 
     def name(self, i: Int) -> String:
         return self.columns[i].name
 
-    def value(self, row: Int, col: Int) -> Datum:
-        return self.columns[col].values[row].copy()
+    def value(self, row: Int, col: Int) raises -> Datum:
+        """One cell, typed as the table's current schema says it is.
+
+        This is the only place a `Datum` is built on the read path, and it is
+        built on demand.
+        """
+        ref c = self.columns[col]
+        return _extract(c.array, row, c.kind, c.precision, c.scale, c.length)
+
+    def column(ref self, i: Int) -> ref[self.columns[0].array] ArrayData:
+        return self.columns[i].array
 
     def append(mut self, other: ScanResult) raises:
         """Concatenate another result with the same columns."""
         if len(self.columns) == 0:
             self.columns = other.columns.copy()
             return
+        if other.num_rows() == 0:
+            return
         if len(self.columns) != len(other.columns):
             raise Error("iceberg: cannot append results with different shapes")
         for k in range(len(self.columns)):
-            for j in range(len(other.columns[k].values)):
-                self.columns[k].values.append(other.columns[k].values[j].copy())
+            concat_into(self.columns[k].array, other.columns[k].array)
 
     # ── output ─────────────────────────────────────────────────────────────
     def to_csv(self, header: Bool = True) raises -> String:
@@ -236,7 +341,7 @@ struct ScanResult(Copyable, Defaultable, Movable):
             for c in range(len(self.columns)):
                 if c > 0:
                     out += ","
-                ref d = self.columns[c].values[r]
+                var d = self.value(r, c)
                 out += "" if not d.valid else _csv_cell(d.repr_())
             out += "\n"
         return out^
@@ -252,7 +357,7 @@ struct ScanResult(Copyable, Defaultable, Movable):
                 if c > 0:
                     out += ","
                 out += json_quote(self.columns[c].name) + ":"
-                out += self.columns[c].values[r].to_json()
+                out += self.value(r, c).to_json()
             out += "}"
         out += "]"
         return out^
@@ -260,12 +365,22 @@ struct ScanResult(Copyable, Defaultable, Movable):
     def to_batch(self) raises -> RecordBatch:
         """The same rows as an Arrow `RecordBatch`, ready for `export_c`."""
         var batch = RecordBatch()
-        var n = self.num_rows()
-        batch.num_rows = n
+        batch.num_rows = self.num_rows()
         for c in range(len(self.columns)):
-            ref col = self.columns[c]
-            var node = _build_array(col, n)
-            batch.roots.append(batch.arena.add(node^))
+            batch.roots.append(batch.arena.add(self.columns[c].array.copy()))
+        return batch^
+
+    def take_batch(deinit self) raises -> RecordBatch:
+        """`to_batch`, consuming the result so no buffer is copied."""
+        var batch = RecordBatch()
+        batch.num_rows = self.num_rows()
+        var cols = self.columns^
+        var n = len(cols)
+        var rev = List[ArrayData]()
+        for _ in range(n):
+            rev.append(cols.pop().take_array())
+        for _ in range(n):
+            batch.roots.append(batch.arena.add(rev.pop()))
         return batch^
 
 
@@ -289,214 +404,17 @@ def _csv_cell(s: String) -> String:
     return out^
 
 
-# ── Iceberg type -> Arrow type ──────────────────────────────────────────────
-def arrow_type_of(
-    kind: UInt8, precision: Int, scale: Int, length: Int
-) raises -> ArrowType:
-    var t: ArrowType
-    if kind == P_BOOLEAN:
-        t = ArrowType(AT_BOOL)
-    elif kind == P_INT:
-        t = ArrowType(AT_INT32)
-    elif kind == P_FLOAT:
-        t = ArrowType(AT_FLOAT32)
-    elif kind == P_DOUBLE:
-        t = ArrowType(AT_FLOAT64)
-    elif kind == P_DATE:
-        t = ArrowType(AT_DATE32)
-    elif kind == P_TIME:
-        t = ArrowType(AT_TIME64)
-        t.unit = TU_MICRO
-    elif kind == P_TIMESTAMP or kind == P_TIMESTAMPTZ:
-        t = ArrowType(AT_TIMESTAMP)
-        t.unit = TU_MICRO
-        if kind == P_TIMESTAMPTZ:
-            t.tz = String("UTC")
-    elif kind == P_TIMESTAMP_NS or kind == P_TIMESTAMPTZ_NS:
-        t = ArrowType(AT_TIMESTAMP)
-        t.unit = TU_NANO
-        if kind == P_TIMESTAMPTZ_NS:
-            t.tz = String("UTC")
-    elif kind == P_STRING:
-        t = ArrowType(AT_UTF8)
-    elif kind == P_UUID:
-        t = ArrowType(AT_FIXED_SIZE_BINARY)
-        t.byte_width = 16
-    elif kind == P_FIXED:
-        t = ArrowType(AT_FIXED_SIZE_BINARY)
-        t.byte_width = length
-    elif kind == P_BINARY:
-        t = ArrowType(AT_BINARY)
-    elif kind == P_DECIMAL:
-        t = ArrowType(AT_DECIMAL128)
-        t.precision = precision
-        t.scale = scale
-    elif kind == P_LONG:
-        t = ArrowType(AT_INT64)
-    else:
-        # `unknown`, `variant`, geometry/geography: carried as binary, which is
-        # what they are on the wire.
-        t = ArrowType(AT_BINARY)
-    return t^
-
-
-def _build_array(col: ScanColumn, n: Int) raises -> ArrayData:
-    var t = arrow_type_of(col.kind, col.precision, col.scale, col.length)
-    var a = ArrayData(t^, col.name)
-    a.length = n
-    a.nullable = True
-    a.field_id = Int32(col.field_id)
-    var width = a.type.fixed_width()
-    var is_binary = (
-        a.type.id == AT_UTF8
-        or a.type.id == AT_BINARY
-        or a.type.id == AT_LARGE_UTF8
-        or a.type.id == AT_LARGE_BINARY
-    )
-    if is_binary:
-        a.offsets.append(0)
-    for r in range(n):
-        ref d = col.values[r]
-        bit_set(a.validity, r, d.valid)
-        if not d.valid:
-            a.null_count += 1
-        if a.type.id == AT_BOOL:
-            while len(a.values) <= r // 8:
-                a.values.append(0)
-            if d.valid and d.i != 0:
-                a.values[r // 8] |= UInt8(1) << UInt8(r % 8)
-        elif is_binary:
-            if d.valid:
-                if col.kind == P_STRING:
-                    var b = d.s.as_bytes()
-                    for k in range(len(b)):
-                        a.values.append(b[k])
-                else:
-                    for k in range(len(d.b)):
-                        a.values.append(d.b[k])
-            a.offsets.append(Int32(len(a.values)))
-        elif a.type.id == AT_DECIMAL128:
-            var le = _decimal_le16(d)
-            for k in range(16):
-                a.values.append(le[k])
-        elif a.type.id == AT_FIXED_SIZE_BINARY:
-            for k in range(width):
-                a.values.append(d.b[k] if d.valid and k < len(d.b) else 0)
-        elif a.type.id == AT_FLOAT32:
-            _append_le(
-                a.values, UInt64(UInt32(_f32_bits(d.f if d.valid else 0.0))), 4
-            )
-        elif a.type.id == AT_FLOAT64:
-            _append_le(a.values, _f64_bits(d.f if d.valid else 0.0), 8)
-        else:
-            _append_le(a.values, UInt64(Int64(d.i if d.valid else 0)), width)
-    # A bitmap has to cover every row even when the last byte is partial.
-    while len(a.validity) < (n + 7) // 8:
-        a.validity.append(0)
-    if a.type.id == AT_BOOL:
-        while len(a.values) < (n + 7) // 8:
-            a.values.append(0)
-    return a^
-
-
-def _f32_bits(v: Float64) -> UInt32:
-    return bitcast[DType.uint32](Float32(v))
-
-
-def _f64_bits(v: Float64) -> UInt64:
-    return bitcast[DType.uint64](v)
-
-
-def _append_le(mut out: List[UInt8], v: UInt64, width: Int):
-    for k in range(width):
-        out.append(UInt8((v >> UInt64(8 * k)) & 0xFF))
-
-
-def _decimal_le16(d: Datum) -> List[UInt8]:
-    """A decimal's unscaled value as Arrow's little-endian 16-byte two's
-    complement."""
-    var out = List[UInt8]()
-    if not d.valid or len(d.b) == 0:
-        for _ in range(16):
-            out.append(0)
-        return out^
-    var sign = UInt8(0xFF) if (d.b[0] & 0x80) != 0 else UInt8(0)
-    for k in range(len(d.b)):
-        out.append(d.b[len(d.b) - 1 - k])
-    while len(out) < 16:
-        out.append(sign)
-    while len(out) > 16:
-        _ = out.pop()
-    return out^
-
-
 # ── reading one value out of an Arrow array ─────────────────────────────────
 def _int_at(a: ArrayData, i: Int) raises -> Int64:
-    """The integral value at `i`, whatever fixed width it was stored at.
-
-    This is where `int` -> `long` promotion happens: the file's physical width
-    is read, the table's current type is what comes out.
-    """
-    var id = a.type.id
-    if id == AT_BOOL:
-        return 1 if bit_get(Span(a.values), i) else 0
-    if id == AT_INT8:
-        return Int64(bitcast[DType.int8](a.values[i]))
-    if id == AT_UINT8:
-        return Int64(a.values[i])
-    if id == AT_INT16 or id == AT_UINT16:
-        var v = UInt16(a.values[2 * i]) | (UInt16(a.values[2 * i + 1]) << 8)
-        if id == AT_INT16:
-            return Int64(bitcast[DType.int16](v))
-        return Int64(v)
-    if id == AT_INT32 or id == AT_DATE32 or id == AT_TIME32:
-        return Int64(load_i32(Span(a.values), i))
-    if id == AT_UINT32:
-        return Int64(UInt32(bitcast[DType.uint32](load_i32(Span(a.values), i))))
-    if id == AT_INT64 or id == AT_TIME64 or id == AT_TIMESTAMP:
-        return load_i64(Span(a.values), i)
-    if id == AT_UINT64:
-        return load_i64(Span(a.values), i)
-    if id == AT_FLOAT32:
-        return Int64(load_f32(Span(a.values), i))
-    if id == AT_FLOAT64:
-        return Int64(load_f64(Span(a.values), i))
-    raise Error(
-        "iceberg: cannot read an integer from Arrow type " + String(a.type)
-    )
+    return int_at(a, i)
 
 
 def _float_at(a: ArrayData, i: Int) raises -> Float64:
-    var id = a.type.id
-    if id == AT_FLOAT32:
-        return Float64(load_f32(Span(a.values), i))
-    if id == AT_FLOAT64:
-        return load_f64(Span(a.values), i)
-    return Float64(_int_at(a, i))
+    return float_at(a, i)
 
 
 def _bytes_at(a: ArrayData, i: Int) raises -> List[UInt8]:
-    var out = List[UInt8]()
-    var id = a.type.id
-    var start: Int
-    var end: Int
-    if id == AT_UTF8 or id == AT_BINARY:
-        start = Int(a.offsets[i])
-        end = Int(a.offsets[i + 1])
-    elif id == AT_LARGE_UTF8 or id == AT_LARGE_BINARY:
-        start = Int(a.large_offsets[i])
-        end = Int(a.large_offsets[i + 1])
-    elif id == AT_FIXED_SIZE_BINARY or id == AT_DECIMAL128:
-        var w = a.type.fixed_width()
-        start = w * i
-        end = start + w
-    else:
-        raise Error(
-            "iceberg: cannot read bytes from Arrow type " + String(a.type)
-        )
-    for k in range(start, end):
-        out.append(a.values[k])
-    return out^
+    return bytes_at(a, i)
 
 
 def _extract(
@@ -506,32 +424,36 @@ def _extract(
     if not a.is_valid(i):
         return Datum.none()
     if kind == P_BOOLEAN:
-        return Datum.bool_(_int_at(a, i) != 0)
+        return Datum.bool_(int_at(a, i) != 0)
     if kind == P_FLOAT:
-        return Datum.float_(Float64(Float32(_float_at(a, i))))
+        return Datum.float_(Float64(Float32(float_at(a, i))))
     if kind == P_DOUBLE:
-        return Datum.double_(_float_at(a, i))
+        return Datum.double_(float_at(a, i))
     if kind == P_STRING:
-        var b = _bytes_at(a, i)
+        var b = bytes_at(a, i)
         return Datum.string_(String(StringSlice(unsafe_from_utf8=Span(b))))
     if kind == P_UUID:
-        var b = _bytes_at(a, i)
+        var b = bytes_at(a, i)
         return Datum.uuid_(b^)
     if kind == P_FIXED:
-        var b = _bytes_at(a, i)
+        var b = bytes_at(a, i)
         return Datum.fixed_(b^)
     if kind == P_BINARY or kind == P_UNKNOWN:
-        var b = _bytes_at(a, i)
+        var b = bytes_at(a, i)
         return Datum.binary_(b^)
     if kind == P_DECIMAL:
         # Arrow decimal128 is little-endian; Iceberg's is big-endian minimal.
-        var le = _bytes_at(a, i)
+        var le = bytes_at(a, i)
         var be = List[UInt8]()
         for k in range(len(le)):
             be.append(le[len(le) - 1 - k])
         return Datum.decimal_(be^, precision, scale)
     # int, long, date, time, timestamp and their nanosecond forms.
-    return Datum.integral(kind, _int_at(a, i))
+    return Datum.integral(kind, int_at(a, i))
+
+
+def _decimal_le16(d: Datum) -> List[UInt8]:
+    return decimal_le16(d)
 
 
 # ── column plans ────────────────────────────────────────────────────────────
@@ -631,39 +553,14 @@ def collect_field_ids(e: Expr, i: Int, mut out: List[Int]):
     out.append(n.field_id)
 
 
-def eval_row(e: Expr, i: Int, row: List[Datum], ids: List[Int]) raises -> Bool:
-    """Evaluate a *bound* expression against one row.
+def eval_leaf(e: Expr, i: Int, v: Datum) raises -> Bool:
+    """One bound leaf predicate against one value.
 
-    `row[k]` is the value of field `ids[k]`. A predicate on a null value is
-    false for everything except `is-null` and the negations that the planner's
-    `rewrite_not` has already pushed down, which is Iceberg's three-valued
-    logic collapsed the way a filter needs it.
+    A predicate on a null value is false for everything except `is-null` and
+    the negations that the planner's `rewrite_not` has already pushed down,
+    which is Iceberg's three-valued logic collapsed the way a filter needs it.
     """
-    if i < 0:
-        return True
     ref n = e.nodes[i]
-    if n.op == OP_TRUE:
-        return True
-    if n.op == OP_FALSE:
-        return False
-    if n.op == OP_AND:
-        return eval_row(e, n.left, row, ids) and eval_row(e, n.right, row, ids)
-    if n.op == OP_OR:
-        return eval_row(e, n.left, row, ids) or eval_row(e, n.right, row, ids)
-    if n.op == OP_NOT:
-        return not eval_row(e, n.left, row, ids)
-
-    var slot = -1
-    for k in range(len(ids)):
-        if ids[k] == n.field_id:
-            slot = k
-            break
-    if slot < 0:
-        # A predicate on a column that is not being read: it was already
-        # applied by the planner, or it cannot be evaluated here.
-        return True
-    ref v = row[slot]
-
     if n.op == OP_IS_NULL:
         return not v.valid
     if n.op == OP_NOT_NULL:
@@ -701,6 +598,334 @@ def eval_row(e: Expr, i: Int, row: List[Datum], ids: List[Int]) raises -> Bool:
     if n.op == OP_GT_EQ:
         return c >= 0
     raise Error("iceberg: cannot evaluate operator " + String(n.op))
+
+
+def eval_row(e: Expr, i: Int, row: List[Datum], ids: List[Int]) raises -> Bool:
+    """Evaluate a *bound* expression against one row.
+
+    `row[k]` is the value of field `ids[k]`.
+    """
+    if i < 0:
+        return True
+    ref n = e.nodes[i]
+    if n.op == OP_TRUE:
+        return True
+    if n.op == OP_FALSE:
+        return False
+    if n.op == OP_AND:
+        return eval_row(e, n.left, row, ids) and eval_row(e, n.right, row, ids)
+    if n.op == OP_OR:
+        return eval_row(e, n.left, row, ids) or eval_row(e, n.right, row, ids)
+    if n.op == OP_NOT:
+        return not eval_row(e, n.left, row, ids)
+
+    var slot = -1
+    for k in range(len(ids)):
+        if ids[k] == n.field_id:
+            slot = k
+            break
+    if slot < 0:
+        # A predicate on a column that is not being read: it was already
+        # applied by the planner, or it cannot be evaluated here.
+        return True
+    return eval_leaf(e, i, row[slot])
+
+
+# ── vectorised predicate evaluation ─────────────────────────────────────────
+def _cmp_float(x: Float64, y: Float64) -> Int:
+    """Iceberg's float order: NaN last, -0.0 == 0.0."""
+    var xn = x != x
+    var yn = y != y
+    if xn and yn:
+        return 0
+    if xn:
+        return 1
+    if yn:
+        return -1
+    if x < y:
+        return -1
+    return 0 if x == y else 1
+
+
+def _cmp_bytes_at(a: ArrayData, i: Int, lit: List[UInt8]) raises -> Int:
+    """Unsigned lexicographic order of element `i` against a literal."""
+    var extent = value_extent(a, i)
+    var n = extent[1] - extent[0]
+    var m = n if n < len(lit) else len(lit)
+    for k in range(m):
+        var x = a.values[extent[0] + k]
+        var y = lit[k]
+        if x != y:
+            return -1 if x < y else 1
+    if n == len(lit):
+        return 0
+    return -1 if n < len(lit) else 1
+
+
+def _starts_with_at(a: ArrayData, i: Int, lit: List[UInt8]) raises -> Bool:
+    var extent = value_extent(a, i)
+    if extent[1] - extent[0] < len(lit):
+        return False
+    for k in range(len(lit)):
+        if a.values[extent[0] + k] != lit[k]:
+            return False
+    return True
+
+
+def _literal_bytes(d: Datum) -> List[UInt8]:
+    var out = List[UInt8]()
+    if d.kind == P_STRING:
+        out.extend(d.s.as_bytes())
+    else:
+        out.extend(Span(d.b))
+    return out^
+
+
+def _accept(op: UInt8, c: Int) raises -> Bool:
+    if op == OP_EQ:
+        return c == 0
+    if op == OP_NOT_EQ:
+        return c != 0
+    if op == OP_LT:
+        return c < 0
+    if op == OP_LT_EQ:
+        return c <= 0
+    if op == OP_GT:
+        return c > 0
+    if op == OP_GT_EQ:
+        return c >= 0
+    raise Error("iceberg: cannot evaluate operator " + String(op))
+
+
+def _is_comparison(op: UInt8) -> Bool:
+    return (
+        op == OP_EQ
+        or op == OP_NOT_EQ
+        or op == OP_LT
+        or op == OP_LT_EQ
+        or op == OP_GT
+        or op == OP_GT_EQ
+    )
+
+
+def _vector_leaf(
+    e: Expr, i: Int, a: ArrayData, mut out: List[Bool]
+) raises -> Bool:
+    """Evaluate one leaf predicate over a whole column.
+
+    Returns `False` when no kernel covers this predicate/type pair, which is
+    the caller's cue to fall back to `Datum` for that leaf alone. The shapes
+    that fall back are: any comparison, `in` or `not-in` on a **decimal**
+    column (Arrow stores it as a 16-byte little-endian two's complement, which
+    is not orderable by a byte compare), and `starts-with` on anything that is
+    not a byte-shaped column.
+    """
+    ref nd = e.nodes[i]
+    var n = a.length
+    var no_nulls = len(a.validity) == 0
+
+    if nd.op == OP_IS_NULL:
+        for r in range(n):
+            out[r] = False if no_nulls else not bit_get(Span(a.validity), r)
+        return True
+    if nd.op == OP_NOT_NULL:
+        for r in range(n):
+            out[r] = True if no_nulls else bit_get(Span(a.validity), r)
+        return True
+
+    var cls = compare_class(a.type)
+
+    if nd.op == OP_IS_NAN or nd.op == OP_NOT_NAN:
+        var want_nan = nd.op == OP_IS_NAN
+        for r in range(n):
+            var valid = True if no_nulls else bit_get(Span(a.validity), r)
+            if not valid:
+                out[r] = False
+                continue
+            if cls != CMP_FLOAT:
+                out[r] = not want_nan
+                continue
+            var v = float_at(a, r)
+            out[r] = (v != v) if want_nan else (v == v)
+        return True
+
+    if cls == CMP_NONE:
+        return False
+
+    if nd.op == OP_STARTS_WITH or nd.op == OP_NOT_STARTS_WITH:
+        if cls != CMP_BYTES:
+            return False
+        var lit = _literal_bytes(nd.lits[0])
+        var want = nd.op == OP_STARTS_WITH
+        for r in range(n):
+            var valid = True if no_nulls else bit_get(Span(a.validity), r)
+            if not valid:
+                out[r] = False
+                continue
+            out[r] = _starts_with_at(a, r, lit) == want
+        return True
+
+    if nd.op == OP_IN or nd.op == OP_NOT_IN:
+        var want = nd.op == OP_IN
+        if cls == CMP_INT:
+            var vals = List[Int64]()
+            for k in range(len(nd.lits)):
+                vals.append(nd.lits[k].i)
+            for r in range(n):
+                var valid = True if no_nulls else bit_get(Span(a.validity), r)
+                if not valid:
+                    out[r] = False
+                    continue
+                var v = int_at(a, r)
+                var found = False
+                for k in range(len(vals)):
+                    if vals[k] == v:
+                        found = True
+                        break
+                out[r] = found == want
+            return True
+        if cls == CMP_FLOAT:
+            var fvals = List[Float64]()
+            for k in range(len(nd.lits)):
+                ref d = nd.lits[k]
+                fvals.append(
+                    d.f if (
+                        d.kind == P_FLOAT or d.kind == P_DOUBLE
+                    ) else Float64(d.i)
+                )
+            for r in range(n):
+                var valid = True if no_nulls else bit_get(Span(a.validity), r)
+                if not valid:
+                    out[r] = False
+                    continue
+                var v = float_at(a, r)
+                var found = False
+                for k in range(len(fvals)):
+                    if _cmp_float(v, fvals[k]) == 0:
+                        found = True
+                        break
+                out[r] = found == want
+            return True
+        var bvals = List[List[UInt8]]()
+        for k in range(len(nd.lits)):
+            bvals.append(_literal_bytes(nd.lits[k]))
+        for r in range(n):
+            var valid = True if no_nulls else bit_get(Span(a.validity), r)
+            if not valid:
+                out[r] = False
+                continue
+            var found = False
+            for k in range(len(bvals)):
+                if _cmp_bytes_at(a, r, bvals[k]) == 0:
+                    found = True
+                    break
+            out[r] = found == want
+        return True
+
+    if not _is_comparison(nd.op):
+        return False
+    if len(nd.lits) == 0:
+        return False
+
+    if cls == CMP_INT:
+        var lit = nd.lits[0].i
+        for r in range(n):
+            var valid = True if no_nulls else bit_get(Span(a.validity), r)
+            if not valid:
+                out[r] = False
+                continue
+            var v = int_at(a, r)
+            var c = 0 if v == lit else (-1 if v < lit else 1)
+            out[r] = _accept(nd.op, c)
+        return True
+    if cls == CMP_FLOAT:
+        ref d = nd.lits[0]
+        var flit = d.f if (
+            d.kind == P_FLOAT or d.kind == P_DOUBLE
+        ) else Float64(d.i)
+        for r in range(n):
+            var valid = True if no_nulls else bit_get(Span(a.validity), r)
+            if not valid:
+                out[r] = False
+                continue
+            out[r] = _accept(nd.op, _cmp_float(float_at(a, r), flit))
+        return True
+    var blit = _literal_bytes(nd.lits[0])
+    for r in range(n):
+        var valid = True if no_nulls else bit_get(Span(a.validity), r)
+        if not valid:
+            out[r] = False
+            continue
+        out[r] = _accept(nd.op, _cmp_bytes_at(a, r, blit))
+    return True
+
+
+def _selection(
+    e: Expr,
+    i: Int,
+    arrays: List[ArrayData],
+    plans: List[_ColumnPlan],
+    read_ids: List[Int],
+    n: Int,
+) raises -> List[Bool]:
+    """A residual predicate as a selection bitmap over one batch."""
+    if i < 0:
+        return List[Bool](length=n, fill=True)
+    ref nd = e.nodes[i]
+    if nd.op == OP_TRUE:
+        return List[Bool](length=n, fill=True)
+    if nd.op == OP_FALSE:
+        return List[Bool](length=n, fill=False)
+    if nd.op == OP_AND:
+        var left = _selection(e, nd.left, arrays, plans, read_ids, n)
+        var any = False
+        for r in range(n):
+            if left[r]:
+                any = True
+                break
+        if not any:
+            return left^
+        var right = _selection(e, nd.right, arrays, plans, read_ids, n)
+        for r in range(n):
+            left[r] = left[r] and right[r]
+        return left^
+    if nd.op == OP_OR:
+        var left = _selection(e, nd.left, arrays, plans, read_ids, n)
+        var right = _selection(e, nd.right, arrays, plans, read_ids, n)
+        for r in range(n):
+            left[r] = left[r] or right[r]
+        return left^
+    if nd.op == OP_NOT:
+        var inner = _selection(e, nd.left, arrays, plans, read_ids, n)
+        for r in range(n):
+            inner[r] = not inner[r]
+        return inner^
+
+    var slot = -1
+    for k in range(len(read_ids)):
+        if read_ids[k] == nd.field_id:
+            slot = k
+            break
+    if slot < 0:
+        return List[Bool](length=n, fill=True)
+
+    ref p = plans[slot]
+    if p.source != SRC_FILE:
+        # A constant column: one evaluation decides the whole batch.
+        var v = eval_leaf(e, i, p.constant)
+        return List[Bool](length=n, fill=v)
+
+    var out = List[Bool](length=n, fill=False)
+    if _vector_leaf(e, i, arrays[slot], out):
+        return out^
+    # No kernel for this shape: fall back to a `Datum` per row, for this
+    # column only.
+    ref a = arrays[slot]
+    for r in range(n):
+        out[r] = eval_leaf(
+            e, i, _extract(a, r, p.kind, p.precision, p.scale, p.length)
+        )
+    return out^
 
 
 # ── scan options ────────────────────────────────────────────────────────────
@@ -798,6 +1023,8 @@ def _apply_position_delete_file(
     names.append(reader.schema.fields[path_idx].name)
     names.append(reader.schema.fields[pos_idx].name)
     reader.select_columns(names)
+    var want = List[UInt8]()
+    want.extend(data_path.as_bytes())
     while reader.has_next():
         var batch = reader.read_batch()
         var paths = batch.column(0).copy()
@@ -805,48 +1032,57 @@ def _apply_position_delete_file(
         for r in range(batch.num_rows):
             if not paths.is_valid(r):
                 continue
-            var raw = _bytes_at(paths, r)
-            var p = String(StringSlice(unsafe_from_utf8=Span(raw)))
-            if p != data_path:
+            if _cmp_bytes_at(paths, r, want) != 0:
                 continue
-            var at = Int(_int_at(positions, r))
+            var at = Int(int_at(positions, r))
             if at >= 0 and at < len(out):
                 out[at] = True
 
 
-@fieldwise_init
 struct _EqualityDeletes(Copyable, Defaultable, Movable):
-    """The rows of every equality delete file that applies, by column id."""
+    """One equality delete file's rows, as canonically encoded keys.
+
+    A delete row matches when every delete column is equal, and `null` equals
+    `null` — the spec's "a null value in a delete column matches a row if the
+    row's value is null". `kernels.append_key` encodes exactly that, so a
+    match is a byte comparison behind a hash bucket.
+    """
 
     var ids: List[Int]
-    var rows: List[List[Datum]]
+    var keys: List[List[UInt8]]
+    var buckets: Dict[UInt64, List[Int]]
 
     def __init__(out self):
         self.ids = []
-        self.rows = []
+        self.keys = []
+        self.buckets = Dict[UInt64, List[Int]]()
 
-    def matches(self, values: List[Datum]) raises -> Bool:
-        """`values` are this row's values for `ids`, in order.
+    def __init__(out self, *, copy: Self):
+        self.ids = copy.ids.copy()
+        self.keys = copy.keys.copy()
+        self.buckets = copy.buckets.copy()
 
-        A delete row matches when every delete column is equal, and `null`
-        equals `null` — the spec's "a null value in a delete column matches a
-        row if the row's value is null".
-        """
-        for k in range(len(self.rows)):
-            ref cand = self.rows[k]
-            var all_equal = True
-            for c in range(len(self.ids)):
-                ref a = cand[c]
-                ref b = values[c]
-                if not a.valid or not b.valid:
-                    if a.valid != b.valid:
-                        all_equal = False
-                        break
-                    continue
-                if compare(a, b) != 0:
-                    all_equal = False
-                    break
-            if all_equal:
+    def __init__(out self, *, deinit move: Self):
+        self.ids = move.ids^
+        self.keys = move.keys^
+        self.buckets = move.buckets^
+
+    def add(mut self, var key: List[UInt8]) raises:
+        var h = hash_key(key)
+        var at = len(self.keys)
+        self.keys.append(key^)
+        if h in self.buckets:
+            self.buckets[h].append(at)
+        else:
+            self.buckets[h] = [at]
+
+    def contains(self, key: List[UInt8]) raises -> Bool:
+        var h = hash_key(key)
+        if h not in self.buckets:
+            return False
+        ref bucket = self.buckets[h]
+        for k in range(len(bucket)):
+            if keys_equal(self.keys[bucket[k]], key):
                 return True
         return False
 
@@ -877,10 +1113,7 @@ def _read_equality_deletes(
         reader.batch_size = options.batch_size
         reader.verify_crc = options.verify_crc
         var names = List[String]()
-        var kinds = List[UInt8]()
-        var precisions = List[Int]()
-        var scales = List[Int]()
-        var lengths = List[Int]()
+        var targets = List[ArrowType]()
         for j in range(len(eq.ids)):
             var idx = reader.schema.field_by_id(Int32(eq.ids[j]))
             if idx < 0:
@@ -891,27 +1124,27 @@ def _read_equality_deletes(
             names.append(reader.schema.fields[idx].name)
             var f = schema.find_field(eq.ids[j])
             ref t = schema.store.nodes[f.type]
-            kinds.append(t.prim)
-            precisions.append(t.precision)
-            scales.append(t.scale)
-            lengths.append(t.length)
+            targets.append(
+                arrow_type_for(t.prim, t.precision, t.scale, t.length)
+            )
         reader.select_columns(names)
         while reader.has_next():
             var batch = reader.read_batch()
-            for r in range(batch.num_rows):
-                var row = List[Datum]()
-                for c in range(len(eq.ids)):
-                    row.append(
-                        _extract(
-                            batch.column(c),
-                            r,
-                            kinds[c],
-                            precisions[c],
-                            scales[c],
-                            lengths[c],
-                        )
+            var cols = List[ArrayData]()
+            for c in range(len(eq.ids)):
+                cols.append(
+                    cast_array(
+                        batch.column(c).copy(),
+                        targets[c],
+                        names[c],
+                        eq.ids[c],
                     )
-                eq.rows.append(row^)
+                )
+            for r in range(batch.num_rows):
+                var key = List[UInt8]()
+                for c in range(len(cols)):
+                    append_key(key, cols[c], r)
+                eq.add(key^)
         out.append(eq^)
     return out^
 
@@ -949,6 +1182,33 @@ def _partition_json(spec: PartitionSpec, partition: List[Datum]) -> String:
     return out^
 
 
+def _take_columns(var batch: RecordBatch) raises -> List[ArrayData]:
+    """The batch's top-level arrays, moved out of it where that is safe.
+
+    Every column a scan reads is primitive, so the arena holds exactly the
+    roots and nothing else; moving them out saves a full copy of the decoded
+    data per batch.
+    """
+    var n = batch.num_columns()
+    var flat = len(batch.arena.nodes) == n
+    if flat:
+        for k in range(n):
+            if batch.roots[k] != k:
+                flat = False
+                break
+    var out = List[ArrayData]()
+    if not flat:
+        for k in range(n):
+            out.append(batch.column(k).copy())
+        return out^
+    var rev = List[ArrayData]()
+    for _ in range(n):
+        rev.append(batch.arena.nodes.pop())
+    for _ in range(n):
+        out.append(rev.pop())
+    return out^
+
+
 def read_data_file(
     io: FileIO,
     data_file: DataFile,
@@ -962,8 +1222,8 @@ def read_data_file(
     residual_dsl: String,
     case_sensitive: Bool,
     options: ScanOptions,
-) raises -> ScanResult:
-    """Read one data file's surviving rows, projected to `projected`."""
+) raises -> List[ScanResult]:
+    """One data file's surviving rows, as Arrow batches."""
     if data_file.file_format.lower() != "parquet":
         raise Error(
             "iceberg: only Parquet data files can be read; '"
@@ -975,6 +1235,9 @@ def read_data_file(
     var residual = bind(parse_filter(residual_dsl), schema, case_sensitive)
     var filter_ids = List[Int]()
     collect_field_ids(residual, residual.root, filter_ids)
+    var trivial = (
+        residual.root < 0 or residual.nodes[residual.root].op == OP_TRUE
+    )
 
     var equality = _read_equality_deletes(io, delete_files, schema, options)
 
@@ -1085,6 +1348,22 @@ def read_data_file(
     else:
         reader.select_columns(List[String]())
 
+    # Which columns need a materialised array: everything projected, plus the
+    # key columns of any equality delete.
+    var need_array = List[Bool](length=len(read_ids), fill=False)
+    for k in range(len(projected)):
+        need_array[k] = True
+    for k in range(len(equality)):
+        for j in range(len(equality[k].ids)):
+            var at = _index_of(read_ids, equality[k].ids[j])
+            if at >= 0:
+                need_array[at] = True
+
+    var targets = List[ArrowType]()
+    for k in range(len(read_ids)):
+        ref p = plans[k]
+        targets.append(arrow_type_for(p.kind, p.precision, p.scale, p.length))
+
     # ── deletes and pruning ────────────────────────────────────────────────
     var deleted = _position_delete_bitmap(
         io, data_file.file_path, data_file.record_count, delete_files, options
@@ -1106,26 +1385,14 @@ def read_data_file(
             groups = reader._row_groups.copy()
 
     var starts = List[Int64]()
-    var at: Int64 = 0
+    var at_row: Int64 = 0
     for g in range(reader.num_row_groups()):
-        starts.append(at)
-        at += reader.meta.row_groups[g].num_rows
+        starts.append(at_row)
+        at_row += reader.meta.row_groups[g].num_rows
 
     # ── read ───────────────────────────────────────────────────────────────
-    var out = List[ScanColumn]()
-    for k in range(len(plans)):
-        out.append(
-            ScanColumn(
-                plans[k].name,
-                plans[k].field_id,
-                plans[k].kind,
-                plans[k].precision,
-                plans[k].scale,
-                plans[k].length,
-                List[Datum](),
-            )
-        )
-    var kept = 0
+    var out = List[ScanResult]()
+    var kept_total = 0
     for gi in range(len(groups)):
         var g = groups[gi]
         reader.select_row_groups([g])
@@ -1136,72 +1403,224 @@ def read_data_file(
         var pos = starts[g]
         while reader.has_next():
             var batch = reader.read_batch()
-            var cols = List[ArrayData]()
-            for q in range(batch.num_columns()):
-                cols.append(batch.column(q).copy())
-            var rows_in_batch = batch.num_rows
-            for r in range(rows_in_batch):
-                var row_pos = pos
-                pos += 1
-                if Int(row_pos) < len(deleted) and deleted[Int(row_pos)]:
-                    continue
-                var row = List[Datum]()
-                for c in range(len(read_ids)):
-                    ref p = plans[c]
-                    if p.source == SRC_FILE:
-                        row.append(
-                            _extract(
-                                cols[p.batch_index],
-                                r,
-                                p.kind,
-                                p.precision,
-                                p.scale,
-                                p.length,
-                            )
+            var n = batch.num_rows
+            var base = pos
+            pos += Int64(n)
+            var decoded = _take_columns(batch^)
+            # Consumed in `batch_index` order, which is the order the
+            # `SRC_FILE` plans were built in, so each decoded buffer is moved
+            # into its cast exactly once and never copied.
+            var pending = List[ArrayData]()
+            for _ in range(len(decoded)):
+                pending.append(decoded.pop())
+
+            # Cast every column that was read to the table's current type.
+            var arrays = List[ArrayData]()
+            for c in range(len(read_ids)):
+                ref p = plans[c]
+                if p.source == SRC_FILE:
+                    arrays.append(
+                        cast_array(
+                            pending.pop(),
+                            targets[c],
+                            p.name,
+                            p.field_id,
                         )
-                    else:
-                        row.append(p.constant.copy())
-                if not eval_row(residual, residual.root, row, read_ids):
-                    continue
-                var dropped = False
-                for e in range(len(equality)):
-                    var key = List[Datum]()
-                    for j in range(len(equality[e].ids)):
-                        var slot = _index_of(read_ids, equality[e].ids[j])
-                        key.append(row[slot].copy())
-                    if equality[e].matches(key):
-                        dropped = True
-                        break
-                if dropped:
-                    continue
-                for c in range(len(read_ids)):
-                    out[c].values.append(row[c].copy())
+                    )
+                elif need_array[c]:
+                    arrays.append(
+                        constant_array(
+                            p.name,
+                            p.field_id,
+                            p.kind,
+                            p.precision,
+                            p.scale,
+                            p.length,
+                            p.constant,
+                            n,
+                        )
+                    )
+                else:
+                    arrays.append(
+                        empty_array(p.name, p.field_id, targets[c].copy())
+                    )
+
+            # ── selection ──────────────────────────────────────────────────
+            var keep = List[Bool](length=n, fill=True)
+            var all_kept = True
+            if has_position_deletes:
+                for r in range(n):
+                    var p_at = Int(base) + r
+                    if p_at < len(deleted) and deleted[p_at]:
+                        keep[r] = False
+                        all_kept = False
+            if not trivial:
+                var sel = _selection(
+                    residual, residual.root, arrays, plans, read_ids, n
+                )
+                for r in range(n):
+                    if keep[r] and not sel[r]:
+                        keep[r] = False
+                        all_kept = False
+            for e in range(len(equality)):
+                ref eq = equality[e]
+                var slots = List[Int]()
+                for j in range(len(eq.ids)):
+                    slots.append(_index_of(read_ids, eq.ids[j]))
+                for r in range(n):
+                    if not keep[r]:
+                        continue
+                    var key = List[UInt8]()
+                    for j in range(len(slots)):
+                        append_key(key, arrays[slots[j]], r)
+                    if eq.contains(key):
+                        keep[r] = False
+                        all_kept = False
+
+            var n_keep = 0
+            for r in range(n):
+                if keep[r]:
+                    n_keep += 1
+            if options.limit >= 0 and kept_total + n_keep > options.limit:
+                var room = options.limit - kept_total
+                var seen = 0
+                for r in range(n):
+                    if not keep[r]:
+                        continue
+                    if seen >= room:
+                        keep[r] = False
+                        all_kept = False
+                    seen += 1
+                n_keep = room
+            if n_keep == 0:
+                if options.limit >= 0 and kept_total >= options.limit:
+                    return out^
+                continue
+
+            # ── the surviving rows ─────────────────────────────────────────
+            var rest = List[ArrayData]()
+            for _ in range(len(arrays)):
+                rest.append(arrays.pop())
+            var cols = List[ScanColumn]()
+            for c in range(len(projected)):
+                ref p = plans[c]
+                var raw = rest.pop()
+                var a = raw^ if all_kept else filter_array(raw, keep, n_keep)
+                cols.append(
+                    ScanColumn(
+                        p.name,
+                        p.field_id,
+                        p.kind,
+                        p.precision,
+                        p.scale,
+                        p.length,
+                        a^,
+                    )
+                )
+            if len(meta_columns) > 0:
+                var positions = List[Int64]()
+                if need_positions:
+                    for r in range(n):
+                        if keep[r]:
+                            positions.append(base + Int64(r))
                 for c in range(len(read_ids), len(plans)):
                     ref p = plans[c]
+                    var a: ArrayData
                     if p.source == SRC_POS:
-                        out[c].values.append(Datum.long_(row_pos))
+                        a = int64_array(p.name, positions)
                     elif p.source == SRC_ROW_ID:
-                        out[c].values.append(
-                            Datum.long_(p.constant.i + row_pos)
-                        )
+                        var ids = List[Int64](capacity=len(positions))
+                        for j in range(len(positions)):
+                            ids.append(p.constant.i + positions[j])
+                        a = int64_array(p.name, ids)
                     else:
-                        out[c].values.append(p.constant.copy())
-                kept += 1
-                if options.limit >= 0 and kept >= options.limit:
-                    return _trim(out^, len(projected), len(meta_columns))
-    return _trim(out^, len(projected), len(meta_columns))
+                        a = constant_array(
+                            p.name,
+                            p.field_id,
+                            p.kind,
+                            p.precision,
+                            p.scale,
+                            p.length,
+                            p.constant,
+                            n_keep,
+                        )
+                    cols.append(
+                        ScanColumn(
+                            p.name,
+                            p.field_id,
+                            p.kind,
+                            p.precision,
+                            p.scale,
+                            p.length,
+                            a^,
+                        )
+                    )
+            out.append(ScanResult(cols^))
+            kept_total += n_keep
+            if options.limit >= 0 and kept_total >= options.limit:
+                return out^
+    return out^
 
 
-def _trim(
-    var columns: List[ScanColumn], projected: Int, meta: Int
-) -> ScanResult:
-    """Drop the columns that were only read to evaluate a filter or a delete."""
-    var out = List[ScanColumn]()
-    for k in range(projected):
-        out.append(columns[k].copy())
-    for k in range(len(columns) - meta, len(columns)):
-        out.append(columns[k].copy())
-    return ScanResult(out^)
+def read_data_file_table(
+    io: FileIO,
+    data_file: DataFile,
+    delete_files: List[DataFile],
+    data_sequence_number: Int64,
+    spec: PartitionSpec,
+    schema: Schema,
+    projected: List[Int],
+    meta_columns: List[String],
+    mapping: NameMapping,
+    residual_dsl: String,
+    case_sensitive: Bool,
+    options: ScanOptions,
+) raises -> ScanResult:
+    """`read_data_file`, with the batches concatenated into one result."""
+    var parts = read_data_file(
+        io,
+        data_file,
+        delete_files,
+        data_sequence_number,
+        spec,
+        schema,
+        projected,
+        meta_columns,
+        mapping,
+        residual_dsl,
+        case_sensitive,
+        options,
+    )
+    var out = ScanResult()
+    for k in range(len(parts)):
+        out.append(parts[k])
+    if len(out.columns) == 0:
+        out = empty_scan_result(schema, projected, meta_columns)
+    return out^
+
+
+def empty_scan_result(
+    schema: Schema, ids: List[Int], meta_columns: List[String]
+) raises -> ScanResult:
+    """A result with the right columns and no rows."""
+    var cols = List[ScanColumn]()
+    for k in range(len(ids)):
+        var f = schema.find_field(ids[k])
+        ref t = schema.store.nodes[f.type]
+        cols.append(
+            ScanColumn.empty(
+                f.name, ids[k], t.prim, t.precision, t.scale, t.length
+            )
+        )
+    for k in range(len(meta_columns)):
+        var name = meta_columns[k]
+        var kind = P_LONG
+        if name == META_FILE or name == META_PARTITION:
+            kind = P_STRING
+        elif name == META_SPEC_ID:
+            kind = P_INT
+        cols.append(ScanColumn.empty(name, -1, kind, 0, 0, 0))
+    return ScanResult(cols^)
 
 
 def _wants_positions(meta_columns: List[String]) -> Bool:

@@ -46,6 +46,7 @@ from iceberg.puffin import (
 )
 from iceberg.read import (
     read_data_file,
+    read_data_file_table,
     META_FILE,
     META_LAST_UPDATED,
     META_PARTITION,
@@ -2944,7 +2945,7 @@ def test_projection_falls_back_to_name_mapping() raises:
         '{"field-id":103,"names":["amount"]}]'
     )
     var task = _one_ident_task()
-    var rows = read_data_file(
+    var rows = read_data_file_table(
         fixture_io(),
         task.data_file,
         List[DataFile](),
@@ -2989,7 +2990,7 @@ def test_projection_falls_back_to_partition_value() raises:
             )
         ],
     )
-    var rows = read_data_file(
+    var rows = read_data_file_table(
         fixture_io(),
         task.data_file,
         List[DataFile](),

@@ -38,10 +38,10 @@ from parquet import RecordBatch
 
 from .read import (
     NameMapping,
-    ScanColumn,
     NAME_MAPPING_PROPERTY,
     ScanOptions,
     ScanResult,
+    empty_scan_result,
     is_metadata_column,
     read_data_file,
 )
@@ -62,7 +62,7 @@ from .manifest import (
 from .metadata import Snapshot, TableMetadata
 from .schema import Schema
 from .transforms import PartitionSpec
-from .values import Datum, compare
+from .values import compare
 
 
 @fieldwise_init
@@ -383,7 +383,7 @@ struct TableScan(Copyable, Movable):
                 spec = self.metadata.spec_by_id(t.spec_id)
             var opts = options.copy()
             opts.limit = left
-            var part = read_data_file(
+            var parts = read_data_file(
                 self.io,
                 t.data_file,
                 t.delete_files,
@@ -397,20 +397,25 @@ struct TableScan(Copyable, Movable):
                 self.case_sensitive,
                 opts,
             )
-            out.append(part)
+            for j in range(len(parts)):
+                out.append(parts[j])
             if options.limit >= 0:
                 left = options.limit - out.num_rows()
                 if left <= 0:
                     break
         if len(out.columns) == 0:
             # Nothing was read: still describe the shape of the result.
-            out = _empty_result(schema, ids, meta_columns)
+            out = empty_scan_result(schema, ids, meta_columns)
         return out^
 
     def to_batches(
         self, options: ScanOptions = ScanOptions()
     ) raises -> List[RecordBatch]:
-        """The same rows, one Arrow `RecordBatch` per data file."""
+        """The same rows, as Arrow `RecordBatch`es straight off the kernels.
+
+        One batch per Parquet batch read, not one per data file: nothing is
+        concatenated on the way out, which is what makes this the fast path.
+        """
         var snap = self.snapshot()
         var schema = self.metadata.schema_for_snapshot(snap)
         var split = self._split_selection()
@@ -420,6 +425,7 @@ struct TableScan(Copyable, Movable):
         var tasks = self.plan_files()
         var out = List[RecordBatch]()
         var left = options.limit
+        var seen = 0
         for k in range(len(tasks)):
             ref t = tasks[k]
             var spec = PartitionSpec.unpartitioned(t.spec_id)
@@ -427,7 +433,7 @@ struct TableScan(Copyable, Movable):
                 spec = self.metadata.spec_by_id(t.spec_id)
             var opts = options.copy()
             opts.limit = left
-            var part = read_data_file(
+            var parts = read_data_file(
                 self.io,
                 t.data_file,
                 t.delete_files,
@@ -441,13 +447,20 @@ struct TableScan(Copyable, Movable):
                 self.case_sensitive,
                 opts,
             )
-            if part.num_rows() == 0:
-                continue
+            var n = len(parts)
+            var rev = List[ScanResult]()
+            for _ in range(n):
+                rev.append(parts.pop())
+            for _ in range(n):
+                var part = rev.pop()
+                if part.num_rows() == 0:
+                    continue
+                seen += part.num_rows()
+                out.append(part^.take_batch())
             if options.limit >= 0:
-                left -= part.num_rows()
-            out.append(part.to_batch())
-            if options.limit >= 0 and left <= 0:
-                break
+                left = options.limit - seen
+                if left <= 0:
+                    break
         return out^
 
     # ── output ─────────────────────────────────────────────────────────────
@@ -485,30 +498,6 @@ struct TableScan(Copyable, Movable):
             out += "}"
         out += "]"
         return out^
-
-
-def _empty_result(
-    schema: Schema, ids: List[Int], meta_columns: List[String]
-) raises -> ScanResult:
-    """A result with the right columns and no rows."""
-    var cols = List[ScanColumn]()
-    for k in range(len(ids)):
-        var f = schema.find_field(ids[k])
-        ref t = schema.store.nodes[f.type]
-        cols.append(
-            ScanColumn(
-                f.name,
-                ids[k],
-                t.prim,
-                t.precision,
-                t.scale,
-                t.length,
-                List[Datum](),
-            )
-        )
-    for k in range(len(meta_columns)):
-        cols.append(ScanColumn(meta_columns[k], -1, 0, 0, 0, 0, List[Datum]()))
-    return ScanResult(cols^)
 
 
 def _deletes_for(

@@ -1,12 +1,21 @@
 """End-to-end scan benchmark: metadata, plan, decode, deletes, rows out.
 
-Times whole `to_table()` calls over a one-million-row table built by
+Times whole scans over a one-million-row table built by
 tools/make_bench_table.py, which is what `pixi run bench` regenerates into
 `build/bench-warehouse`. tools/bench_pyiceberg.py runs the same four scans
 through PyIceberg for comparison.
 
-Nothing here is a micro-benchmark: every number includes reading the
-metadata, planning the scan, decoding Parquet and materialising values.
+Two shapes are timed for each scan:
+
+* `to_batches()` — the **Arrow fast path**. Columns come out of parquet.mojo
+  as Arrow buffers, are cast, filtered and assembled by the columnar kernels
+  in `iceberg.kernels`, and are handed back as `RecordBatch`es. This is the
+  comparable number: PyIceberg's `to_arrow()` does the same thing.
+* `to_table()` — the same rows concatenated into one `ScanResult`, which costs
+  a copy of every buffer.
+
+Nothing here is a micro-benchmark: every number includes reading the metadata,
+planning the scan, and decoding Parquet.
 """
 
 from std.os import getenv
@@ -29,6 +38,22 @@ def read_text(path: String) raises -> String:
         return f.read()
 
 
+def _report(label: String, rows: Int, ns: Int) raises:
+    var seconds = Float64(ns) / 1.0e9
+    var per_second = 0
+    if seconds > 0:
+        per_second = Int(Float64(rows) / seconds)
+    print(
+        _pad(label, 30),
+        _pad(String(rows), 10),
+        "rows",
+        _pad(String(Int(seconds * 1000)), 7),
+        "ms",
+        _pad(String(per_second), 11),
+        "rows/s",
+    )
+
+
 def timed(
     label: String,
     location: String,
@@ -41,22 +66,20 @@ def timed(
     var scan = table.scan().filter(filter)
     if len(columns) > 0:
         scan = scan.select(columns.copy())
-    var rows = scan.to_table(options)
-    var ns = perf_counter_ns() - t0
-    var seconds = Float64(ns) / 1.0e9
-    var per_second = 0
-    if seconds > 0:
-        per_second = Int(Float64(rows.num_rows()) / seconds)
-    print(
-        _pad(label, 24),
-        _pad(String(rows.num_rows()), 10),
-        "rows",
-        _pad(String(Int(seconds * 1000)), 7),
-        "ms",
-        _pad(String(per_second), 11),
-        "rows/s",
-    )
-    return rows.num_rows()
+    var batches = scan.to_batches(options)
+    var n = 0
+    for k in range(len(batches)):
+        n += batches[k].num_rows
+    _report(label + " (arrow)", n, perf_counter_ns() - t0)
+
+    var t1 = perf_counter_ns()
+    var table2 = Table.load(location, FileIO.local())
+    var scan2 = table2.scan().filter(filter)
+    if len(columns) > 0:
+        scan2 = scan2.select(columns.copy())
+    var rows = scan2.to_table(options)
+    _report(label + " (to_table)", rows.num_rows(), perf_counter_ns() - t1)
+    return n
 
 
 def main() raises:

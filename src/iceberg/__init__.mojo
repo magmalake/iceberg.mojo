@@ -32,6 +32,13 @@ from iceberg.expressions import (
     rewrite_not,
 )
 from iceberg.io import FileIO, InputFile, LocalInputFile, strip_scheme
+from iceberg.kernels import (
+    arrow_type_for,
+    cast_array,
+    concat_into,
+    constant_array,
+    filter_array,
+)
 from iceberg.json import Json, parse_json
 from iceberg.manifest import (
     DataFile,
@@ -62,6 +69,8 @@ from iceberg.read import (
     ScanResult,
     arrow_type_of,
     is_metadata_column,
+    read_data_file,
+    read_data_file_table,
 )
 from iceberg.scan import FileScanTask, TableScan
 from iceberg.schema import Schema
