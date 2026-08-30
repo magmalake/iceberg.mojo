@@ -17,7 +17,11 @@ rather than guessed at. The stages mirror what `TableScan.to_table` does:
 
 `read` minus `decode` is what the Iceberg layer costs on top of the decode it
 wraps; `decode` is measured at the same `batch_size` the scan uses, so batch
-chopping shows up where it happens.
+chopping shows up where it happens. One caveat: `decode` always reads every
+column, so on a *projected* scan — where `read` decodes fewer — the `iceberg`
+row goes negative and means nothing. Every stage is timed after one untimed
+pass, because a cold page cache lands entirely on `io` and `decode` and is not
+what any of this is measuring.
 """
 
 from std.os import getenv
