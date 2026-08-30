@@ -30,7 +30,7 @@ libcurl = ">=8,<9"
 python = ">=3.10,<3.14"
 
 [activation.env]
-ICEBERG_INCLUDES = "-I src -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src"
 
 [tasks]
 # Builds the test binary, brings up the REST mock (and MinIO when available),

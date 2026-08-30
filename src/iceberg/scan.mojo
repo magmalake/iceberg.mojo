@@ -24,6 +24,8 @@ Reading the data files themselves is out of scope until parquet.mojo exists;
 returns, so the two can be diffed directly.
 """
 
+from threads import OpaquePtr, num_cpus, opaque_ptr, parallel_for
+
 from .expressions import (
     Expr,
     InclusiveMetricsEvaluator,
@@ -46,6 +48,7 @@ from .read import (
     read_data_file,
 )
 from .json import json_quote
+from .nested import concat_tree
 from .manifest import (
     CONTENT_DATA,
     CONTENT_EQUALITY_DELETES,
@@ -100,6 +103,226 @@ struct _PendingDelete(Copyable, Movable):
     var sequence_number: Int64
     var spec_id: Int
     var spec_unpartitioned: Bool
+
+
+struct _FileScanCtx(Movable):
+    """Everything a parallel file-scan task reads, and where it writes.
+
+    `parallel_for` hands a task one `void *` and nothing else, so every input
+    a `read_data_file` call needs is laid out here once and every task indexes
+    it. The outputs are pre-sized to one slot per task, and a task only ever
+    writes its own slot — the tasks share nothing, not even an arena, which is
+    what makes this safe without a lock and deterministic without a sort.
+    """
+
+    var io: FileIO
+    var tasks: List[FileScanTask]
+    var specs: List[PartitionSpec]
+    var schema: Schema
+    var ids: List[Int]
+    var meta_columns: List[String]
+    var mapping: NameMapping
+    var options: ScanOptions
+    var case_sensitive: Bool
+    var out: List[List[ScanResult]]
+    var errors: List[String]
+
+    def __init__(
+        out self,
+        var io: FileIO,
+        var tasks: List[FileScanTask],
+        var specs: List[PartitionSpec],
+        var schema: Schema,
+        var ids: List[Int],
+        var meta_columns: List[String],
+        var mapping: NameMapping,
+        var options: ScanOptions,
+        case_sensitive: Bool,
+    ):
+        var n = len(tasks)
+        self.io = io^
+        self.tasks = tasks^
+        self.specs = specs^
+        self.schema = schema^
+        self.ids = ids^
+        self.meta_columns = meta_columns^
+        self.mapping = mapping^
+        self.options = options^
+        self.case_sensitive = case_sensitive
+        self.out = List[List[ScanResult]]()
+        self.errors = List[String]()
+        for _ in range(n):
+            self.out.append(List[ScanResult]())
+            self.errors.append(String(""))
+
+    def take_out(mut self) -> List[List[ScanResult]]:
+        """The results, moved out; the context keeps an empty list in place."""
+        var taken = self.out^
+        self.out = List[List[ScanResult]]()
+        return taken^
+
+    def __init__(out self, *, deinit move: Self):
+        self.io = move.io^
+        self.tasks = move.tasks^
+        self.specs = move.specs^
+        self.schema = move.schema^
+        self.ids = move.ids^
+        self.meta_columns = move.meta_columns^
+        self.mapping = move.mapping^
+        self.options = move.options^
+        self.case_sensitive = move.case_sensitive
+        self.out = move.out^
+        self.errors = move.errors^
+
+
+def _drain_into(
+    var parts: List[ScanResult], mut out: List[RecordBatch]
+) raises -> Int:
+    """Move every non-empty part into `out`, in order. Returns the rows moved.
+    """
+    var n = len(parts)
+    var rev = List[ScanResult]()
+    for _ in range(n):
+        rev.append(parts.pop())
+    var seen = 0
+    for _ in range(n):
+        var part = rev.pop()
+        if part.num_rows() == 0:
+            continue
+        seen += part.num_rows()
+        out.append(part^.take_batch())
+    return seen
+
+
+struct _ConcatCtx(Movable):
+    """One column per task: the destination result, and the parts to append.
+
+    Concatenating batches is per-column work — every column owns its own arena
+    and its own buffers — so the loops invert cleanly: instead of walking parts
+    and touching every column of each, walk columns and append every part's.
+    Task `c` is the only writer of column `c`, and every part is read-only.
+    """
+
+    var out: ScanResult
+    var rest: List[ScanResult]
+    var errors: List[String]
+
+    def __init__(out self, var out_: ScanResult, var rest: List[ScanResult]):
+        var n = out_.num_columns()
+        self.out = out_^
+        self.rest = rest^
+        self.errors = List[String]()
+        for _ in range(n):
+            self.errors.append(String(""))
+
+    def take_out(mut self) -> ScanResult:
+        var taken = self.out^
+        self.out = ScanResult()
+        return taken^
+
+    def __init__(out self, *, deinit move: Self):
+        self.out = move.out^
+        self.rest = move.rest^
+        self.errors = move.errors^
+
+
+def _concat_one_column(c: Int, ctx: OpaquePtr) -> None:
+    var x = UnsafePointer[_ConcatCtx, MutUntrackedOrigin](
+        unsafe_from_address=Int(ctx)
+    )
+    try:
+        for j in range(len(x[].rest)):
+            concat_tree(
+                x[].out.columns[c].arena,
+                x[].out.columns[c].root,
+                x[].rest[j].columns[c].arena,
+                x[].rest[j].columns[c].root,
+            )
+    except e:
+        x[].errors[c] = String(e)
+
+
+def _concat_parts(
+    var parts: List[ScanResult], workers: Int
+) raises -> ScanResult:
+    """Every part, concatenated into one result, in order."""
+    var n = len(parts)
+    var rev = List[ScanResult]()
+    for _ in range(n):
+        rev.append(parts.pop())
+    var live = List[ScanResult]()
+    for _ in range(n):
+        var p = rev.pop()
+        if p.num_rows() > 0:
+            live.append(p^)
+    if len(live) == 0:
+        return ScanResult()
+    if len(live) == 1:
+        return live.pop()
+
+    var m = len(live)
+    var rev2 = List[ScanResult]()
+    for _ in range(m):
+        rev2.append(live.pop())
+    var first = rev2.pop()
+    var rest = List[ScanResult]()
+    for _ in range(m - 1):
+        rest.append(rev2.pop())
+
+    var ncols = first.num_columns()
+    for j in range(len(rest)):
+        if rest[j].num_columns() != ncols:
+            raise Error("iceberg: cannot append results with different shapes")
+
+    if workers <= 1 or ncols <= 1:
+        var out = first^
+        for j in range(len(rest)):
+            out.append(rest[j])
+        return out^
+
+    var ctx = _ConcatCtx(first^, rest^)
+    var w = workers
+    if w > ncols:
+        w = ncols
+    parallel_for[_concat_one_column](
+        n_tasks=ncols,
+        ctx=opaque_ptr(Int(UnsafePointer(to=ctx))),
+        num_workers=w,
+    )
+    for k in range(len(ctx.errors)):
+        if ctx.errors[k] != "":
+            raise Error(ctx.errors[k])
+    return ctx.take_out()
+
+
+def _scan_one_file(i: Int, ctx: OpaquePtr) -> None:
+    """One file scan task, on whichever worker drew index `i`.
+
+    A `parallel_for` body cannot raise — pthread has no exception channel — so
+    a failure lands in this task's own error slot and the caller re-raises it
+    after the join, in task order, so the message a scan fails with does not
+    depend on which worker lost.
+    """
+    var c = UnsafePointer[_FileScanCtx, MutUntrackedOrigin](
+        unsafe_from_address=Int(ctx)
+    )
+    try:
+        c[].out[i] = read_data_file(
+            c[].io,
+            c[].tasks[i].data_file,
+            c[].tasks[i].delete_files,
+            c[].tasks[i].data_sequence_number,
+            c[].specs[i],
+            c[].schema,
+            c[].ids,
+            c[].meta_columns,
+            c[].mapping,
+            c[].tasks[i].residual,
+            c[].case_sensitive,
+            c[].options,
+        )
+    except e:
+        c[].errors[i] = String(e)
 
 
 struct TableScan(Copyable, Movable):
@@ -377,6 +600,87 @@ struct TableScan(Copyable, Movable):
             )
         return NameMapping()
 
+    def _specs_for(
+        self, tasks: List[FileScanTask]
+    ) raises -> List[PartitionSpec]:
+        var out = List[PartitionSpec]()
+        for k in range(len(tasks)):
+            var id = tasks[k].spec_id
+            if self.metadata.has_spec(id):
+                out.append(self.metadata.spec_by_id(id))
+            else:
+                out.append(PartitionSpec.unpartitioned(id))
+        return out^
+
+    def _read_files(
+        self,
+        var tasks: List[FileScanTask],
+        schema: Schema,
+        ids: List[Int],
+        meta_columns: List[String],
+        mapping: NameMapping,
+        options: ScanOptions,
+    ) raises -> List[List[ScanResult]]:
+        """Every planned file's batches, one slot per task, in task order.
+
+        Sequential when `num_workers` is 1 — which is the default, so nothing
+        that existed before this method changes shape — and otherwise one
+        `parallel_for` task per file. Either way slot `k` holds the batches of
+        `tasks[k]`, so the rows a scan returns and the order they come in are
+        the same whichever path ran. A `limit` never takes the parallel path;
+        `to_table`/`to_batches` handle that case themselves.
+        """
+        var specs = self._specs_for(tasks)
+        var n = len(tasks)
+        var workers = options.num_workers
+        if workers == 0:
+            workers = num_cpus()
+        if workers > n:
+            workers = n
+        if workers <= 1 or n <= 1:
+            var out = List[List[ScanResult]]()
+            for k in range(n):
+                out.append(
+                    read_data_file(
+                        self.io,
+                        tasks[k].data_file,
+                        tasks[k].delete_files,
+                        tasks[k].data_sequence_number,
+                        specs[k],
+                        schema,
+                        ids,
+                        meta_columns,
+                        mapping,
+                        tasks[k].residual,
+                        self.case_sensitive,
+                        options,
+                    )
+                )
+            return out^
+
+        var ctx = _FileScanCtx(
+            self.io.copy(),
+            tasks^,
+            specs^,
+            schema.copy(),
+            ids.copy(),
+            meta_columns.copy(),
+            mapping.copy(),
+            options.copy(),
+            self.case_sensitive,
+        )
+        parallel_for[_scan_one_file](
+            n_tasks=n,
+            ctx=opaque_ptr(Int(UnsafePointer(to=ctx))),
+            num_workers=workers,
+        )
+        # `ctx` is mentioned here, after the join, on purpose: Mojo destroys a
+        # value at its last use, and the workers read it until they are joined.
+        for k in range(len(ctx.errors)):
+            if ctx.errors[k] != "":
+                raise Error(ctx.errors[k])
+        return ctx.take_out()
+
     def to_table(
         self, options: ScanOptions = ScanOptions()
     ) raises -> ScanResult:
@@ -389,34 +693,52 @@ struct TableScan(Copyable, Movable):
         var mapping = self.name_mapping()
         var tasks = self.plan_files()
         var out = ScanResult()
-        var left = options.limit
-        for k in range(len(tasks)):
-            ref t = tasks[k]
-            var spec = PartitionSpec.unpartitioned(t.spec_id)
-            if self.metadata.has_spec(t.spec_id):
-                spec = self.metadata.spec_by_id(t.spec_id)
-            var opts = options.copy()
-            opts.limit = left
-            var parts = read_data_file(
-                self.io,
-                t.data_file,
-                t.delete_files,
-                t.data_sequence_number,
-                spec,
-                schema,
-                ids,
-                meta_columns,
-                mapping,
-                t.residual,
-                self.case_sensitive,
-                opts,
-            )
-            for j in range(len(parts)):
-                out.append(parts[j])
-            if options.limit >= 0:
+        if options.limit >= 0:
+            var specs = self._specs_for(tasks)
+            var left = options.limit
+            for k in range(len(tasks)):
+                var opts = options.copy()
+                opts.limit = left
+                var parts = read_data_file(
+                    self.io,
+                    tasks[k].data_file,
+                    tasks[k].delete_files,
+                    tasks[k].data_sequence_number,
+                    specs[k],
+                    schema,
+                    ids,
+                    meta_columns,
+                    mapping,
+                    tasks[k].residual,
+                    self.case_sensitive,
+                    opts,
+                )
+                for j in range(len(parts)):
+                    out.append(parts[j])
                 left = options.limit - out.num_rows()
                 if left <= 0:
                     break
+        else:
+            var workers = options.num_workers
+            if workers == 0:
+                workers = num_cpus()
+            var all = self._read_files(
+                tasks^, schema, ids, meta_columns, mapping, options
+            )
+            var flat = List[ScanResult]()
+            var n = len(all)
+            var rev = List[List[ScanResult]]()
+            for _ in range(n):
+                rev.append(all.pop())
+            for _ in range(n):
+                var parts = rev.pop()
+                var m = len(parts)
+                var prev = List[ScanResult]()
+                for _ in range(m):
+                    prev.append(parts.pop())
+                for _ in range(m):
+                    flat.append(prev.pop())
+            out = _concat_parts(flat^, workers)
         if len(out.columns) == 0:
             # Nothing was read: still describe the shape of the result.
             out = empty_scan_result(schema, ids, meta_columns)
@@ -437,43 +759,41 @@ struct TableScan(Copyable, Movable):
         var mapping = self.name_mapping()
         var tasks = self.plan_files()
         var out = List[RecordBatch]()
-        var left = options.limit
-        var seen = 0
-        for k in range(len(tasks)):
-            ref t = tasks[k]
-            var spec = PartitionSpec.unpartitioned(t.spec_id)
-            if self.metadata.has_spec(t.spec_id):
-                spec = self.metadata.spec_by_id(t.spec_id)
-            var opts = options.copy()
-            opts.limit = left
-            var parts = read_data_file(
-                self.io,
-                t.data_file,
-                t.delete_files,
-                t.data_sequence_number,
-                spec,
-                schema,
-                ids,
-                meta_columns,
-                mapping,
-                t.residual,
-                self.case_sensitive,
-                opts,
-            )
-            var n = len(parts)
-            var rev = List[ScanResult]()
-            for _ in range(n):
-                rev.append(parts.pop())
-            for _ in range(n):
-                var part = rev.pop()
-                if part.num_rows() == 0:
-                    continue
-                seen += part.num_rows()
-                out.append(part^.take_batch())
-            if options.limit >= 0:
+        if options.limit >= 0:
+            var specs = self._specs_for(tasks)
+            var left = options.limit
+            var seen = 0
+            for k in range(len(tasks)):
+                var opts = options.copy()
+                opts.limit = left
+                var parts = read_data_file(
+                    self.io,
+                    tasks[k].data_file,
+                    tasks[k].delete_files,
+                    tasks[k].data_sequence_number,
+                    specs[k],
+                    schema,
+                    ids,
+                    meta_columns,
+                    mapping,
+                    tasks[k].residual,
+                    self.case_sensitive,
+                    opts,
+                )
+                seen += _drain_into(parts^, out)
                 left = options.limit - seen
                 if left <= 0:
                     break
+            return out^
+        var all = self._read_files(
+            tasks^, schema, ids, meta_columns, mapping, options
+        )
+        var n = len(all)
+        var rev = List[List[ScanResult]]()
+        for _ in range(n):
+            rev.append(all.pop())
+        for _ in range(n):
+            _ = _drain_into(rev.pop(), out)
         return out^
 
     # ── output ─────────────────────────────────────────────────────────────

@@ -1176,6 +1176,17 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     var lazy: Bool
     """Fetch the footer and only the surviving row groups, instead of the
     whole file. Worth it over the network, pointless on a local disk."""
+    var num_workers: Int
+    """How many OS threads read data files at once.
+
+    `1`, the default, reads every file on the calling thread and is what every
+    existing caller gets. `0` means one worker per core. Anything else is that
+    many workers. File scan tasks are shared-nothing — each decodes, casts,
+    deletes and filters into its own arena — so the only ordering that matters
+    is the merge afterwards, which is by task index either way. A scan with a
+    `limit` ignores this and stays sequential: stopping early is only
+    meaningful in order.
+    """
 
     def __init__(out self):
         self.batch_size = 1 << 20
@@ -1183,6 +1194,7 @@ struct ScanOptions(Copyable, Defaultable, Movable):
         self.verify_crc = False
         self.prune = True
         self.lazy = False
+        self.num_workers = 1
 
 
 # ── deletes ─────────────────────────────────────────────────────────────────

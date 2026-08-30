@@ -5220,5 +5220,108 @@ def test_delete_that_matches_nothing_changes_nothing() raises:
     assert_equal(table.scan().to_table().num_rows(), 18)
 
 
+# ── multi-worker scans ──────────────────────────────────────────────────────
+def ordered_rows(result: ScanResult) raises -> List[String]:
+    """Every row as one comparable string, in the order the scan produced it.
+
+    `encoded_rows` sorts, because the oracles compare row *sets*. Here the
+    order is the thing under test: a parallel scan must return the rows a
+    sequential one does, in the same order, or it is not a drop-in.
+    """
+    var rows = List[String]()
+    for r in range(result.num_rows()):
+        var line = String("")
+        for c in range(result.num_columns()):
+            if c > 0:
+                line += "\x01"
+            line += oracle_cell(result.value(r, c))
+        rows.append(line^)
+    return rows^
+
+
+def _join_rows(rows: List[String]) -> String:
+    var out = String("")
+    for k in range(len(rows)):
+        out += rows[k] + "\x02"
+    return out^
+
+
+def test_multi_worker_to_table_is_identical() raises:
+    """Every fixture table, read at 1, 2, 4 and 8 workers: same rows, same
+    order.
+
+    `bucket_part` is the one that carries the test — it has six data files, so
+    six file scan tasks to hand out — but the delete fixtures matter too:
+    position deletes, a deletion vector and equality deletes are all applied
+    inside the per-file task, so they have to parallelise with it.
+    """
+    var tables = all_fixture_table_names()
+    var workers = [2, 4, 8]
+    var checked = 0
+    for t in range(len(tables)):
+        var one = ScanOptions()
+        var want = _join_rows(
+            ordered_rows(fixture_scan(tables[t]).to_table(one))
+        )
+        for w in range(len(workers)):
+            var opts = ScanOptions()
+            opts.num_workers = workers[w]
+            var got = _join_rows(
+                ordered_rows(fixture_scan(tables[t]).to_table(opts))
+            )
+            assert_equal(
+                got,
+                want,
+                String(
+                    workers[w],
+                    " workers changed ",
+                    tables[t],
+                ),
+            )
+            checked += 1
+    print("    multi-worker to_table:", checked, "comparisons")
+
+
+def test_multi_worker_to_batches_is_identical() raises:
+    """The Arrow fast path too: same batch count, same rows, same order."""
+    var tables = all_fixture_table_names()
+    var checked = 0
+    for t in range(len(tables)):
+        var one = ScanOptions()
+        var base = fixture_scan(tables[t]).to_batches(one)
+        var opts = ScanOptions()
+        opts.num_workers = 4
+        var got = fixture_scan(tables[t]).to_batches(opts)
+        assert_equal(len(got), len(base), "batch count for " + tables[t])
+        for b in range(len(base)):
+            assert_equal(
+                got[b].num_rows, base[b].num_rows, "batch rows " + tables[t]
+            )
+        checked += 1
+    print("    multi-worker to_batches:", checked, "tables")
+
+
+def test_multi_worker_scan_reports_a_failure() raises:
+    """A task cannot raise, so a failure comes back through its slot. Point a
+    scan at a file that is not there and the error still reaches the caller."""
+    var table = load_fixture_metadata("bucket_part")
+    var io = FileIO.local()
+    io.rebase(WAREHOUSE_PREFIX, FIXTURES + "/nowhere")
+    var opts = ScanOptions()
+    opts.num_workers = 4
+    with assert_raises():
+        _ = TableScan(table^, io^).to_table(opts)
+
+
+def test_num_workers_zero_uses_every_core() raises:
+    """`num_workers = 0` is "one per core", not "no workers"."""
+    var opts = ScanOptions()
+    opts.num_workers = 0
+    assert_equal(
+        fixture_scan("bucket_part").to_table(opts).num_rows(),
+        fixture_scan("bucket_part").to_table().num_rows(),
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
