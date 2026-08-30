@@ -45,6 +45,7 @@ from iceberg.puffin import (
     read_deletion_vector,
 )
 from iceberg.read import (
+    read_data_file,
     META_FILE,
     META_LAST_UPDATED,
     META_PARTITION,
@@ -138,6 +139,7 @@ from iceberg.transforms import (
     bucket_of,
     iceberg_hash,
     truncate_codepoints,
+    PartitionField,
     PartitionSpec,
     T_IDENTITY,
     T_BUCKET,
@@ -2904,6 +2906,108 @@ def _sort_int64(mut l: List[Int64]):
         while j > 0 and l[j] < l[j - 1]:
             l.swap_elements(j, j - 1)
             j -= 1
+
+
+# ══ the projection fallbacks ════════════════════════════════════════════════
+# Rules 2 and 3 of the spec's column projection — an identity partition value,
+# and `schema.name-mapping.default` — cannot be reached through a fixture whose
+# data files carry the right field ids, because rule 1 always wins. They are
+# reached here by handing `read_data_file` a schema whose ids are deliberately
+# *wrong* for the file, which is exactly the situation both rules exist for.
+comptime SHIFTED_SCHEMA = String(
+    '{"type":"struct","schema-id":0,"fields":['
+    '{"id":101,"name":"id","required":true,"type":"long"},'
+    '{"id":102,"name":"region","required":true,"type":"string"},'
+    '{"id":103,"name":"amount","required":false,"type":"double"},'
+    '{"id":104,"name":"missing","required":false,"type":"string",'
+    '"initial-default":"filled-in"},'
+    '{"id":105,"name":"absent","required":false,"type":"int"}]}'
+)
+"""The `ident_part` columns under ids no data file has ever heard of."""
+
+
+def _one_ident_task() raises -> FileScanTask:
+    var tasks = (
+        fixture_scan("ident_part").filter('["=","region","apac"]').plan_files()
+    )
+    assert_true(len(tasks) > 0)
+    return tasks[0].copy()
+
+
+def test_projection_falls_back_to_name_mapping() raises:
+    """Rule 3: a file whose ids do not match is read through the name mapping.
+    """
+    var schema = Schema.parse(SHIFTED_SCHEMA)
+    var mapping = NameMapping.parse(
+        '[{"field-id":101,"names":["id"]},'
+        '{"field-id":102,"names":["region"]},'
+        '{"field-id":103,"names":["amount"]}]'
+    )
+    var task = _one_ident_task()
+    var rows = read_data_file(
+        fixture_io(),
+        task.data_file,
+        List[DataFile](),
+        task.data_sequence_number,
+        PartitionSpec.unpartitioned(0),
+        schema,
+        [101, 102, 103, 104, 105],
+        List[String](),
+        mapping,
+        String('["true"]'),
+        True,
+        ScanOptions(),
+    )
+    assert_true(rows.num_rows() > 0)
+    assert_equal(rows.num_columns(), 5)
+    for r in range(rows.num_rows()):
+        # 101/102/103 came through the mapping and really hold values.
+        assert_true(rows.value(r, 0).valid)
+        assert_equal(rows.value(r, 1).s, "apac")
+        # Rule 4: a column the file lacks, with an `initial-default`.
+        assert_equal(rows.value(r, 3).s, "filled-in")
+        # Rule 5: a column the file lacks, with no default at all.
+        assert_false(rows.value(r, 4).valid)
+
+
+def test_projection_falls_back_to_partition_value() raises:
+    """Rule 2: an identity partition value stands in for a missing column.
+
+    This is the metadata-only Hive migration case — the data file never had
+    the partition column in it, and the manifest's partition tuple is the only
+    place the value exists.
+    """
+    var schema = Schema.parse(SHIFTED_SCHEMA)
+    var task = _one_ident_task()
+    # `region` at id 102, identity-partitioned, with no name mapping: the only
+    # way to resolve it is the partition tuple.
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                102, 1000, String("region"), Transform.identity()
+            )
+        ],
+    )
+    var rows = read_data_file(
+        fixture_io(),
+        task.data_file,
+        List[DataFile](),
+        task.data_sequence_number,
+        spec,
+        schema,
+        [102, 101],
+        List[String](),
+        NameMapping(),
+        String('["true"]'),
+        True,
+        ScanOptions(),
+    )
+    assert_true(rows.num_rows() > 0)
+    for r in range(rows.num_rows()):
+        assert_equal(rows.value(r, 0).s, "apac", "from the partition tuple")
+        # 101 has neither a matching id, a mapping, nor a default: null.
+        assert_false(rows.value(r, 1).valid)
 
 
 def main() raises:

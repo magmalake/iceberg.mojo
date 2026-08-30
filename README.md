@@ -104,7 +104,8 @@ self-checked — the expected values come from them, never from this code. See
 | **(j)** Partition transforms | PyIceberg + Appendix B | ✅ **252 / 252 vectors**, 87 also checking the raw 32-bit hash |
 | **(k)** Manifests decode with inherited sequence numbers | the manifest lists themselves | ✅ **38 entries**, 36 inherited and 2 explicit |
 | **(l)** Puffin footer vs the manifest's `content_offset` | the spec's "must exactly match" | ✅ 2 / 2 blobs |
-| Tests | | **92 passing**, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| **(m)** Column projection rules 2–5 — partition value, name mapping, `initial-default`, null | the spec | ✅ each reached by giving the reader a schema whose ids the file does not have |
+| Tests | | **94 passing**, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
 | CI | | 4 jobs: {stable, nightly} × {ubuntu, macOS}, each running the REST mock and MinIO |
 
 ### The one plan disagreement, and why it is not a bug
@@ -295,7 +296,7 @@ rule — and it is the obvious thing for a later pass to remove.
 ## Install
 
 ```sh
-pixi run test              # 92 tests; starts the REST mock and MinIO
+pixi run test              # 94 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench
