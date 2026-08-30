@@ -73,6 +73,7 @@ from .transforms import PartitionSpec
 from .types import P_LONG, P_STRING
 from .util import uuid4
 from .values import Datum
+from .nested import ColumnTree
 from .write import (
     WriteOptions,
     _partition_key,
@@ -203,7 +204,7 @@ def _matched_positions(
         if parts[k].num_rows() == 0:
             continue
         var at = _pos_column(parts[k])
-        ref column = parts[k].columns[at].array
+        ref column = parts[k].columns[at].array()
         for r in range(parts[k].num_rows()):
             out.append(UInt64(int_at(column, r)))
     return out^
@@ -439,9 +440,9 @@ def write_position_deletes(
                 rows += 1
         if rows == 0:
             continue
-        var columns = List[ArrayData]()
-        columns.append(paths.build())
-        columns.append(positions.build())
+        var columns = List[ColumnTree]()
+        columns.append(ColumnTree(paths.build()))
+        columns.append(ColumnTree(positions.build()))
         var data = write_parquet(columns, delete_schema, options)
         var dir = join_path(location, "data")
         var rel = partition_path(spec, partitions[g])
@@ -517,7 +518,7 @@ def surviving_batch(
     var pos_at = _pos_column(whole)
     var keep = List[Bool](length=whole.num_rows(), fill=False)
     var kept = 0
-    ref positions = whole.columns[pos_at].array
+    ref positions = whole.columns[pos_at].array()
     for r in range(whole.num_rows()):
         var p = Int(int_at(positions, r))
         if p >= 0 and p < len(drop) and drop[p]:
@@ -529,7 +530,7 @@ def surviving_batch(
         if c == pos_at:
             continue
         batch.roots.append(
-            batch.arena.add(filter_array(whole.columns[c].array, keep, kept))
+            batch.arena.add(filter_array(whole.columns[c].array(), keep, kept))
         )
     return batch^
 

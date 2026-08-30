@@ -115,6 +115,23 @@ from .expressions import (
 )
 from .io import FileIO
 from .json import Json, json_quote, parse_json, substr
+from .nested import (
+    ColumnTree,
+    ColumnType,
+    cast_column,
+    cell_datum,
+    cell_json,
+    default_tree,
+    empty_tree,
+    find_struct_path,
+    filter_tree,
+    concat_tree,
+    move_tree_into,
+    flatten_leaf,
+    null_tree,
+    subtree_copy,
+    take_subtree,
+)
 from .kernels import (
     CMP_BYTES,
     CMP_FLOAT,
@@ -129,6 +146,7 @@ from .kernels import (
     constant_array,
     decimal_le16,
     empty_array,
+    extract_datum,
     filter_array,
     float_at,
     hash_key,
@@ -165,6 +183,7 @@ from .types import (
     P_UNKNOWN,
     P_UUID,
     TK_PRIMITIVE,
+    TK_STRUCT,
     TypeStore,
 )
 from .values import (
@@ -209,7 +228,16 @@ def arrow_type_of(
 
 # ── a scan's rows ───────────────────────────────────────────────────────────
 struct ScanColumn(Copyable, Movable):
-    """One output column: its name, its Iceberg type, and its Arrow array."""
+    """One output column: its name, its Iceberg type, and its Arrow array.
+
+    A primitive column is a single array. A struct, list or map column is a
+    whole tree, so the array lives in the column's own `arena` with `root`
+    naming it and every child referring to a sibling index — the layout
+    parquet.mojo decodes into and `iceberg.nested` operates on. `ctype` is
+    the column's Iceberg type, which is what tells a `Datum`, a JSON cell or
+    a CSV cell how to read the bytes; it is empty for a metadata column,
+    which is always one of a handful of primitives.
+    """
 
     var name: String
     var field_id: Int
@@ -217,7 +245,9 @@ struct ScanColumn(Copyable, Movable):
     var precision: Int
     var scale: Int
     var length: Int
-    var array: ArrayData
+    var ctype: ColumnType
+    var arena: ArrayArena
+    var root: Int
 
     def __init__(
         out self,
@@ -235,7 +265,30 @@ struct ScanColumn(Copyable, Movable):
         self.precision = precision
         self.scale = scale
         self.length = length
-        self.array = array^
+        self.ctype = ColumnType(TypeStore(), -1)
+        self.arena = ArrayArena()
+        self.root = self.arena.add(array^)
+
+    def __init__(
+        out self,
+        var name: String,
+        field_id: Int,
+        kind: UInt8,
+        precision: Int,
+        scale: Int,
+        length: Int,
+        var ctype: ColumnType,
+        var tree: ColumnTree,
+    ):
+        self.name = name^
+        self.field_id = field_id
+        self.kind = kind
+        self.precision = precision
+        self.scale = scale
+        self.length = length
+        self.ctype = ctype^
+        self.root = tree.root
+        self.arena = tree^.take_arena()
 
     @staticmethod
     def empty(
@@ -258,7 +311,9 @@ struct ScanColumn(Copyable, Movable):
         self.precision = copy.precision
         self.scale = copy.scale
         self.length = copy.length
-        self.array = copy.array.copy()
+        self.ctype = copy.ctype.copy()
+        self.arena = copy.arena.copy()
+        self.root = copy.root
 
     def __init__(out self, *, deinit move: Self):
         self.name = move.name^
@@ -267,13 +322,22 @@ struct ScanColumn(Copyable, Movable):
         self.precision = move.precision
         self.scale = move.scale
         self.length = move.length
-        self.array = move.array^
+        self.ctype = move.ctype^
+        self.arena = move.arena^
+        self.root = move.root
+
+    def array(ref self) -> ref[self.arena.nodes[0]] ArrayData:
+        """The column's Arrow array; its children index into `self.arena`."""
+        return self.arena.nodes[self.root]
+
+    def is_nested(self) -> Bool:
+        return self.ctype.is_nested()
 
     def num_rows(self) -> Int:
-        return self.array.length
+        return self.arena.nodes[self.root].length
 
-    def take_array(deinit self) -> ArrayData:
-        return self.array^
+    def take_tree(deinit self) -> ColumnTree:
+        return ColumnTree(self.arena^, self.root)
 
 
 struct ScanResult(Copyable, Defaultable, Movable):
@@ -299,7 +363,7 @@ struct ScanResult(Copyable, Defaultable, Movable):
     def num_rows(self) -> Int:
         if len(self.columns) == 0:
             return 0
-        return self.columns[0].array.length
+        return self.columns[0].num_rows()
 
     def name(self, i: Int) -> String:
         return self.columns[i].name
@@ -308,13 +372,30 @@ struct ScanResult(Copyable, Defaultable, Movable):
         """One cell, typed as the table's current schema says it is.
 
         This is the only place a `Datum` is built on the read path, and it is
-        built on demand.
+        built on demand. A `Datum` is a tagged *scalar*, so a struct, list or
+        map cell arrives as its canonical JSON text — `cell` gives the same
+        thing without the `Datum` around it.
         """
         ref c = self.columns[col]
-        return _extract(c.array, row, c.kind, c.precision, c.scale, c.length)
+        if c.ctype.type >= 0:
+            return cell_datum(c.arena, c.root, c.ctype.store, c.ctype.type, row)
+        return _extract(
+            c.arena.nodes[c.root], row, c.kind, c.precision, c.scale, c.length
+        )
 
-    def column(ref self, i: Int) -> ref[self.columns[0].array] ArrayData:
-        return self.columns[i].array
+    def cell(self, row: Int, col: Int) raises -> String:
+        """One cell as JSON — nested for a struct, list or map."""
+        ref c = self.columns[col]
+        if c.ctype.type >= 0:
+            return cell_json(c.arena, c.root, c.ctype.store, c.ctype.type, row)
+        return _extract(
+            c.arena.nodes[c.root], row, c.kind, c.precision, c.scale, c.length
+        ).to_json()
+
+    def column(
+        ref self, i: Int
+    ) -> ref[self.columns[0].arena.nodes[0]] ArrayData:
+        return self.columns[i].arena.nodes[self.columns[i].root]
 
     def append(mut self, other: ScanResult) raises:
         """Concatenate another result with the same columns."""
@@ -326,7 +407,12 @@ struct ScanResult(Copyable, Defaultable, Movable):
         if len(self.columns) != len(other.columns):
             raise Error("iceberg: cannot append results with different shapes")
         for k in range(len(self.columns)):
-            concat_into(self.columns[k].array, other.columns[k].array)
+            concat_tree(
+                self.columns[k].arena,
+                self.columns[k].root,
+                other.columns[k].arena,
+                other.columns[k].root,
+            )
 
     # ── output ─────────────────────────────────────────────────────────────
     def to_csv(self, header: Bool = True) raises -> String:
@@ -357,17 +443,26 @@ struct ScanResult(Copyable, Defaultable, Movable):
                 if c > 0:
                     out += ","
                 out += json_quote(self.columns[c].name) + ":"
-                out += self.value(r, c).to_json()
+                out += self.cell(r, c)
             out += "}"
         out += "]"
         return out^
 
     def to_batch(self) raises -> RecordBatch:
-        """The same rows as an Arrow `RecordBatch`, ready for `export_c`."""
+        """The same rows as an Arrow `RecordBatch`, ready for `export_c`.
+
+        A nested column brings its whole subtree across, renumbered into the
+        batch's arena, so the C Data Interface export of a nested scan is the
+        same call as the export of a flat one.
+        """
         var batch = RecordBatch()
         batch.num_rows = self.num_rows()
         for c in range(len(self.columns)):
-            batch.roots.append(batch.arena.add(self.columns[c].array.copy()))
+            batch.roots.append(
+                subtree_copy(
+                    self.columns[c].arena, self.columns[c].root, batch.arena
+                )
+            )
         return batch^
 
     def take_batch(deinit self) raises -> RecordBatch:
@@ -376,11 +471,12 @@ struct ScanResult(Copyable, Defaultable, Movable):
         batch.num_rows = self.num_rows()
         var cols = self.columns^
         var n = len(cols)
-        var rev = List[ArrayData]()
+        var rev = List[ColumnTree]()
         for _ in range(n):
-            rev.append(cols.pop().take_array())
+            rev.append(cols.pop().take_tree())
         for _ in range(n):
-            batch.roots.append(batch.arena.add(rev.pop()))
+            var t = rev.pop()
+            batch.roots.append(move_tree_into(t.arena, t.root, batch.arena))
         return batch^
 
 
@@ -421,35 +517,7 @@ def _extract(
     a: ArrayData, i: Int, kind: UInt8, precision: Int, scale: Int, length: Int
 ) raises -> Datum:
     """One value, typed as the table's current schema says it is."""
-    if not a.is_valid(i):
-        return Datum.none()
-    if kind == P_BOOLEAN:
-        return Datum.bool_(int_at(a, i) != 0)
-    if kind == P_FLOAT:
-        return Datum.float_(Float64(Float32(float_at(a, i))))
-    if kind == P_DOUBLE:
-        return Datum.double_(float_at(a, i))
-    if kind == P_STRING:
-        var b = bytes_at(a, i)
-        return Datum.string_(String(StringSlice(unsafe_from_utf8=Span(b))))
-    if kind == P_UUID:
-        var b = bytes_at(a, i)
-        return Datum.uuid_(b^)
-    if kind == P_FIXED:
-        var b = bytes_at(a, i)
-        return Datum.fixed_(b^)
-    if kind == P_BINARY or kind == P_UNKNOWN:
-        var b = bytes_at(a, i)
-        return Datum.binary_(b^)
-    if kind == P_DECIMAL:
-        # Arrow decimal128 is little-endian; Iceberg's is big-endian minimal.
-        var le = bytes_at(a, i)
-        var be = List[UInt8]()
-        for k in range(len(le)):
-            be.append(le[len(le) - 1 - k])
-        return Datum.decimal_(be^, precision, scale)
-    # int, long, date, time, timestamp and their nanosecond forms.
-    return Datum.integral(kind, int_at(a, i))
+    return extract_datum(a, i, kind, precision, scale, length)
 
 
 def _decimal_le16(d: Datum) -> List[UInt8]:
@@ -475,6 +543,38 @@ struct _ColumnPlan(Copyable, Movable):
     var batch_index: Int
     """Which column of the Parquet batch, for `SRC_FILE`."""
     var constant: Datum
+    var field: NestedField
+    """The schema field this column projects, whose `type` indexes `read`."""
+    var read: ColumnType
+    """The type the file's column is cast to: everything this scan must see,
+    which is the projection plus whatever the residual still needs."""
+    var out: ColumnType
+    """The type the caller asked for. Narrower than `read` only when the
+    residual reaches a nested field beside the ones being projected."""
+    var reproject: Bool
+    var nullable: Bool
+
+    def is_nested(self) -> Bool:
+        return self.read.is_nested()
+
+
+@fieldwise_init
+struct _LeafPlan(Copyable, Movable):
+    """A primitive nested inside a struct, as a filter sees it.
+
+    `a.b > 5` binds to the id of `b`, which is not a column of the batch: it
+    is a child of the column `a`. The path is the chain of child positions
+    from that column's root, which `nested.flatten_leaf` walks to produce a
+    flat array with the parent structs' nulls folded in.
+    """
+
+    var field_id: Int
+    var slot: Int
+    var path: List[Int]
+    var kind: UInt8
+    var precision: Int
+    var scale: Int
+    var length: Int
 
 
 @fieldwise_init
@@ -863,9 +963,11 @@ def _vector_leaf(
 def _selection(
     e: Expr,
     i: Int,
-    arrays: List[ArrayData],
+    arrays: List[ColumnTree],
     plans: List[_ColumnPlan],
     read_ids: List[Int],
+    leaves: List[_LeafPlan],
+    leaf_arrays: List[ArrayData],
     n: Int,
 ) raises -> List[Bool]:
     """A residual predicate as a selection bitmap over one batch."""
@@ -877,7 +979,9 @@ def _selection(
     if nd.op == OP_FALSE:
         return List[Bool](length=n, fill=False)
     if nd.op == OP_AND:
-        var left = _selection(e, nd.left, arrays, plans, read_ids, n)
+        var left = _selection(
+            e, nd.left, arrays, plans, read_ids, leaves, leaf_arrays, n
+        )
         var any = False
         for r in range(n):
             if left[r]:
@@ -885,42 +989,71 @@ def _selection(
                 break
         if not any:
             return left^
-        var right = _selection(e, nd.right, arrays, plans, read_ids, n)
+        var right = _selection(
+            e, nd.right, arrays, plans, read_ids, leaves, leaf_arrays, n
+        )
         for r in range(n):
             left[r] = left[r] and right[r]
         return left^
     if nd.op == OP_OR:
-        var left = _selection(e, nd.left, arrays, plans, read_ids, n)
-        var right = _selection(e, nd.right, arrays, plans, read_ids, n)
+        var left = _selection(
+            e, nd.left, arrays, plans, read_ids, leaves, leaf_arrays, n
+        )
+        var right = _selection(
+            e, nd.right, arrays, plans, read_ids, leaves, leaf_arrays, n
+        )
         for r in range(n):
             left[r] = left[r] or right[r]
         return left^
     if nd.op == OP_NOT:
-        var inner = _selection(e, nd.left, arrays, plans, read_ids, n)
+        var inner = _selection(
+            e, nd.left, arrays, plans, read_ids, leaves, leaf_arrays, n
+        )
         for r in range(n):
             inner[r] = not inner[r]
         return inner^
 
-    var slot = -1
-    for k in range(len(read_ids)):
-        if read_ids[k] == nd.field_id:
-            slot = k
-            break
+    var slot = _index_of(read_ids, nd.field_id)
     if slot < 0:
+        # A struct leaf: it came out of a column, not as one.
+        for k in range(len(leaves)):
+            if leaves[k].field_id != nd.field_id:
+                continue
+            ref lp = leaves[k]
+            var out = List[Bool](length=n, fill=False)
+            if _vector_leaf(e, i, leaf_arrays[k], out):
+                return out^
+            for r in range(n):
+                out[r] = eval_leaf(
+                    e,
+                    i,
+                    _extract(
+                        leaf_arrays[k],
+                        r,
+                        lp.kind,
+                        lp.precision,
+                        lp.scale,
+                        lp.length,
+                    ),
+                )
+            return out^
         return List[Bool](length=n, fill=True)
 
     ref p = plans[slot]
     if p.source != SRC_FILE:
         # A constant column: one evaluation decides the whole batch.
+        if p.is_nested():
+            var v = eval_leaf(e, i, Datum.none())
+            return List[Bool](length=n, fill=v)
         var v = eval_leaf(e, i, p.constant)
         return List[Bool](length=n, fill=v)
 
     var out = List[Bool](length=n, fill=False)
-    if _vector_leaf(e, i, arrays[slot], out):
+    ref a = arrays[slot].arena.nodes[arrays[slot].root]
+    if _vector_leaf(e, i, a, out):
         return out^
     # No kernel for this shape: fall back to a `Datum` per row, for this
     # column only.
-    ref a = arrays[slot]
     for r in range(n):
         out[r] = eval_leaf(
             e, i, _extract(a, r, p.kind, p.precision, p.scale, p.length)
@@ -1124,6 +1257,13 @@ def _read_equality_deletes(
             names.append(reader.schema.fields[idx].name)
             var f = schema.find_field(eq.ids[j])
             ref t = schema.store.nodes[f.type]
+            if t.kind != TK_PRIMITIVE:
+                raise Error(
+                    "iceberg: an equality delete cannot match on the nested"
+                    " field '"
+                    + f.name
+                    + "'"
+                )
             targets.append(
                 arrow_type_for(t.prim, t.precision, t.scale, t.length)
             )
@@ -1182,31 +1322,55 @@ def _partition_json(spec: PartitionSpec, partition: List[Datum]) -> String:
     return out^
 
 
-def _take_columns(var batch: RecordBatch) raises -> List[ArrayData]:
-    """The batch's top-level arrays, moved out of it where that is safe.
+def _column_type(schema: Schema, ids: List[Int]) raises -> ColumnType:
+    """The type of the one top-level column `ids` all live under, pruned to
+    exactly the fields `ids` selects."""
+    var sel = schema.select(ids)
+    ref top = sel.store.nodes[sel.root]
+    if len(top.fields) != 1:
+        raise Error("iceberg: a projection must resolve to one column")
+    return ColumnType(sel.store.copy(), top.fields[0].type)
 
-    Every column a scan reads is primitive, so the arena holds exactly the
-    roots and nothing else; moving them out saves a full copy of the decoded
-    data per batch.
+
+def _column_field(schema: Schema, ids: List[Int]) raises -> NestedField:
+    var sel = schema.select(ids)
+    ref top = sel.store.nodes[sel.root]
+    return top.fields[0].copy()
+
+
+def _same_ids(a: List[Int], b: List[Int]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for k in range(len(a)):
+        if not _contains(b, a[k]):
+            return False
+    return True
+
+
+def _take_column_trees(var batch: RecordBatch) raises -> List[ColumnTree]:
+    """The batch's columns, moved out of its arena where that is safe.
+
+    parquet.mojo builds a field's children before the field itself, so each
+    root closes a contiguous run of arena nodes and the runs come out in
+    order — which means every column, nested or not, can be lifted straight
+    out instead of copied.
     """
     var n = batch.num_columns()
-    var flat = len(batch.arena.nodes) == n
-    if flat:
-        for k in range(n):
-            if batch.roots[k] != k:
-                flat = False
-                break
-    var out = List[ArrayData]()
-    if not flat:
-        for k in range(n):
-            out.append(batch.column(k).copy())
-        return out^
-    var rev = List[ArrayData]()
-    for _ in range(n):
-        rev.append(batch.arena.nodes.pop())
+    var rev = List[ColumnTree]()
+    for k in range(n - 1, -1, -1):
+        rev.append(take_subtree(batch.arena, batch.roots[k]))
+    var out = List[ColumnTree]()
     for _ in range(n):
         out.append(rev.pop())
     return out^
+
+
+def _filter_column(
+    tree: ColumnTree, keep: List[Bool], n_keep: Int
+) raises -> ColumnTree:
+    var out = ArrayArena()
+    var r = filter_tree(tree.arena, tree.root, keep, n_keep, out)
+    return ColumnTree(out^, r)
 
 
 def read_data_file(
@@ -1223,7 +1387,14 @@ def read_data_file(
     case_sensitive: Bool,
     options: ScanOptions,
 ) raises -> List[ScanResult]:
-    """One data file's surviving rows, as Arrow batches."""
+    """One data file's surviving rows, as Arrow batches.
+
+    `projected` is a list of field ids, which may name whole columns or
+    fields nested inside them. Ids that share a top-level column come back as
+    one column whose type has been pruned to exactly what was asked for, and
+    the Parquet read is pruned with it: `["a.b", "c"]` decodes the leaves
+    under `a.b` and `c`, and nothing else.
+    """
     if data_file.file_format.lower() != "parquet":
         raise Error(
             "iceberg: only Parquet data files can be read; '"
@@ -1241,16 +1412,49 @@ def read_data_file(
 
     var equality = _read_equality_deletes(io, delete_files, schema, options)
 
-    # Everything that must be *read*: the projection, the columns the residual
-    # still needs, and the columns every equality delete matches on.
-    var read_ids = projected.copy()
+    # ── which columns, and how much of each ────────────────────────────────
+    # Every projected id is resolved to the top-level column it lives in;
+    # `out_subs` is what the caller asked for, `read_subs` adds whatever the
+    # residual and the equality deletes still need to see.
+    var read_ids = List[Int]()
+    var out_subs = List[List[Int]]()
+    var read_subs = List[List[Int]]()
+    for k in range(len(projected)):
+        var top = schema.top_ancestor_id(projected[k])
+        var at = _index_of(read_ids, top)
+        if at < 0:
+            read_ids.append(top)
+            out_subs.append([projected[k]])
+            read_subs.append([projected[k]])
+        else:
+            if not _contains(out_subs[at], projected[k]):
+                out_subs[at].append(projected[k])
+                read_subs[at].append(projected[k])
+    var n_projected = len(read_ids)
+
     for k in range(len(filter_ids)):
-        if not _contains(read_ids, filter_ids[k]):
-            read_ids.append(filter_ids[k])
+        var top = schema.top_ancestor_id(filter_ids[k])
+        var at = _index_of(read_ids, top)
+        if at < 0:
+            read_ids.append(top)
+            out_subs.append(List[Int]())
+            read_subs.append([filter_ids[k]])
+        elif not _contains(read_subs[at], filter_ids[k]):
+            read_subs[at].append(filter_ids[k])
     for k in range(len(equality)):
         for j in range(len(equality[k].ids)):
-            if not _contains(read_ids, equality[k].ids[j]):
-                read_ids.append(equality[k].ids[j])
+            var id = equality[k].ids[j]
+            if not schema.is_top_level(id):
+                raise Error(
+                    "iceberg: an equality delete cannot match on the nested"
+                    " field '"
+                    + schema.name_of(id)
+                    + "'"
+                )
+            if _index_of(read_ids, id) < 0:
+                read_ids.append(id)
+                out_subs.append(List[Int]())
+                read_subs.append([id])
 
     var data = _load_bytes(io, data_file, options)
     var reader = ParquetReader[AllCodecs](data^)
@@ -1259,25 +1463,34 @@ def read_data_file(
 
     # ── column projection, in the spec's order ─────────────────────────────
     var plans = List[_ColumnPlan]()
-    var file_names = List[String]()
+    var file_fields = List[Int]()
+    var n_file_columns = 0
     for k in range(len(read_ids)):
         var id = read_ids[k]
-        var f = schema.find_field(id)
-        ref t = schema.store.nodes[f.type]
-        if t.kind != TK_PRIMITIVE:
-            raise Error(
-                "iceberg: cannot read nested column '" + f.name + "' yet"
-            )
+        var field = _column_field(schema, read_subs[k])
+        var read_ct = _column_type(schema, read_subs[k])
+        var out_ct = read_ct.copy()
+        var reproject = False
+        if k < n_projected and not _same_ids(read_subs[k], out_subs[k]):
+            out_ct = _column_type(schema, out_subs[k])
+            reproject = True
+        ref t = read_ct.store.nodes[read_ct.type]
+        var prim = t.prim if t.kind == TK_PRIMITIVE else P_UNKNOWN
         var plan = _ColumnPlan(
-            f.name,
+            field.name,
             id,
-            t.prim,
+            prim,
             t.precision,
             t.scale,
             t.length,
             SRC_CONSTANT,
             -1,
             Datum.none(),
+            field.copy(),
+            read_ct^,
+            out_ct^,
+            reproject,
+            not field.required,
         )
         # 1. the column with this id in the file.
         var idx = reader.schema.field_by_id(Int32(id))
@@ -1295,28 +1508,80 @@ def read_data_file(
                 idx = reader.schema.field_by_name(mapped)
         if idx >= 0:
             plan.source = SRC_FILE
-            plan.batch_index = len(file_names)
-            file_names.append(reader.schema.fields[idx].name)
+            plan.batch_index = n_file_columns
+            n_file_columns += 1
+            # Only the sub-trees this scan needs are decoded.
+            var sel = List[Int]()
+            if not _contains(read_subs[k], id):
+                for j in range(len(read_subs[k])):
+                    var fi = reader.schema.field_by_id(Int32(read_subs[k][j]))
+                    if fi >= 0 and not _contains(sel, fi):
+                        sel.append(fi)
+            if len(sel) == 0:
+                sel.append(idx)
+            for j in range(len(sel)):
+                file_fields.append(sel[j])
             plans.append(plan^)
             continue
-        # 4. `initial-default`, then 5. null.
-        var nf = _nested_field(schema, id)
-        if nf.has_initial_default:
+        # 4. `initial-default`, then 5. null — both in `nested.default_tree`.
+        if plan.field.has_initial_default and not plan.is_nested():
             plan.constant = datum_from_json_prim(
-                t.prim,
-                t.precision,
-                t.scale,
-                t.length,
-                parse_json(nf.initial_default),
-                parse_json(nf.initial_default).root,
+                plan.kind,
+                plan.precision,
+                plan.scale,
+                plan.length,
+                parse_json(plan.field.initial_default),
+                parse_json(plan.field.initial_default).root,
             )
         plans.append(plan^)
+
+    # Struct leaves the residual reaches: they are children of a column, not
+    # columns, so each one records where to find it once a batch is decoded.
+    var leaves = List[_LeafPlan]()
+    for k in range(len(filter_ids)):
+        var id = filter_ids[k]
+        if _index_of(read_ids, id) >= 0:
+            continue
+        var slot = _index_of(read_ids, schema.top_ancestor_id(id))
+        if slot < 0:
+            continue
+        var path = List[Int]()
+        if not find_struct_path(
+            plans[slot].read.store, plans[slot].read.type, id, path
+        ):
+            continue
+        var af = schema.find_field(id)
+        ref tn = schema.store.nodes[af.type]
+        leaves.append(
+            _LeafPlan(
+                id,
+                slot,
+                path^,
+                tn.prim if tn.kind == TK_PRIMITIVE else P_UNKNOWN,
+                tn.precision,
+                tn.scale,
+                tn.length,
+            )
+        )
 
     # Metadata columns are appended after the real ones, in the order asked.
     for k in range(len(meta_columns)):
         var name = meta_columns[k]
         var plan = _ColumnPlan(
-            name, -1, P_LONG, 0, 0, 0, SRC_CONSTANT, -1, Datum.none()
+            name,
+            -1,
+            P_LONG,
+            0,
+            0,
+            0,
+            SRC_CONSTANT,
+            -1,
+            Datum.none(),
+            NestedField.simple(-1, name, False, 0),
+            ColumnType(TypeStore(), -1),
+            ColumnType(TypeStore(), -1),
+            False,
+            True,
         )
         if name == META_FILE:
             plan.kind = P_STRING
@@ -1343,26 +1608,20 @@ def read_data_file(
             raise Error("iceberg: unknown metadata column '" + name + "'")
         plans.append(plan^)
 
-    if len(file_names) > 0:
-        reader.select_columns(file_names)
-    else:
-        reader.select_columns(List[String]())
+    reader.select_fields(file_fields)
 
     # Which columns need a materialised array: everything projected, plus the
-    # key columns of any equality delete.
+    # key columns of any equality delete and the owner of any struct leaf.
     var need_array = List[Bool](length=len(read_ids), fill=False)
-    for k in range(len(projected)):
+    for k in range(n_projected):
         need_array[k] = True
     for k in range(len(equality)):
         for j in range(len(equality[k].ids)):
             var at = _index_of(read_ids, equality[k].ids[j])
             if at >= 0:
                 need_array[at] = True
-
-    var targets = List[ArrowType]()
-    for k in range(len(read_ids)):
-        ref p = plans[k]
-        targets.append(arrow_type_for(p.kind, p.precision, p.scale, p.length))
+    for k in range(len(leaves)):
+        need_array[leaves[k].slot] = True
 
     # ── deletes and pruning ────────────────────────────────────────────────
     var deleted = _position_delete_bitmap(
@@ -1378,7 +1637,7 @@ def read_data_file(
     var groups = List[Int]()
     for g in range(reader.num_row_groups()):
         groups.append(g)
-    if options.prune and len(file_names) > 0:
+    if options.prune and len(file_fields) > 0:
         var preds = _predicates_for(residual, residual.root, reader, schema)
         if len(preds) > 0:
             _ = reader.prune_row_groups(preds)
@@ -1396,7 +1655,7 @@ def read_data_file(
     for gi in range(len(groups)):
         var g = groups[gi]
         reader.select_row_groups([g])
-        if options.prune and not need_positions and len(file_names) > 0:
+        if options.prune and not need_positions and len(file_fields) > 0:
             var preds = _predicates_for(residual, residual.root, reader, schema)
             if len(preds) > 0:
                 _ = reader.prune_pages(preds)
@@ -1406,46 +1665,73 @@ def read_data_file(
             var n = batch.num_rows
             var base = pos
             pos += Int64(n)
-            var decoded = _take_columns(batch^)
+            var decoded = _take_column_trees(batch^)
             # Consumed in `batch_index` order, which is the order the
             # `SRC_FILE` plans were built in, so each decoded buffer is moved
             # into its cast exactly once and never copied.
-            var pending = List[ArrayData]()
+            var pending = List[ColumnTree]()
             for _ in range(len(decoded)):
                 pending.append(decoded.pop())
 
             # Cast every column that was read to the table's current type.
-            var arrays = List[ArrayData]()
+            var arrays = List[ColumnTree]()
             for c in range(len(read_ids)):
                 ref p = plans[c]
                 if p.source == SRC_FILE:
                     arrays.append(
-                        cast_array(
+                        cast_column(
                             pending.pop(),
-                            targets[c],
+                            p.read.store,
+                            p.read.type,
                             p.name,
                             p.field_id,
+                            p.nullable,
                         )
                     )
                 elif need_array[c]:
-                    arrays.append(
-                        constant_array(
-                            p.name,
-                            p.field_id,
-                            p.kind,
-                            p.precision,
-                            p.scale,
-                            p.length,
-                            p.constant,
-                            n,
+                    if p.is_nested():
+                        var arena = ArrayArena()
+                        var r = default_tree(arena, p.read.store, p.field, n)
+                        arrays.append(ColumnTree(arena^, r))
+                    else:
+                        arrays.append(
+                            ColumnTree(
+                                constant_array(
+                                    p.name,
+                                    p.field_id,
+                                    p.kind,
+                                    p.precision,
+                                    p.scale,
+                                    p.length,
+                                    p.constant,
+                                    n,
+                                )
+                            )
                         )
-                    )
                 else:
-                    arrays.append(
-                        empty_array(p.name, p.field_id, targets[c].copy())
+                    var arena = ArrayArena()
+                    var r = empty_tree(
+                        arena,
+                        p.read.store,
+                        p.read.type,
+                        p.name,
+                        p.field_id,
+                        p.nullable,
                     )
+                    arrays.append(ColumnTree(arena^, r))
 
             # ── selection ──────────────────────────────────────────────────
+            var leaf_arrays = List[ArrayData]()
+            if not trivial:
+                for k in range(len(leaves)):
+                    ref lp = leaves[k]
+                    leaf_arrays.append(
+                        flatten_leaf(
+                            arrays[lp.slot].arena,
+                            arrays[lp.slot].root,
+                            lp.path,
+                        )
+                    )
             var keep = List[Bool](length=n, fill=True)
             var all_kept = True
             if has_position_deletes:
@@ -1456,7 +1742,14 @@ def read_data_file(
                         all_kept = False
             if not trivial:
                 var sel = _selection(
-                    residual, residual.root, arrays, plans, read_ids, n
+                    residual,
+                    residual.root,
+                    arrays,
+                    plans,
+                    read_ids,
+                    leaves,
+                    leaf_arrays,
+                    n,
                 )
                 for r in range(n):
                     if keep[r] and not sel[r]:
@@ -1472,7 +1765,10 @@ def read_data_file(
                         continue
                     var key = List[UInt8]()
                     for j in range(len(slots)):
-                        append_key(key, arrays[slots[j]], r)
+                        ref a = arrays[slots[j]].arena.nodes[
+                            arrays[slots[j]].root
+                        ]
+                        append_key(key, a, r)
                     if eq.contains(key):
                         keep[r] = False
                         all_kept = False
@@ -1498,14 +1794,23 @@ def read_data_file(
                 continue
 
             # ── the surviving rows ─────────────────────────────────────────
-            var rest = List[ArrayData]()
+            var rest = List[ColumnTree]()
             for _ in range(len(arrays)):
                 rest.append(arrays.pop())
             var cols = List[ScanColumn]()
-            for c in range(len(projected)):
+            for c in range(n_projected):
                 ref p = plans[c]
                 var raw = rest.pop()
-                var a = raw^ if all_kept else filter_array(raw, keep, n_keep)
+                var t = raw^ if all_kept else _filter_column(raw, keep, n_keep)
+                if p.reproject:
+                    t = cast_column(
+                        t^,
+                        p.out.store,
+                        p.out.type,
+                        p.name,
+                        p.field_id,
+                        p.nullable,
+                    )
                 cols.append(
                     ScanColumn(
                         p.name,
@@ -1514,7 +1819,8 @@ def read_data_file(
                         p.precision,
                         p.scale,
                         p.length,
-                        a^,
+                        p.out.copy(),
+                        t^,
                     )
                 )
             if len(meta_columns) > 0:
@@ -1604,12 +1910,34 @@ def empty_scan_result(
 ) raises -> ScanResult:
     """A result with the right columns and no rows."""
     var cols = List[ScanColumn]()
+    var tops = List[Int]()
+    var subs = List[List[Int]]()
     for k in range(len(ids)):
-        var f = schema.find_field(ids[k])
-        ref t = schema.store.nodes[f.type]
+        var top = schema.top_ancestor_id(ids[k])
+        var at = _index_of(tops, top)
+        if at < 0:
+            tops.append(top)
+            subs.append([ids[k]])
+        elif not _contains(subs[at], ids[k]):
+            subs[at].append(ids[k])
+    for k in range(len(tops)):
+        var ct = _column_type(schema, subs[k])
+        var field = _column_field(schema, subs[k])
+        ref t = ct.store.nodes[ct.type]
+        var arena = ArrayArena()
+        var r = empty_tree(
+            arena, ct.store, ct.type, field.name, tops[k], not field.required
+        )
         cols.append(
-            ScanColumn.empty(
-                f.name, ids[k], t.prim, t.precision, t.scale, t.length
+            ScanColumn(
+                field.name,
+                tops[k],
+                t.prim if t.kind == TK_PRIMITIVE else P_UNKNOWN,
+                t.precision,
+                t.scale,
+                t.length,
+                ct^,
+                ColumnTree(arena^, r),
             )
         )
     for k in range(len(meta_columns)):
@@ -1791,13 +2119,16 @@ def _collect_predicates(
     var idx = reader.schema.field_by_id(Int32(n.field_id))
     if idx < 0:
         return
-    var name = reader.schema.fields[idx].name
-    if reader.schema.leaf_by_path(name) < 0:
+    # By the leaf's *dotted path*, so a struct field prunes on its own
+    # statistics and never on a top-level column that happens to share its
+    # name.
+    var lf = reader.schema.fields[idx].leaf
+    if lf < 0:
         return
     var v = _scalar_of(n.lits[0])
     if v.kind == SV_NONE:
         return
-    out.append(Predicate(name, op, v^))
+    out.append(Predicate(reader.schema.leaves[lf].dotted(), op, v^))
 
 
 def _scalar_of(d: Datum) raises -> ScalarValue:

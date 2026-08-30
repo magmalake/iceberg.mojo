@@ -40,6 +40,15 @@ from .kernels import (
     constant_array,
     filter_array,
 )
+from .nested import (
+    ColumnTree,
+    cast_column,
+    default_tree,
+    filter_tree,
+    find_struct_path,
+    flatten_leaf,
+    subtree_copy,
+)
 from .manifest import CONTENT_DATA, DataFile
 from .read import _extract
 from .schema import Schema
@@ -449,18 +458,18 @@ def _column_for(
     return -1
 
 
-def align_batch(batch: RecordBatch, schema: Schema) raises -> List[ArrayData]:
-    """The batch's columns in the table's schema order, at the table's types."""
-    var out = List[ArrayData]()
+def align_batch(batch: RecordBatch, schema: Schema) raises -> List[ColumnTree]:
+    """The batch's columns in the table's schema order, at the table's types.
+
+    A nested column is matched child by child **by field id**, so a batch
+    whose struct has its fields in another order, under other names, or one
+    field short still lines up with the table — the same resolution the read
+    path does, run the other way.
+    """
+    var out = List[ColumnTree]()
     var cols = schema.columns()
     for k in range(len(cols)):
         ref f = cols[k]
-        ref t = schema.store.nodes[f.type]
-        if t.kind != TK_PRIMITIVE:
-            raise Error(
-                "iceberg: cannot write nested column '" + f.name + "' yet"
-            )
-        var target = arrow_type_for(t.prim, t.precision, t.scale, t.length)
         var at = _column_for(batch, f, f.name)
         if at < 0:
             if f.required:
@@ -469,33 +478,33 @@ def align_batch(batch: RecordBatch, schema: Schema) raises -> List[ArrayData]:
                     + f.name
                     + "'"
                 )
-            var a = constant_array(
+            var arena = ArrayArena()
+            var r = default_tree(arena, schema.store, f, batch.num_rows)
+            out.append(ColumnTree(arena^, r))
+            continue
+        var src = ArrayArena()
+        var sr = subtree_copy(batch.arena, batch.roots[at], src)
+        out.append(
+            cast_column(
+                ColumnTree(src^, sr),
+                schema.store,
+                f.type,
                 f.name,
                 f.id,
-                t.prim,
-                t.precision,
-                t.scale,
-                t.length,
-                Datum.none(),
-                batch.num_rows,
+                not f.required,
             )
-            a.nullable = True
-            out.append(a^)
-            continue
-        var a2 = cast_array(batch.column(at).copy(), target, f.name, f.id)
-        a2.nullable = not f.required
-        out.append(a2^)
+        )
     return out^
 
 
 # ── writing one Parquet file ────────────────────────────────────────────────
 def write_parquet(
-    columns: List[ArrayData], schema: Schema, options: WriteOptions
+    columns: List[ColumnTree], schema: Schema, options: WriteOptions
 ) raises -> List[UInt8]:
     var arena = ArrayArena()
     var roots = List[Int]()
     for k in range(len(columns)):
-        roots.append(arena.add(columns[k].copy()))
+        roots.append(subtree_copy(columns[k].arena, columns[k].root, arena))
     var opts = WriterOptions()
     opts.codec = codec_value(options.codec)
     opts.row_group_size = options.row_group_rows
@@ -667,11 +676,18 @@ def write_data_files(
             group_keep.append(List[Bool](length=n, fill=True))
             group_count.append(n)
         else:
-            var source_slot = List[Int]()
+            # A partition source may be a field nested in a struct
+            # (`identity(a.b)`, `bucket[4](a.b)`), which the spec allows: the
+            # leaf is flattened out of its column once per batch, with the
+            # structs above it contributing their nulls.
+            var source_arrays = List[ArrayData]()
+            var source_types = List[Int]()
             for f in range(len(spec.fields)):
+                var src_id = spec.fields[f].source_id
+                var top = schema.top_ancestor_id(src_id)
                 var slot = -1
                 for k in range(len(cols)):
-                    if cols[k].id == spec.fields[f].source_id:
+                    if cols[k].id == top:
                         slot = k
                         break
                 if slot < 0:
@@ -680,14 +696,31 @@ def write_data_files(
                         + spec.fields[f].name
                         + "' has no source column in the schema"
                     )
-                source_slot.append(slot)
+                var path = List[Int]()
+                if src_id != top and not find_struct_path(
+                    schema.store, cols[slot].type, src_id, path
+                ):
+                    raise Error(
+                        "iceberg: partition field '"
+                        + spec.fields[f].name
+                        + "' is inside a list or a map, which cannot be"
+                        " partitioned on"
+                    )
+                source_arrays.append(
+                    flatten_leaf(aligned[slot].arena, aligned[slot].root, path)
+                )
+                source_types.append(schema.find_field(src_id).type)
             for r in range(n):
                 var values = List[Datum]()
                 for f in range(len(spec.fields)):
-                    var slot = source_slot[f]
-                    ref t = schema.store.nodes[cols[slot].type]
+                    ref t = schema.store.nodes[source_types[f]]
                     var v = _extract(
-                        aligned[slot], r, t.prim, t.precision, t.scale, t.length
+                        source_arrays[f],
+                        r,
+                        t.prim,
+                        t.precision,
+                        t.scale,
+                        t.length,
                     )
                     values.append(spec.fields[f].transform.apply(v))
                 var key = _partition_key(values)
@@ -706,15 +739,21 @@ def write_data_files(
 
         # ── one file per group ─────────────────────────────────────────────
         for g in range(len(keys)):
-            var columns = List[ArrayData]()
+            var columns = List[ColumnTree]()
             if group_count[g] == n:
                 for k in range(len(aligned)):
                     columns.append(aligned[k].copy())
             else:
                 for k in range(len(aligned)):
-                    columns.append(
-                        filter_array(aligned[k], group_keep[g], group_count[g])
+                    var arena = ArrayArena()
+                    var r = filter_tree(
+                        aligned[k].arena,
+                        aligned[k].root,
+                        group_keep[g],
+                        group_count[g],
+                        arena,
                     )
+                    columns.append(ColumnTree(arena^, r))
             var data = write_parquet(columns, schema, options)
             var dir = join_path(location, "data")
             var rel = partition_path(spec, group_values[g])

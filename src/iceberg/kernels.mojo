@@ -576,6 +576,48 @@ def bytes_at(a: ArrayData, i: Int) raises -> List[UInt8]:
     return out^
 
 
+# ── one value, as a tagged `Datum` ──────────────────────────────────────────
+def extract_datum(
+    a: ArrayData, i: Int, kind: UInt8, precision: Int, scale: Int, length: Int
+) raises -> Datum:
+    """Element `i`, typed as the table's current schema says it is.
+
+    This is the only place a scan builds a per-cell tagged value, and it is
+    built on demand: `ScanResult.value`, CSV and JSON output, the partition
+    transforms a write applies, and the handful of predicate shapes no
+    vectorised kernel covers.
+    """
+    if not a.is_valid(i):
+        return Datum.none()
+    if kind == P_BOOLEAN:
+        return Datum.bool_(int_at(a, i) != 0)
+    if kind == P_FLOAT:
+        return Datum.float_(Float64(Float32(float_at(a, i))))
+    if kind == P_DOUBLE:
+        return Datum.double_(float_at(a, i))
+    if kind == P_STRING:
+        var b = bytes_at(a, i)
+        return Datum.string_(String(StringSlice(unsafe_from_utf8=Span(b))))
+    if kind == P_UUID:
+        var b = bytes_at(a, i)
+        return Datum.uuid_(b^)
+    if kind == P_FIXED:
+        var b = bytes_at(a, i)
+        return Datum.fixed_(b^)
+    if kind == P_BINARY or kind == P_UNKNOWN:
+        var b = bytes_at(a, i)
+        return Datum.binary_(b^)
+    if kind == P_DECIMAL:
+        # Arrow decimal128 is little-endian; Iceberg's is big-endian minimal.
+        var le = bytes_at(a, i)
+        var be = List[UInt8]()
+        for k in range(len(le)):
+            be.append(le[len(le) - 1 - k])
+        return Datum.decimal_(be^, precision, scale)
+    # int, long, date, time, timestamp and their nanosecond forms.
+    return Datum.integral(kind, int_at(a, i))
+
+
 # ── filter ──────────────────────────────────────────────────────────────────
 def filter_array(
     a: ArrayData, keep: List[Bool], n_keep: Int

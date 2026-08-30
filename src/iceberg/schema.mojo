@@ -15,12 +15,21 @@ from .types import (
 
 @fieldwise_init
 struct AccessorField(Copyable, Movable):
-    """A leaf reachable by name: its id, full dotted name and type index."""
+    """A field reachable by name: its id, full dotted name and type index."""
 
     var id: Int
     var name: String
     var type: Int
     var required: Bool
+    var parent: Int
+    """Position in `Schema.flat` of the field this one is nested in, or -1."""
+    var child_pos: Int
+    """Position among the parent struct's fields, or -1 for a list element
+    and a map key or value — the places a dotted path cannot walk through."""
+
+    @staticmethod
+    def simple(id: Int, var name: String, type: Int, required: Bool) -> Self:
+        return Self(id, name^, type, required, -1, -1)
 
 
 struct Schema(Copyable, Movable):
@@ -50,36 +59,57 @@ struct Schema(Copyable, Movable):
         var flat = List[AccessorField]()
         # `root < 0` is the empty schema a manifest without a `schema` key gets.
         if self.root >= 0:
-            self._walk_struct(self.root, "", flat)
+            self._walk_struct(self.root, "", -1, flat)
         self.flat = flat^
 
     def _walk_struct(
-        self, node: Int, prefix: String, mut out: List[AccessorField]
+        self,
+        node: Int,
+        prefix: String,
+        parent: Int,
+        mut out: List[AccessorField],
     ):
         ref n = self.store.nodes[node]
         for k in range(len(n.fields)):
             ref f = n.fields[k]
             var full = f.name if prefix == "" else prefix + "." + f.name
-            out.append(AccessorField(f.id, full, f.type, f.required))
-            self._walk_type(f.type, full, out)
+            out.append(AccessorField(f.id, full, f.type, f.required, parent, k))
+            var me = len(out) - 1
+            self._walk_type(f.type, full, me, out)
 
-    def _walk_type(self, t: Int, prefix: String, mut out: List[AccessorField]):
+    def _walk_type(
+        self, t: Int, prefix: String, parent: Int, mut out: List[AccessorField]
+    ):
         ref n = self.store.nodes[t]
         if n.kind == TK_STRUCT:
-            self._walk_struct(t, prefix, out)
+            self._walk_struct(t, prefix, parent, out)
         elif n.kind == TK_LIST:
             var nm = prefix + ".element"
             out.append(
-                AccessorField(n.element_id, nm, n.element, n.element_required)
+                AccessorField(
+                    n.element_id,
+                    nm,
+                    n.element,
+                    n.element_required,
+                    parent,
+                    -1,
+                )
             )
-            self._walk_type(n.element, nm, out)
+            var me = len(out) - 1
+            self._walk_type(n.element, nm, me, out)
         elif n.kind == TK_MAP:
             var kn = prefix + ".key"
+            out.append(AccessorField(n.key_id, kn, n.key, True, parent, -1))
+            var ki = len(out) - 1
+            self._walk_type(n.key, kn, ki, out)
             var vn = prefix + ".value"
-            out.append(AccessorField(n.key_id, kn, n.key, True))
-            self._walk_type(n.key, kn, out)
-            out.append(AccessorField(n.value_id, vn, n.value, n.value_required))
-            self._walk_type(n.value, vn, out)
+            out.append(
+                AccessorField(
+                    n.value_id, vn, n.value, n.value_required, parent, -1
+                )
+            )
+            var vi = len(out) - 1
+            self._walk_type(n.value, vn, vi, out)
 
     # ── lookup ─────────────────────────────────────────────────────────────
     def find_index(self, id: Int) -> Int:
@@ -128,8 +158,70 @@ struct Schema(Copyable, Movable):
         """The top-level fields only."""
         return self.store.nodes[self.root].fields.copy()
 
+    # ── nested navigation ──────────────────────────────────────────────────
+    def top_ancestor_id(self, id: Int) -> Int:
+        """The id of the top-level column `id` lives in, or `id` itself."""
+        var k = self.find_index(id)
+        if k < 0:
+            return id
+        while self.flat[k].parent >= 0:
+            k = self.flat[k].parent
+        return self.flat[k].id
+
+    def struct_path(self, id: Int) raises -> List[Int]:
+        """Child positions from the top-level column down to field `id`.
+
+        Empty for a top-level field. Raises when the path crosses a list
+        element or a map key/value, which a dotted name cannot address and a
+        row predicate cannot evaluate.
+        """
+        var k = self.find_index(id)
+        if k < 0:
+            raise Error("iceberg: no field with id " + String(id))
+        var rev = List[Int]()
+        while self.flat[k].parent >= 0:
+            if self.flat[k].child_pos < 0:
+                raise Error(
+                    "iceberg: '"
+                    + self.flat[k].name
+                    + "' is inside a list or a map, which cannot be addressed"
+                    " one value at a time"
+                )
+            rev.append(self.flat[k].child_pos)
+            k = self.flat[k].parent
+        var out = List[Int]()
+        for j in range(len(rev)):
+            out.append(rev[len(rev) - 1 - j])
+        return out^
+
+    def in_struct_only(self, id: Int) -> Bool:
+        """True when `id` is reachable from the top through structs alone."""
+        var k = self.find_index(id)
+        if k < 0:
+            return False
+        while self.flat[k].parent >= 0:
+            if self.flat[k].child_pos < 0:
+                return False
+            k = self.flat[k].parent
+        return True
+
+    def is_top_level(self, id: Int) -> Bool:
+        var k = self.find_index(id)
+        return k >= 0 and self.flat[k].parent < 0
+
+    def column_type(self, id: Int) raises -> Schema:
+        """A one-column schema holding just the type of field `id`."""
+        return self.select([id])
+
     def select(self, ids: List[Int]) raises -> Schema:
-        """Project to the named ids, keeping ancestors of any selected field."""
+        """Project to the named ids, keeping ancestors of any selected field.
+
+        Selecting a nested field keeps the structs above it and *prunes* the
+        ones beside it: `select(["a.b"])` gives back a struct `a` whose only
+        field is `b`. Selecting a whole nested column keeps all of it. A list
+        or a map is never partially selected — its element type is pruned when
+        the selection reaches inside it, but the container itself stays.
+        """
         var keep = List[Int]()
         for k in range(len(ids)):
             keep.append(ids[k])
@@ -142,6 +234,10 @@ struct Schema(Copyable, Movable):
                 var ty = _copy_type(self.store, f.type, store)
                 var nf = f.copy()
                 nf.type = ty
+                fields.append(nf^)
+            elif _subtree_selected(self.store, f.type, keep):
+                var nf = f.copy()
+                nf.type = _prune_type(self.store, f.type, keep, store)
                 fields.append(nf^)
         var root = store.struct_(fields^)
         var s = Schema(store^, root, self.schema_id)
@@ -218,3 +314,61 @@ def _copy_type(src: TypeStore, i: Int, mut dst: TypeStore) -> Int:
         n.key = _copy_type(src, n.key, dst)
         n.value = _copy_type(src, n.value, dst)
     return dst.add(n^)
+
+
+def _subtree_selected(src: TypeStore, i: Int, ids: List[Int]) -> Bool:
+    """Whether any field id under type `i` was selected."""
+    ref n = src.nodes[i]
+    if n.kind == TK_STRUCT:
+        for k in range(len(n.fields)):
+            if _contains(ids, n.fields[k].id):
+                return True
+            if _subtree_selected(src, n.fields[k].type, ids):
+                return True
+        return False
+    if n.kind == TK_LIST:
+        if _contains(ids, n.element_id):
+            return True
+        return _subtree_selected(src, n.element, ids)
+    if n.kind == TK_MAP:
+        if _contains(ids, n.key_id) or _contains(ids, n.value_id):
+            return True
+        if _subtree_selected(src, n.key, ids):
+            return True
+        return _subtree_selected(src, n.value, ids)
+    return False
+
+
+def _prune_type(
+    src: TypeStore, i: Int, ids: List[Int], mut dst: TypeStore
+) raises -> Int:
+    """Copy type `i`, keeping only the fields on a path to a selected id."""
+    ref n = src.nodes[i]
+    if n.kind == TK_STRUCT:
+        var fields = List[NestedField]()
+        for k in range(len(n.fields)):
+            ref f = n.fields[k]
+            var nf = f.copy()
+            if _contains(ids, f.id):
+                nf.type = _copy_type(src, f.type, dst)
+                fields.append(nf^)
+            elif _subtree_selected(src, f.type, ids):
+                nf.type = _prune_type(src, f.type, ids, dst)
+                fields.append(nf^)
+        return dst.struct_(fields^)
+    if n.kind == TK_LIST:
+        var el = _keep_or_prune(src, n.element, n.element_id, ids, dst)
+        return dst.list_(n.element_id, el, n.element_required)
+    if n.kind == TK_MAP:
+        var kt = _copy_type(src, n.key, dst)
+        var vt = _keep_or_prune(src, n.value, n.value_id, ids, dst)
+        return dst.map_(n.key_id, kt, n.value_id, vt, n.value_required)
+    return _copy_type(src, i, dst)
+
+
+def _keep_or_prune(
+    src: TypeStore, i: Int, own_id: Int, ids: List[Int], mut dst: TypeStore
+) raises -> Int:
+    if _contains(ids, own_id) or not _subtree_selected(src, i, ids):
+        return _copy_type(src, i, dst)
+    return _prune_type(src, i, ids, dst)

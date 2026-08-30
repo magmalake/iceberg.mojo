@@ -428,8 +428,25 @@ def _bind_node(
         return out.constant(n.op == OP_IS_NULL or n.op == OP_NOT_IN)
     var af = schema.flat[k].copy()
     ref tn = schema.store.nodes[af.type]
+    if not schema.in_struct_only(af.id):
+        raise Error(
+            "iceberg: cannot filter on '"
+            + n.name
+            + "', which is inside a list or a map"
+        )
     if tn.kind != TK_PRIMITIVE:
-        raise Error("iceberg: cannot filter on nested column '" + n.name + "'")
+        # A container is not comparable, but it is still either there or not.
+        if n.op == OP_IS_NULL and af.required:
+            return out.constant(False)
+        if n.op == OP_NOT_NULL and af.required:
+            return out.constant(True)
+        if n.op == OP_IS_NULL or n.op == OP_NOT_NULL:
+            return out.bound(n.op, af.id, P_UNKNOWN, List[Datum](), af.name)
+        raise Error(
+            "iceberg: cannot compare against the nested column '"
+            + n.name
+            + "'; only is-null and not-null apply to a struct, list or map"
+        )
     # A required column can never be null, and a non-floating column never NaN.
     if n.op == OP_IS_NULL and af.required:
         return out.constant(False)

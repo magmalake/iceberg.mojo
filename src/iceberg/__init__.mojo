@@ -31,7 +31,13 @@ from iceberg.append import (
     prepare_append,
     write_and_prepare_append,
 )
-from iceberg.batch import ColumnBuilder, array_from_datums, batch_of
+from iceberg.batch import (
+    ColumnBuilder,
+    NestedBuilder,
+    array_from_datums,
+    batch_of,
+    batch_of_columns,
+)
 from iceberg.commit import FileChanges, OP_DELETE, OP_OVERWRITE, prepare_commit
 from iceberg.delete import (
     MODE_COPY_ON_WRITE,
@@ -71,6 +77,18 @@ from iceberg.kernels import (
     filter_array,
 )
 from iceberg.json import Json, parse_json
+from iceberg.nested import (
+    ColumnTree,
+    ColumnType,
+    cast_column,
+    cell_datum,
+    cell_json,
+    concat_tree,
+    filter_tree,
+    flatten_leaf,
+    null_tree,
+    subtree_copy,
+)
 from iceberg.maintain import (
     ExpireResult,
     choose_expired,
