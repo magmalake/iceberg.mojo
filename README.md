@@ -122,7 +122,7 @@ self-checked — the expected values come from them, never from this code. See
 | **(p)** PyIceberg **appends to a table we created**, and we read the result | PyIceberg | ✅ 2 tables, 18 + 6 = 24 rows, `_row_id` still intact |
 | **(q)** REST commit — requirements, 409 retry, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried, a rigged applied-then-500 reported, not retried |
 | **(r)** `s3://` write end to end | itself, read back | ✅ create, 2 appends, 12 rows, partition pruning; MinIO verifies every signature |
-| Tests | | **113 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| Tests | | **114 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
 | CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against tables we wrote |
 
 ### The one plan disagreement, and why it is not a bug
@@ -421,7 +421,7 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 113 tests; starts the REST mock and MinIO
+pixi run test              # 114 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg

@@ -3597,6 +3597,51 @@ def test_partition_paths_are_hive_shaped() raises:
     )
 
 
+def test_scan_batches_export_over_the_c_data_interface() raises:
+    """Every column of a scan batch must survive `export_c`.
+
+    The struct pair is what any Arrow consumer imports; the reader's job is to
+    produce arrays whose buffers and lengths are exportable without a copy or
+    a conversion in between, which is only true because the batch *is* the
+    decoded Parquet, cast in place.
+    """
+    var batches = (
+        fixture_scan("unpartitioned")
+        .select(
+            [
+                String("id"),
+                String("region"),
+                String("amount"),
+                String("ok"),
+                String("_file"),
+                String("_pos"),
+            ]
+        )
+        .to_batches()
+    )
+    assert_true(len(batches) > 0)
+    var rows = 0
+    for k in range(len(batches)):
+        ref b = batches[k]
+        assert_equal(b.num_columns(), 6)
+        rows += b.num_rows
+        for c in range(b.num_columns()):
+            var exported = b.export_c(c)
+            assert_true(exported.array != 0, "ArrowArray address")
+            assert_true(exported.schema != 0, "ArrowSchema address")
+            # `exported` releases both structs when it goes out of scope.
+        # The metadata columns are real arrays, not a special case.
+        assert_equal(b.name(4), "_file")
+        assert_equal(b.name(5), "_pos")
+        var files = b.column_str(4)
+        var positions = b.column_i64(5)
+        assert_equal(len(files[0]), b.num_rows)
+        for r in range(b.num_rows):
+            assert_true(files[0][r].endswith(".parquet"))
+            assert_true(positions[0][r] >= 0)
+    assert_equal(rows, fixture_scan("unpartitioned").to_table().num_rows())
+
+
 def test_written_table_survives_a_rewrite_of_its_location() raises:
     """The metadata records absolute paths; a rebase must still read them."""
     var table = build_written_table(
