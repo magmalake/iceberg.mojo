@@ -108,6 +108,11 @@ what the bytes mean.
         │ roaring.mojo  │                    │zstd.mojo │ lz4.mojo │
         │ Bitmap64, DV  │                    └──────────┴──────────┘
         └───────────────┘
+    cores
+        ┌───────────────┐
+        │ threads.mojo  │
+        │ parallel_for  │
+        └───────────────┘
     storage and transport
         ┌──────────────────────────────────────────────────────────┐
         │                    objectstore.mojo                      │
@@ -124,6 +129,9 @@ client an Iceberg REST catalog needs, because no Mojo HTTP package resolves
 from conda.
 The ZSTD and LZ4 codecs are needed because real Iceberg writers use them: of
 the 271 column chunks in this repo's own fixtures, **97 are ZSTD**.
+`threads.mojo` is what `ScanOptions.num_workers` spends: file scan tasks are
+shared-nothing, so a scan over many files is the obvious place for a second
+core.
 
 ## Status
 
@@ -514,34 +522,118 @@ headers are proved rather than assumed.
 
 ## Performance
 
-`pixi run bench` builds a one-million-row table and times whole scans —
-metadata, plan, Parquet decode, casts, deletes, filter — then runs the same
-scans through PyIceberg. M4, one core, six columns (two longs, a string, a
-double, a timestamp, a boolean):
+`pixi run bench` builds a one-million-row table over four data files and times
+whole scans — metadata, plan, Parquet decode, casts, deletes, filter — then
+runs the same scans through PyIceberg. Both sides take the **best of three,
+warm**: one cold run measures the page cache and the allocator (or the
+interpreter) warming up as much as it measures the scan, and it measures them
+differently for the two implementations. M4, six columns (two longs, a string,
+a double, a timestamp, a boolean), ZSTD — which is what PyIceberg writes.
 
-| Scan | before (`Datum` per cell) | **now (Arrow fast path)** | PyIceberg 0.11.1 |
-|---|---|---|---|
-| full scan, 1 M rows × 6 columns | 911 ms — 1.10 M rows/s | **305 ms — 3.28 M rows/s** | 24 ms — 41 M rows/s |
-| projection to 2 of 6 columns | 381 ms — 2.62 M rows/s | **87 ms — 11.5 M rows/s** | 6 ms — 165 M rows/s |
-| `region = 'eu'` → 200 k rows | 725 ms — 0.28 M rows/s | **293 ms — 0.68 M rows/s** | 13 ms — 15 M rows/s |
-| `id > 900000` → 100 k rows | 185 ms — 0.54 M rows/s | **70 ms — 1.41 M rows/s** | 7 ms — 15 M rows/s |
-| full scan, lazy IO | 838 ms — 1.19 M rows/s | **284 ms — 3.52 M rows/s** | — |
+| Scan | 0.3.1 | **0.4.0, one core** | **0.4.0, 4 workers** | PyIceberg 0.11.1 |
+|---|---|---|---|---|
+| full scan, 1 M rows × 6 columns | 163 ms | **35.6 ms** — 28.1 M rows/s | **12.0 ms** — 82.8 M rows/s | 7.9 ms — 126 M rows/s |
+| the same, `to_table` | 159 ms | **43.3 ms** — 23.1 M rows/s | **15.5 ms** — 64.5 M rows/s | — |
+| projection to 2 of 6 columns | 53 ms | **13.7 ms** — 72.7 M rows/s | **5.3 ms** — 187 M rows/s | 5.5 ms — 183 M rows/s |
+| `region = 'eu'` → 200 k rows | 165 ms | **49.9 ms** — 4.0 M rows/s | **16.5 ms** — 12.1 M rows/s | 9.7 ms — 20.6 M rows/s |
+| `id > 900000` → 100 k rows | 39 ms | **11.7 ms** — 8.5 M rows/s | 12.1 ms | 5.6 ms — 17.7 M rows/s |
+| full scan, lazy IO | 169 ms | **35.5 ms** — 28.2 M rows/s | — | — |
 
-3.0× to 4.4× faster, and the reason the full scan stops at 3.28 M rows/s is no
-longer anything this repository does. Decoding the *same four Parquet files*
-with parquet.mojo alone — `ParquetReader.read_batch()` in a loop, no Iceberg at
-all — takes **293 ms**. The Iceberg layer on top of it now costs **4 %**. Every
-cast on this table is a retag (the buffers are already the right width), the
-selection is a single `List[Bool]`, and the decoded buffers are *moved* into the
-output batch rather than copied.
+`id > 900000` does not move with workers, and should not: statistics pruning
+leaves one data file, so there is one task to hand out.
 
-So the remaining ~10× to PyIceberg is parquet.mojo's decoder against Arrow C++,
-which is a different repository's problem. The two-column projection, where
-decoding is cheap enough to stop dominating, reaches **11.5 M rows/s**.
+PyIceberg's column is **one process, not one core** — `to_arrow()` hands each
+file to pyarrow, which uses its own thread pool. Against a single pyarrow
+thread the same four files decode in 26.8 ms, so the comparable single-core
+gap on the full scan is about 1.3×, and at four workers about 1.5×.
 
-`to_batches()` is the fast path and is what the numbers above measure;
-`to_table()` concatenates those batches into one `ScanResult` and costs one
-extra copy of each buffer, which on this table is under 5 %.
+### Where the 163 ms was
+
+`pixi run profile` splits a scan into stages, so a fix can be aimed rather than
+guessed at. Almost all of it was in one place, and that place was not this
+repository.
+
+| stage | what it covers | 0.4.0 |
+|---|---|---|
+| `load` | find the metadata file, parse the JSON | 0.2 ms |
+| `plan` | manifest list, manifests, entries, residuals | 0.9 ms |
+| `io` | read the four data files | 1.7 ms |
+| `open` | the Thrift footers | 0.1 ms |
+| `decode` | parquet.mojo, nothing of Iceberg's | 32.4 ms |
+| `read` | decode plus cast, deletes, residual, assembly | 35.3 ms |
+| — the Iceberg layer alone | `read` minus `decode` | **2.9 ms** |
+| `concat` | stitching the batches into one `ScanResult` | 7.9 ms |
+
+**1. zstd.mojo opened libzstd once per Parquet page — 153 ms of the 163.** The
+bench table is ZSTD (PyIceberg's default) and its four files hold 332 pages;
+`zstd.decompress` did a `dlopen`/`dlclose` per call, which on macOS costs about
+450 µs whether or not the library is already resident. Decompressing all 332
+pages took **152.9 ms**, of which about 25 ms was libzstd. Fixed in zstd.mojo
+0.1.1, along with the identical bug in lz4.mojo 0.1.1: the handle now lives in
+a process-wide `_Global`, opened on first use and never closed. The same 332
+pages now decompress in **33.5 ms**, and the fixed cost of a small
+`zstd.decompress` went from ~415 µs to ~1.4 µs.
+
+**2. parquet.mojo assembled each Arrow value a byte at a time.** `load_i64` and
+friends did eight bounds-checked loads and eight shifts per `int64`; Arrow's
+values buffer is the target's own layout, so it is one unaligned load.
+Comparing a million `int64`s went from 10.2 ms to 1.7 ms (parquet.mojo 0.3.2).
+
+**3. `batch_size` defaulted to 8192**, which chopped each row group into 31
+batches. It does not save memory — `ParquetReader._load` materialises the whole
+column chunk either way — and it multiplies the per-batch work: `concat` for
+the million-row scan was 15.6 ms at 8192 and is 7.9 ms with one batch per row
+group. (It costs nothing measurable in `decode`; an earlier reading that said
+otherwise was measuring a cold page cache.)
+
+**4. The kernels stopped working one row at a time where they did not have to.**
+`filter_array` copies each maximal *run* of kept rows with one `extend` instead
+of moving a fixed-width value byte by byte; `concat_into` never materialises an
+all-ones validity bitmap when neither side has a null; a comparison operator
+resolves to three booleans once instead of being re-dispatched per row; and a
+UTF-8 column's predicate reads its own 32-bit offsets rather than calling
+`value_extent` per row. Together: `to_table` 51 → 43 ms, `filter id>900000`
+19 → 13 ms.
+
+**5. `lazy` IO filled its sparse buffer one byte at a time**, twice, and made a
+whole extra copy of it for the probe reader. It now reads the row-group extents
+in offset order and fills the buffer front to back with `extend`: 47.1 → 35.5
+ms, which matters because `lazy` is what the `s3://` path uses.
+
+What is left is Parquet decoding, and about 25 ms of that 32 is libzstd.
+
+### More than one core
+
+`ScanOptions.num_workers` — 1 (the default, and what every caller had before
+0.4.0), 0 for one per core, or a count — reads data files on
+[threads.mojo](https://github.com/magmalake/threads.mojo) workers. File scan
+tasks are shared-nothing: each opens its own file, decodes into its own arena,
+applies its own deletes and evaluates its own residual. Each writes its result
+into its own slot, so the merge afterwards is by task index and the rows and
+their order do not depend on which worker finished first — there is a test for
+exactly that, over every fixture table, at 1, 2, 4 and 8 workers. Concatenating
+for `to_table` parallelises along the other axis: one task per column, each the
+only writer of its own arena.
+
+`pixi run bench` also builds a two-million-row table over **eight** data files:
+
+| workers | `to_table` | speedup | `to_batches` | speedup |
+|---|---|---|---|---|
+| 1 | 88.7 ms | 1.00× | 71.4 ms | 1.00× |
+| 2 | 48.2 ms | 1.84× | 38.8 ms | 1.84× |
+| 4 | 31.1 ms | 2.85× | 22.9 ms | 3.11× |
+| 8 | **25.4 ms** | 3.49× | **17.6 ms** | 4.04× |
+
+PyIceberg reads the same table in 15.1 ms in one process.
+
+**~4× is the ceiling, and it is not a scheduling problem.** Decoding Parquet is
+mostly moving bytes, and threads.mojo's own parallel-memcpy benchmark stops
+scaling at four workers on this machine for the same reason. `to_table` scales
+slightly worse than `to_batches` because the concatenation it adds is a second
+pass over every byte.
+
+A scan with a `limit` ignores `num_workers` and stays sequential: stopping
+early is only meaningful in order.
 
 ### Nested columns
 
@@ -549,18 +641,16 @@ The same benchmark over 200 000 rows of `id long`, `addr struct<city string,
 zip int>` and `tags list<string>` (two elements a row on average), which
 `pixi run bench` also builds:
 
-| Scan | iceberg.mojo | PyIceberg 0.11.1 |
-|---|---|---|
-| full scan, struct + list | 79 ms — **2.52 M rows/s** | 7 ms — 28.8 M rows/s |
-| projection `addr.city, id` | 22 ms — **8.75 M rows/s** | 4 ms — 49.7 M rows/s |
-| `addr.city = 'eu'` → 36 923 rows | 60 ms — **0.61 M rows/s** | 6 ms — 6.4 M rows/s |
-| `addr.zip > 90000` → 18 460 rows | 30 ms — **0.60 M rows/s** | 5 ms — 3.5 M rows/s |
+| Scan | 0.3.1 | **0.4.0** | PyIceberg 0.11.1 |
+|---|---|---|---|
+| full scan, struct + list | 63 ms | **13.5 ms** — 14.8 M rows/s | 4.4 ms — 45.3 M rows/s |
+| projection `addr.city, id` | 14 ms | **4.3 ms** — 46.3 M rows/s | 3.5 ms — 56.8 M rows/s |
+| `addr.city = 'eu'` → 36 923 rows | 36 ms | **15.9 ms** — 2.3 M rows/s | 5.0 ms — 7.4 M rows/s |
+| `addr.zip > 90000` → 18 460 rows | 18 ms | **8.0 ms** — 2.3 M rows/s | 4.6 ms — 4.0 M rows/s |
 
-The ratio to PyIceberg is the same ~11× the flat benchmark shows, and for the
-same reason: Dremel assembly happens in parquet.mojo, not here. What is worth
-reading is the second row — **3.5× the full scan** — which is the sub-field
-projection actually pruning the Parquet read rather than throwing decoded
-columns away.
+The row worth reading is the second — **3.1× the full scan** — which is the
+sub-field projection actually pruning the Parquet read rather than throwing
+decoded columns away.
 
 ### Writing
 
@@ -571,14 +661,15 @@ the statistics, writing the manifest, the manifest list and the
 
 | | iceberg.mojo | PyIceberg 0.11.1 |
 |---|---|---|
-| append 1 M rows × 6 columns, 4 commits | 917 ms — **1.09 M rows/s** | 163 ms — 6.13 M rows/s |
+| append 1 M rows × 6 columns, 4 commits | 233 ms — **4.28 M rows/s** | 165 ms — 6.03 M rows/s |
 | Parquet written (zstd) | 3 MB | 9 MB |
 
-5.6× slower, and the whole of that is the Parquet *encoder*: the manifest, the
+1.4× slower, and the whole of that is the Parquet *encoder*: the manifest, the
 manifest list and the metadata are four small Avro files and one JSON document
 per commit. The 3 MB against 9 MB is a difference in dictionary encoding, not
 in content — PyIceberg reads all 1 000 000 rows back out of those four files
-and agrees on every column, including both null counts.
+and agrees on every column, including both null counts. (This was 917 ms
+before zstd.mojo 0.1.1: the writer paid the same per-page `dlopen`.)
 
 ### What still falls back to `Datum`
 
@@ -603,10 +694,11 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 137 tests; starts the REST mock and MinIO
+pixi run test              # 154 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg
+pixi run profile           # per-stage profile of a scan: where the time goes
 pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
 ```
 
@@ -616,7 +708,7 @@ Consume it with:
 -I ../iceberg.mojo/src -I ../hashes.mojo/src -I ../avro.mojo/src \
 -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src \
 -I ../roaring.mojo/src -I ../objectstore.mojo/src \
--I ../zstd.mojo/src -I ../lz4.mojo/src
+-I ../zstd.mojo/src -I ../lz4.mojo/src -I ../threads.mojo/src
 ```
 
 Sibling tins are consumed by **source path**, not as pixi packages:
@@ -624,8 +716,10 @@ pixi-build-mojo emits a precompiled artifact built with `mojo-compiler` 1.0.0,
 and the nightly compiler refuses to load it. Source paths satisfy both
 environments. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
 source dependencies, which is what installs their C shims into the
-environment; a consumer needs the same. The same precompiled-package problem
-rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
+environment; a consumer needs the same. threads.mojo has no shim at all — it
+calls the pthread symbols libc already exports — so a source checkout is all it
+needs. The same precompiled-package problem rules out EmberJson, which is why
+`iceberg.json` is a small in-repo parser.
 
 ## API
 
@@ -642,7 +736,7 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 | `iceberg.puffin` | `PuffinFile`, `PuffinWriter`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.nested` | the same kernels for a struct/list/map tree: `cast_column`, `filter_tree`, `concat_tree`, `cell_json`, `flatten_leaf` |
-| `iceberg.read` | `ScanResult`, `ScanOptions`, `NameMapping`, the metadata columns |
+| `iceberg.read` | `ScanResult`, `ScanOptions` (`limit`, `lazy`, `prune`, `batch_size`, `num_workers`), `NameMapping`, the metadata columns |
 | `iceberg.batch` | `ColumnBuilder`, `NestedBuilder`, `batch_of`, `batch_of_columns` — Mojo values to an Arrow batch |
 | `iceberg.write` | `write_data_files`, `WriteOptions`, bound truncation, partition paths |
 | `iceberg.manifest_write` | `write_manifest`, `write_manifest_list`, the per-version Avro schemas |
@@ -666,6 +760,9 @@ def main() raises:
     options.limit = 100
     options.lazy = True
 
+    var wide = ScanOptions()
+    wide.num_workers = 0        # one file-scan worker per core; 1 is default
+
     var rows = (
         t.scan()
         .filter('["and",[">","id",2],["=","region","eu"]]')
@@ -675,7 +772,7 @@ def main() raises:
     print(rows.num_rows(), "rows")
     print(rows.to_json())
 
-    for batch in t.scan().to_batches():      # Arrow, straight off the kernels
+    for batch in t.scan().to_batches(wide):  # Arrow, straight off the kernels
         print(batch.num_rows, batch.num_columns())
 ```
 

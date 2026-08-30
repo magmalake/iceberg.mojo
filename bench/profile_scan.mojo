@@ -65,6 +65,14 @@ def profile(
     columns: List[String],
     options: ScanOptions,
 ) raises:
+    # One untimed pass first: the page cache and the allocator warming up are
+    # not what this is measuring, and they land entirely on `io` and `decode`.
+    var warm = Table.load(meta, FileIO.local())
+    var warm_scan = warm.scan().filter(filter)
+    if len(columns) > 0:
+        warm_scan = warm_scan.select(columns.copy())
+    _ = warm_scan.to_batches(options)
+
     var t_total = perf_counter_ns()
 
     var t0 = perf_counter_ns()

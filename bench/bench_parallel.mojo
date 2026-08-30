@@ -41,6 +41,16 @@ def _ms(ns: Int) -> String:
     return String(us // 1000, ".", (us % 1000) // 100)
 
 
+def _speedup(base_ns: Int, ns: Int) -> String:
+    """`base / ns`, to two decimals, without a float formatter."""
+    if ns <= 0:
+        return String("-")
+    var hundredths = (base_ns * 100 + ns // 2) // ns
+    var frac = hundredths % 100
+    var pad = "0" if frac < 10 else ""
+    return String(hundredths // 100, ".", pad, frac, "x")
+
+
 def fingerprint(r: ScanResult) raises -> String:
     """Enough of the result to notice a reordering: the first and last cell of
     every column, plus the row count."""
@@ -116,13 +126,11 @@ def main() raises:
                 + " workers changed the batch count"
             )
 
-        var sp_t = Float64(t1_table) / Float64(best_table)
-        var sp_b = Float64(t1_batches) / Float64(best_batches)
         print(
             _pad(String(workers[w]), 9),
             _pad(_ms(best_table) + " ms", 12),
-            _pad(String(Int(sp_t * 100) // 100, ".", Int(sp_t * 100) % 100), 9),
+            _pad(_speedup(t1_table, best_table), 9),
             _pad(_ms(best_batches) + " ms", 12),
-            _pad(String(Int(sp_b * 100) // 100, ".", Int(sp_b * 100) % 100), 9),
+            _pad(_speedup(t1_batches, best_batches), 9),
             rows,
         )

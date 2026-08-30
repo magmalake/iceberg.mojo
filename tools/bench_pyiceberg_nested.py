@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """PyIceberg's numbers for the nested scans, so the README can be honest.
 
+Best of three, warm, which is what bench/bench_nested.mojo does.
+
 Usage: bench_pyiceberg_nested.py <metadata.json>
 """
 import json
@@ -22,12 +24,16 @@ cases = [
 
 out = {}
 for name, expr, cols in cases:
-    scan = table.scan(row_filter=expr) if expr is not None else table.scan()
-    if cols:
-        scan = scan.select(*cols)
-    t0 = time.perf_counter()
-    arrow = scan.to_arrow()
-    dt = time.perf_counter() - t0
+    dt = None
+    for _ in range(3):
+        scan = table.scan(row_filter=expr) if expr is not None else table.scan()
+        if cols:
+            scan = scan.select(*cols)
+        t0 = time.perf_counter()
+        arrow = scan.to_arrow()
+        one = time.perf_counter() - t0
+        if dt is None or one < dt:
+            dt = one
     out[name] = {
         "rows": arrow.num_rows,
         "seconds": round(dt, 4),

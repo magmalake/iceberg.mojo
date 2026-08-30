@@ -1,8 +1,8 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
-description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
+description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
 channels = [
     "https://conda.modular.com/max-nightly",
@@ -14,6 +14,9 @@ platforms = ["osx-arm64", "linux-64"]
 # never as a built `.mojopkg`: pixi-build-mojo emits a package compiled with
 # mojo-compiler 1.0.0 and the nightly compiler refuses to load it. CI checks
 # each sibling out next to this repository.
+#
+# threads.mojo is a source-path sibling too and needs nothing else: it calls
+# the pthread symbols libc already exports, with no shim and no build step.
 #
 # Three of the siblings are FFI tins whose C shims must be *installed* into the
 # environment even though their Mojo code comes from the checkout next door:
@@ -73,7 +76,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.3.1"
+version = "0.4.0"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
