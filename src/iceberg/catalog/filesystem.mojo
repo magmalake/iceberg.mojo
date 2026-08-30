@@ -432,7 +432,10 @@ struct AppendFiles(Movable):
                 if attempt > self.retries:
                     raise e
                 # Somebody else took this version. Reload and try again — the
-                # data files are already written and stay valid.
+                # data files are already written and stay valid. The manifest
+                # and manifest list of the failed attempt are orphaned, which
+                # is what every Iceberg implementation does; nothing points at
+                # them, and an orphan-file cleanup is a separate operation.
                 self.table.refresh()
 
 

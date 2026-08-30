@@ -354,6 +354,7 @@ headers are proved rather than assumed.
 | `overwrite`, `delete`, `replace`, compaction | Every one of them merges manifests rather than appending to them, which is a different machine. [iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge covers them. |
 | Writing delete files or deletion vectors | Same reason. They are *read* completely. |
 | Schema and spec evolution as a write | `create_table` fixes both; changing them afterwards is a commit this build does not construct. |
+| Writing **format version 1** | The v1 manifest schemas are generated and would be written, but nothing verifies them — v1 has no writers left to check against. v2 and v3 are gated end to end. |
 | Nested columns in a scan or a write | `to_table()` and `write_data_files` handle primitive columns; a struct/list/map raises. The *metadata* for them is complete. |
 | Non-Parquet data files | ORC and Avro data files are rejected by name. Parquet is what every writer in reach produces. |
 | Brotli-compressed Parquet | No Brotli in Mojo. Everything else — uncompressed, Snappy, GZIP, ZSTD, LZ4 — works. |

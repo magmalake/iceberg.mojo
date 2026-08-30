@@ -459,6 +459,10 @@ struct RestCatalog(Copyable, Movable):
         applied, and the caller is told the state is unknown rather than
         being handed a second attempt at the same append.
 
+        Each attempt writes a fresh manifest and manifest list; the ones a
+        refused attempt wrote are orphaned, exactly as in every other
+        implementation, and are nobody's to read.
+
         There is no `next-row-id` update in the spec's `TableUpdate` list. A
         v3 server derives it from the snapshot's `first-row-id` plus its
         `added-rows`, both of which `add-snapshot` carries.
