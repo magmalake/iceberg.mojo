@@ -118,3 +118,72 @@ jobs:
             --rebase "$REBASE" --select id,region,_file --limit 2 --format json
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/evolved \
             --rebase "$REBASE" --filter '[">","id",3]' --lazy
+
+  write-interop:
+    name: write interop (PyIceberg + DuckDB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: iceberg.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/hashes.mojo
+          path: hashes.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/avro.mojo
+          path: avro.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/thrift.mojo
+          path: thrift.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/snappy.mojo
+          path: snappy.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/parquet.mojo
+          path: parquet.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/roaring.mojo
+          path: roaring.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/objectstore.mojo
+          path: objectstore.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/zstd.mojo
+          path: zstd.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/lz4.mojo
+          path: lz4.mojo
+
+      - uses: prefix-dev/setup-pixi@v0.9.0
+        with:
+          pixi-version: v0.71.1
+          manifest-path: iceberg.mojo/pixi.toml
+          environments: stable
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Ten tables written by this library — unpartitioned, identity,
+      # bucket[4], day and truncate[3], each at v2 and v3, three appends each
+      # — read back by PyIceberg 0.11.1 and DuckDB 1.5.5, which then appends
+      # to two of them for this reader to read.
+      - name: Write tables and verify them elsewhere
+        working-directory: iceberg.mojo
+        run: pixi run -e stable verify-writes

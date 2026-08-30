@@ -38,3 +38,10 @@ ICEBERG_BENCH_ROOT="$WAREHOUSE" ./build/iceberg-bench
 echo
 echo "== PyIceberg $("$PY" -c 'import pyiceberg; print(pyiceberg.__version__)')"
 "$PY" tools/bench_pyiceberg.py "$META" | grep -v '^{'
+
+# ── the write side ─────────────────────────────────────────────────────────
+echo
+echo "== appending a million rows"
+mojo build bench/bench_append.mojo $ICEBERG_INCLUDES -o build/iceberg-append-bench
+ICEBERG_APPEND_BENCH_ROOT="$ROOT/build/append-bench" ./build/iceberg-append-bench
+"$PY" tools/bench_pyiceberg_append.py "$ROOT/build/append-bench-py"

@@ -4,9 +4,10 @@
 
 Native, pure-Mojo **Apache Iceberg**: read a table's `metadata.json`, pick a
 snapshot, decode its manifests, plan a scan, and **read the rows** — deletes
-applied, filters evaluated, projection resolved by field id. Over local files,
-S3, GCS, Azure or plain HTTP, from a filesystem layout or a live REST catalog.
-No JVM, no Python, no Rust.
+applied, filters evaluated, projection resolved by field id — then **create a
+table and append to it**, manifests, snapshot and optimistic commit included.
+Over local files, S3, GCS, Azure or plain HTTP, from a filesystem layout or a
+live REST catalog. No JVM, no Python, no Rust.
 
 ```mojo
 from iceberg.catalog.rest import RestCatalog, RestCatalogConfig
@@ -28,6 +29,16 @@ var rows = (
 print(rows.to_csv())
 ```
 
+And the write side:
+
+```mojo
+var table = catalog.create_table("db", "orders", schema, spec)
+
+var tx = table.new_append()
+tx.add(batch)                       # an Arrow RecordBatch
+_ = tx.commit()                     # manifest, manifest list, snapshot, commit
+```
+
 ```console
 $ iceberg-mojo cat s3://warehouse/db/orders --filter '["=","region","eu"]' --limit 5
 $ iceberg-mojo cat --rest https://catalog --table db.orders --token $TOKEN
@@ -45,7 +56,8 @@ what the bytes mean.
                          │  metadata · snapshots        │
                          │  transforms · expressions    │
                          │  manifests · scan planning   │
-                         │  puffin · reads · catalogs   │
+                         │  puffin · reads · kernels    │
+                         │  writes · commits · catalogs │
                          └───┬─────────┬─────────┬──────┘
              manifests (Avro)│         │         │data files (Parquet)
                              │         │         │
@@ -105,8 +117,13 @@ self-checked — the expected values come from them, never from this code. See
 | **(k)** Manifests decode with inherited sequence numbers | the manifest lists themselves | ✅ **38 entries**, 36 inherited and 2 explicit |
 | **(l)** Puffin footer vs the manifest's `content_offset` | the spec's "must exactly match" | ✅ 2 / 2 blobs |
 | **(m)** Column projection rules 2–5 — partition value, name mapping, `initial-default`, null | the spec | ✅ each reached by giving the reader a schema whose ids the file does not have |
-| Tests | | **94 passing**, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
-| CI | | 4 jobs: {stable, nightly} × {ubuntu, macOS}, each running the REST mock and MinIO |
+| **(n)** Tables **we write** — rows, snapshots, partition values, statistics | PyIceberg **and** DuckDB | ✅ **10 / 10 tables** (5 partition shapes × v2/v3), 18 rows each, cell-exact both ways |
+| **(o)** Row lineage on tables we write | the v3 spec's assignment rules | ✅ `first-row-id` ranges tile `0..next-row-id` with no overlap, on all 5 shapes |
+| **(p)** PyIceberg **appends to a table we created**, and we read the result | PyIceberg | ✅ 2 tables, 18 + 6 = 24 rows, `_row_id` still intact |
+| **(q)** REST commit — requirements, 409 retry, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried, a rigged applied-then-500 reported, not retried |
+| **(r)** `s3://` write end to end | itself, read back | ✅ create, 2 appends, 12 rows, partition pruning; MinIO verifies every signature |
+| Tests | | **113 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against tables we wrote |
 
 ### The one plan disagreement, and why it is not a bug
 
@@ -165,6 +182,58 @@ unknown transforms).
   file with everything else left zero. Parquet addresses everything by absolute
   offset, so a sparse buffer decodes exactly like the whole file — and over a
   network that is one range request per row group instead of the whole object.
+
+### Writing rows
+
+**Fast append** — the one write operation that never rewrites anything.
+
+```mojo
+var catalog = FilesystemCatalog.local("/warehouse")
+var table = catalog.create_table("db", "orders", schema, spec)
+
+var tx = table.new_append()
+tx.add(batch)
+_ = tx.commit()
+```
+
+- **Data files.** Arrow batches in, Parquet out through parquet.mojo's writer:
+  columns aligned to the schema by name or field id, cast to the table's
+  types, partitioned by the spec's transforms (`identity`, `bucket[N]`,
+  `truncate[W]`, `year`, `month`, `day`, `hour`, `void`), one file per
+  partition per batch at `data/<partition path>/<uuid>-<n>.parquet`, with
+  field ids and the table's `write.parquet.*` properties (zstd by default).
+- **Statistics.** Read back out of the footer the writer just produced —
+  column sizes, value counts, null counts, and Appendix-D lower and upper
+  bounds truncated the way `write.metadata.metrics.default`'s `truncate(16)`
+  says, with an upper bound incremented so that truncating it does not stop
+  it bounding. Whatever the writer decided the min and max were is what the
+  manifest reports, which is the only way the two can agree.
+- **Manifests and manifest lists.** The Avro schema is generated *per format
+  version* — v1's required `snapshot_id` and `block_size_in_bytes`, v2's
+  `content` / `sequence_number` / `equality_ids`, v3's `first_row_id` /
+  `referenced_data_file` / `content_offset` / `content_size_in_bytes` — and
+  written verbatim through `set_schema_json`, with the file metadata
+  (`schema`, `schema-id`, `partition-spec`, `partition-spec-id`,
+  `format-version`, `content`) a reader needs to type the `partition` column.
+  ADDED entries carry null sequence numbers so that inheritance happens.
+- **Snapshots.** `operation=append` with `added-data-files`, `added-records`,
+  `added-files-size`, `changed-partition-count` and the `total-*` keys carried
+  forward; `sequence-number = last + 1`; the parent's manifests carried into
+  the new manifest list *unchanged*, keeping their sequence numbers and their
+  `first_row_id`.
+- **Row lineage (v3).** The snapshot's `first-row-id` is the table's
+  `next-row-id`, the new manifest is assigned it, every data file in that
+  manifest inherits from it in order, and `next-row-id` advances by
+  `added-rows`. Ranges never overlap, which is what makes `_row_id` stable.
+- **Commit.** A filesystem table writes `<V>-<uuid>.metadata.json` and
+  `version-hint.text`; a losing writer sees that the file it based its version
+  on is no longer the newest, reloads and retries — the data files it already
+  wrote stay valid. A REST catalog gets a `CommitTableRequest` with
+  `assert-table-uuid` and `assert-ref-snapshot-id`, an `Idempotency-Key`, a
+  409 that reloads and retries, and a 5xx that is reported as
+  `CommitStateUnknown` rather than retried.
+- **`iceberg.batch`** turns Mojo values into an Arrow `RecordBatch`, for
+  callers whose data is not already Arrow.
 
 ### Puffin and deletion vectors
 
@@ -270,12 +339,15 @@ headers are proved rather than assumed.
 
 | Not here | Why |
 |---|---|
-| Writes — appends, commits, compaction | Read-only. The write path is [iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge for now. |
-| Nested columns in a scan | `to_table()` reads primitive columns; a struct/list/map projection raises. The *metadata* for them is complete. |
+| `overwrite`, `delete`, `replace`, compaction | Every one of them merges manifests rather than appending to them, which is a different machine. [iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge covers them. |
+| Writing delete files or deletion vectors | Same reason. They are *read* completely. |
+| Schema and spec evolution as a write | `create_table` fixes both; changing them afterwards is a commit this build does not construct. |
+| Nested columns in a scan or a write | `to_table()` and `write_data_files` handle primitive columns; a struct/list/map raises. The *metadata* for them is complete. |
 | Non-Parquet data files | ORC and Avro data files are rejected by name. Parquet is what every writer in reach produces. |
 | Brotli-compressed Parquet | No Brotli in Mojo. Everything else — uncompressed, Snappy, GZIP, ZSTD, LZ4 — works. |
 | Encryption | Neither Parquet modular encryption nor Iceberg's `encryption-keys` are applied. |
-| Multipart upload, retries, connection reuse | objectstore.mojo's gaps; each request is a fresh TLS handshake. |
+| Multipart upload, retries, connection reuse | objectstore.mojo's gaps; each request is a fresh TLS handshake, and a data file is one `PUT`. |
+| A *safe* filesystem commit over an object store | There is no atomic create-if-absent on S3, so two writers can both believe they won. The spec says the same; use a REST catalog. |
 | `remote-signing` delegation | `vended-credentials` is implemented; remote signing is not. |
 | Theta sketches | Listed from a Puffin footer, not decoded. |
 
@@ -310,6 +382,24 @@ decoding is cheap enough to stop dominating, reaches **11.5 M rows/s**.
 `to_table()` concatenates those batches into one `ScanResult` and costs one
 extra copy of each buffer, which on this table is under 5 %.
 
+### Writing
+
+The same million rows, appended to a fresh table in four commits of 250 000 —
+building the Arrow batches, writing the Parquet, reading the footers back for
+the statistics, writing the manifest, the manifest list and the
+`metadata.json`, all inside the measurement:
+
+| | iceberg.mojo | PyIceberg 0.11.1 |
+|---|---|---|
+| append 1 M rows × 6 columns, 4 commits | 917 ms — **1.09 M rows/s** | 163 ms — 6.13 M rows/s |
+| Parquet written (zstd) | 3 MB | 9 MB |
+
+5.6× slower, and the whole of that is the Parquet *encoder*: the manifest, the
+manifest list and the metadata are four small Avro files and one JSON document
+per commit. The 3 MB against 9 MB is a difference in dictionary encoding, not
+in content — PyIceberg reads all 1 000 000 rows back out of those four files
+and agrees on every column, including both null counts.
+
 ### What still falls back to `Datum`
 
 The kernels cover every comparison (`=`, `!=`, `<`, `<=`, `>`, `>=`), `in`,
@@ -331,10 +421,11 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 94 tests; starts the REST mock and MinIO
+pixi run test              # 113 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
-pixi run bench
+pixi run bench             # scans and appends, against PyIceberg
+pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
 ```
 
 Consume it with:
@@ -369,9 +460,13 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 | `iceberg.puffin` | `PuffinFile`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.read` | `ScanResult`, `ScanOptions`, `NameMapping`, the metadata columns |
+| `iceberg.batch` | `ColumnBuilder`, `batch_of` — Mojo values to an Arrow batch |
+| `iceberg.write` | `write_data_files`, `WriteOptions`, bound truncation, partition paths |
+| `iceberg.manifest_write` | `write_manifest`, `write_manifest_list`, the per-version Avro schemas |
+| `iceberg.append` | `prepare_append`, `AppendResult`, metadata file naming |
 | `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `to_table`, `to_batches` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
-| `iceberg.catalog.filesystem` | `Table`, `FilesystemCatalog` |
+| `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
 | `iceberg.catalog.rest` | `RestCatalog`, `RestCatalogConfig`, `LoadTableResult` |
 
 ```mojo
@@ -396,6 +491,41 @@ def main() raises:
 
     for batch in t.scan().to_batches():      # Arrow, straight off the kernels
         print(batch.num_rows, batch.num_columns())
+```
+
+```mojo
+from iceberg.batch import ColumnBuilder, batch_of
+from iceberg.catalog.filesystem import FilesystemCatalog
+from iceberg.schema import Schema
+from iceberg.transforms import PartitionField, PartitionSpec, parse_transform
+from iceberg.values import Datum
+
+def main() raises:
+    var catalog = FilesystemCatalog.local("/warehouse")
+    var schema = Schema.parse(
+        '{"schema-id":0,"type":"struct","fields":['
+        '{"id":1,"name":"id","required":true,"type":"long"},'
+        '{"id":2,"name":"region","required":true,"type":"string"}]}'
+    )
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    var table = catalog.create_table("db", "orders", schema, spec)
+
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    for k in range(1000):
+        ids.add(Datum.long_(Int64(k)))
+        region.add(Datum.string_("eu" if k % 2 == 0 else "us"))
+
+    var tx = table.new_append()
+    tx.add(batch_of([ids^, region^]))
+    print(tx.commit(), "rows committed")
 ```
 
 ### Filter DSL
@@ -502,6 +632,23 @@ Five things this implementation got wrong first, and the gates caught:
 5. **Row positions must survive pruning.** Delete positions are absolute
    positions in the data file, so row groups are read one at a time with their
    absolute offset, and page pruning is off whenever a position matters.
+6. **A `<V>-<uuid>.metadata.json` name cannot detect a race by itself.** Two
+   writers at the same version pick different uuids, so both `create` calls
+   succeed and one commit is lost. Java gets atomicity here only from
+   `v<N>.metadata.json`, whose name is deterministic; everything else gets it
+   from a catalog. This commits by checking that the file it based its version
+   on is still the newest, writing, and then checking that nobody else claimed
+   the same version — which closes the window but does not eliminate it, and
+   the spec says as much.
+7. **Truncating an upper bound stops it bounding.** `truncate(16)` on a lower
+   bound is free; on an upper bound the result has to be incremented — the
+   last code point of a string, the last byte below `0xFF` of a binary — and
+   when every unit is already at its maximum the bound has to be *omitted*
+   rather than written short.
+8. **A relative `file://` location is not a URI.** `file://build/x` parses as
+   host `build`, path `/x`, so handing one to an object store's URI parser
+   silently addresses the wrong thing. Local locations lose their scheme
+   before they get there.
 
 ## License
 
