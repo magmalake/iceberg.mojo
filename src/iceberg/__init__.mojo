@@ -1,4 +1,4 @@
-"""iceberg.mojo — native Apache Iceberg metadata, transforms and scan planning.
+"""iceberg.mojo — native Apache Iceberg: metadata, planning, and rows.
 
 Part of magmalake: data lake building blocks in Mojo.
 
@@ -7,14 +7,15 @@ from iceberg.catalog.filesystem import Table
 
 def main() raises:
     var t = Table.load_local("/warehouse/db/orders")
-    var tasks = t.scan().filter('[">","id",2]').plan_files()
-    for k in range(len(tasks)):
-        print(tasks[k].data_file.file_path)
+    var rows = t.scan().filter('[">","id",2]').to_table()
+    print(rows.to_csv())
 ```
 
 Reads format versions 1, 2 and 3, and tolerates the parts of v4 the spec
-already tells readers to tolerate. It plans scans; it does not read data —
-that needs a Parquet decoder, which is a separate tin.
+already tells readers to tolerate: metadata, snapshots, partition transforms,
+expressions, manifests, scan planning, Puffin deletion vectors, and the data
+files themselves — over local files, S3, GCS, Azure or HTTP, from a filesystem
+layout or a live REST catalog.
 """
 
 from iceberg.expressions import (
@@ -38,13 +39,29 @@ from iceberg.manifest import (
     ManifestEntry,
     ManifestFile,
     read_manifest,
+    read_manifest_io,
     read_manifest_list,
+    read_manifest_list_io,
 )
 from iceberg.metadata import (
     Snapshot,
     SnapshotRef,
     TableMetadata,
     SUPPORTED_FORMAT_VERSION,
+)
+from iceberg.puffin import (
+    BlobMetadata,
+    PuffinFile,
+    deleted_positions,
+    read_deletion_vector,
+)
+from iceberg.read import (
+    NameMapping,
+    ScanColumn,
+    ScanOptions,
+    ScanResult,
+    arrow_type_of,
+    is_metadata_column,
 )
 from iceberg.scan import FileScanTask, TableScan
 from iceberg.schema import Schema

@@ -114,8 +114,8 @@ echo "== 4/7  transform vectors =="
 "$PY" "$ROOT/tools/gen_transform_vectors.py" "$FIXTURE_OUT/transform_vectors.json"
 
 # --------------------------------------- 5. copy metadata/ and data/ ---------
-# The data files are checked in too (about 400 KB): reading them is the whole
-# point of the scan gates.
+# The data files are checked in too (212 KB of Parquet and Puffin): reading
+# them is the whole point of the row gates.
 echo "== 5/7  copy metadata/ and data/ into tests/fixtures =="
 for t in "${ALL_TABLES[@]}"; do
   rm -rf "${FIXTURE_OUT:?}/$t/metadata" "${FIXTURE_OUT:?}/$t/data"
