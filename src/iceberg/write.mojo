@@ -85,8 +85,16 @@ comptime DEFAULT_METRICS_TRUNCATE = 16
 comptime HIVE_NULL = String("__HIVE_DEFAULT_PARTITION__")
 
 comptime PROP_COMPRESSION = String("write.parquet.compression-codec")
-comptime PROP_ROW_GROUP = String("write.parquet.row-group-size-bytes")
 comptime PROP_PAGE_SIZE = String("write.parquet.page-size-bytes")
+comptime PROP_ROW_GROUP_ROWS = String("write.parquet.row-group-size-rows")
+"""Not an Iceberg property.
+
+Iceberg spells the row-group target in *bytes*
+(`write.parquet.row-group-size-bytes`), and parquet.mojo's writer splits a
+batch by a *row count*. Converting between them means guessing a compression
+ratio before compressing, which would make the setting mean something
+different from what it says, so the byte property is ignored and this one —
+under a name no reader will mistake for the spec's — is honoured instead."""
 
 
 def codec_value(name: String) raises -> Int32:
@@ -114,14 +122,16 @@ struct WriteOptions(Copyable, Defaultable, Movable):
     """How to write data files."""
 
     var codec: String
-    var row_group_size: Int
+    var row_group_rows: Int
+    """Rows per row group, which is what parquet.mojo's writer splits on."""
     var page_size: Int
+    """Target *uncompressed* bytes of values per data page."""
     var truncate: Int
     """`write.metadata.metrics.default = truncate(N)`; 0 disables truncation."""
 
     def __init__(out self):
         self.codec = String("zstd")
-        self.row_group_size = 128 * 1024 * 1024
+        self.row_group_rows = 1024 * 1024
         self.page_size = 1024 * 1024
         self.truncate = DEFAULT_METRICS_TRUNCATE
 
@@ -130,8 +140,8 @@ struct WriteOptions(Copyable, Defaultable, Movable):
         var o = Self()
         if PROP_COMPRESSION in properties:
             o.codec = properties[PROP_COMPRESSION]
-        if PROP_ROW_GROUP in properties:
-            o.row_group_size = Int(properties[PROP_ROW_GROUP])
+        if PROP_ROW_GROUP_ROWS in properties:
+            o.row_group_rows = Int(properties[PROP_ROW_GROUP_ROWS])
         if PROP_PAGE_SIZE in properties:
             o.page_size = Int(properties[PROP_PAGE_SIZE])
         return o^
@@ -488,7 +498,7 @@ def write_parquet(
         roots.append(arena.add(columns[k].copy()))
     var opts = WriterOptions()
     opts.codec = codec_value(options.codec)
-    opts.row_group_size = options.row_group_size
+    opts.row_group_size = options.row_group_rows
     opts.data_page_size = options.page_size
     var writer = ParquetWriter[AllCodecs](opts^)
     writer.add_metadata("iceberg.schema", schema.to_json())

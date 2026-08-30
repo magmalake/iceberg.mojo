@@ -66,7 +66,10 @@ struct Snapshot(Copyable, Movable, Writable):
             return "append"
 
     def summary_int(self, key: String, dflt: Int64) -> Int64:
-        var raw = String("")
+        # Two `try`s rather than one: a missing key raises `DictKeyError` and
+        # an unparseable value raises `Error`, and one block cannot have both
+        # error types.
+        var raw: String
         try:
             raw = self.summary[key]
         except:

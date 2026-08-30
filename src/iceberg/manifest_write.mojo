@@ -127,11 +127,9 @@ def decimal_byte_width(precision: Int) -> Int:
     """The fixed width Avro stores a decimal of this precision in."""
     var n = 1
     while n < 40:
-        # 8n - 1 bits of magnitude holds up to 10^p - 1.
-        var digits = 0
-        var bits = 8 * n - 1
-        # log10(2) ~= 0.30103; digits = floor(bits * log10(2))
-        digits = (bits * 30103) // 100000
+        # 8n - 1 bits of magnitude hold up to 10^p - 1 decimal digits, and
+        # log10(2) ~= 0.30103.
+        var digits = ((8 * n - 1) * 30103) // 100000
         if digits >= precision:
             return n
         n += 1
@@ -820,12 +818,10 @@ def _summarise(
             summaries[k].upper_bound = raw.copy()
             summaries[k].has_upper = True
             continue
-        var lo = Datum.none()
-        var hi = Datum.none()
-        # Compare on the decoded value, not the bytes: only numeric encodings
-        # are little-endian and would sort wrong as bytes.
-        lo = _decode_bound(summaries[k].lower_bound, typing, k)
-        hi = _decode_bound(summaries[k].upper_bound, typing, k)
+        # Compare on the decoded value, not the bytes: only string and binary
+        # encodings sort the same either way.
+        var lo = _decode_bound(summaries[k].lower_bound, typing, k)
+        var hi = _decode_bound(summaries[k].upper_bound, typing, k)
         if compare(d, lo) < 0:
             summaries[k].lower_bound = raw.copy()
         if compare(d, hi) > 0:

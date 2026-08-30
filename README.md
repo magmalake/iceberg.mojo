@@ -202,6 +202,10 @@ _ = tx.commit()
   `truncate[W]`, `year`, `month`, `day`, `hour`, `void`), one file per
   partition per batch at `data/<partition path>/<uuid>-<n>.parquet`, with
   field ids and the table's `write.parquet.*` properties (zstd by default).
+  `write.parquet.page-size-bytes` is honoured; `write.parquet.row-group-size-bytes`
+  is **not**, because parquet.mojo's writer splits a batch by a row count and
+  converting would mean guessing a compression ratio before compressing —
+  `write.parquet.row-group-size-rows` says what it means instead.
 - **Statistics.** Read back out of the footer the writer just produced —
   column sizes, value counts, null counts, and Appendix-D lower and upper
   bounds truncated the way `write.metadata.metrics.default`'s `truncate(16)`
