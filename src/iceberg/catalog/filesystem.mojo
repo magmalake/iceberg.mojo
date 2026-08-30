@@ -15,9 +15,6 @@ header, a raw deflate stream and an eight-byte trailer, and avro.mojo already
 carries a deflate decoder, so no extra dependency is needed.
 """
 
-from std.os import listdir
-from std.pathlib import Path
-
 from avro.deflate import inflate
 
 from ..io import FileIO, basename, dirname, join_path, strip_scheme
@@ -157,7 +154,7 @@ def find_latest_metadata(io: FileIO, table_location: String) raises -> String:
     # every later version colliding too. The version prefix and the file name
     # cannot separate them (the uuid is random), but `last-updated-ms` can, and
     # it is the field the writer stamps immediately before writing.
-    var names = listdir(Path(io.resolve(metadata_dir)))
+    var names = io.list_names(metadata_dir)
     var best_v = -1
     var candidates = List[String]()
     for k in range(len(names)):
@@ -171,9 +168,7 @@ def find_latest_metadata(io: FileIO, table_location: String) raises -> String:
         if v == best_v:
             candidates.append(name^)
     if len(candidates) == 0:
-        raise Error(
-            "iceberg: no *.metadata.json under '" + metadata_dir + "'"
-        )
+        raise Error("iceberg: no *.metadata.json under '" + metadata_dir + "'")
     if len(candidates) == 1:
         return join_path(metadata_dir, candidates[0])
     _sort_names(candidates)
@@ -203,9 +198,9 @@ def _sort_names(mut l: List[String]):
 
 def _has_metadata(io: FileIO, dir: String) -> Bool:
     try:
-        var names = listdir(Path(io.resolve(dir)))
+        var names = io.list_names(dir)
         for k in range(len(names)):
-            if String(names[k]).endswith(METADATA_SUFFIX):
+            if names[k].endswith(METADATA_SUFFIX):
                 return True
         return False
     except:
@@ -296,20 +291,24 @@ struct FilesystemCatalog(Copyable, Movable):
         var base = self.warehouse if namespace == "" else join_path(
             self.warehouse, namespace
         )
-        var names = listdir(Path(self.io.resolve(base)))
+        var names = self.io.list_names(base)
         for k in range(len(names)):
-            var n = String(names[k])
-            if _has_metadata(self.io, join_path(join_path(base, n), METADATA_DIR)):
+            var n = names[k].copy()
+            if _has_metadata(
+                self.io, join_path(join_path(base, n), METADATA_DIR)
+            ):
                 out.append(n^)
         return out^
 
     def list_namespaces(self) raises -> List[String]:
         var out = List[String]()
-        var names = listdir(Path(self.io.resolve(self.warehouse)))
+        var names = self.io.list_names(self.warehouse)
         for k in range(len(names)):
-            var n = String(names[k])
+            var n = names[k].copy()
             # A namespace is a directory that is not itself a table.
-            if _has_metadata(self.io, join_path(join_path(self.warehouse, n), METADATA_DIR)):
+            if _has_metadata(
+                self.io, join_path(join_path(self.warehouse, n), METADATA_DIR)
+            ):
                 continue
             out.append(n^)
         return out^

@@ -45,8 +45,8 @@ from .manifest import (
     ManifestFile,
     MANIFEST_CONTENT_DELETES,
     STATUS_DELETED,
-    read_manifest_at,
-    read_manifest_list,
+    read_manifest_io,
+    read_manifest_list_io,
 )
 from .metadata import Snapshot, TableMetadata
 from .schema import Schema
@@ -69,8 +69,11 @@ struct FileScanTask(Copyable, Movable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
-            "FileScanTask(", self.data_file.file_path, ", deletes=",
-            len(self.delete_files), ")",
+            "FileScanTask(",
+            self.data_file.file_path,
+            ", deletes=",
+            len(self.delete_files),
+            ")",
         )
 
 
@@ -189,9 +192,7 @@ struct TableScan(Copyable, Movable):
             return self._plan_from_manifests(
                 snap, snap.manifests.copy(), schema, row_filter, metrics_eval
             )
-        var manifests = read_manifest_list(
-            self.io.resolve(snap.manifest_list)
-        )
+        var manifests = read_manifest_list_io(self.io, snap.manifest_list)
         return self._plan(snap, manifests, schema, row_filter, metrics_eval)
 
     def _plan_from_manifests(
@@ -207,9 +208,30 @@ struct TableScan(Copyable, Movable):
         var mfs = List[ManifestFile]()
         for k in range(len(paths)):
             var mf = ManifestFile(
-                paths[k], 0, self.metadata.default_spec_id, 0, 0, 0,
-                snap.snapshot_id, 0, False, 0, False, 0, False, 0, False,
-                0, False, 0, False, [], False, [], 0, False,
+                paths[k],
+                0,
+                self.metadata.default_spec_id,
+                0,
+                0,
+                0,
+                snap.snapshot_id,
+                0,
+                False,
+                0,
+                False,
+                0,
+                False,
+                0,
+                False,
+                0,
+                False,
+                0,
+                False,
+                [],
+                False,
+                [],
+                0,
+                False,
             )
             mfs.append(mf^)
         return self._plan(snap, mfs, schema, row_filter, metrics_eval)
@@ -228,7 +250,7 @@ struct TableScan(Copyable, Movable):
             ref mf = manifests[k]
             if not mf.is_delete_manifest():
                 continue
-            var m = read_manifest_at(self.io.resolve(mf.manifest_path), mf)
+            var m = read_manifest_io(self.io, mf.manifest_path, mf)
             for j in range(len(m.entries)):
                 ref e = m.entries[j]
                 if not e.is_live():
@@ -258,9 +280,11 @@ struct TableScan(Copyable, Movable):
                 var me = ManifestEvaluator(row_filter, spec, schema)
                 if not me.eval(mf.partitions):
                     continue
-            var m = read_manifest_at(self.io.resolve(mf.manifest_path), mf)
+            var m = read_manifest_io(self.io, mf.manifest_path, mf)
             # The manifest's own spec is authoritative for its tuples.
-            var residuals = ResidualEvaluator(row_filter, m.partition_spec, schema)
+            var residuals = ResidualEvaluator(
+                row_filter, m.partition_spec, schema
+            )
             for j in range(len(m.entries)):
                 ref e = m.entries[j]
                 if not e.is_live():
@@ -306,7 +330,9 @@ struct TableScan(Copyable, Movable):
                     out += ","
                 out += json_quote(t.delete_files[j].file_path)
             out += "]"
-            out += ',"file-format":' + json_quote(t.data_file.file_format.lower())
+            out += ',"file-format":' + json_quote(
+                t.data_file.file_format.lower()
+            )
             out += ',"file-size-in-bytes":' + String(
                 t.data_file.file_size_in_bytes
             )

@@ -373,7 +373,9 @@ def literal_for(
     )
 
 
-def bind(var e: Expr, schema: Schema, case_sensitive: Bool = True) raises -> Expr:
+def bind(
+    var e: Expr, schema: Schema, case_sensitive: Bool = True
+) raises -> Expr:
     """Resolve names to field ids and type every literal against the schema.
 
     A predicate on a column the schema does not have becomes `false` (a row can
@@ -419,9 +421,7 @@ def _bind_node(
     var af = schema.flat[k].copy()
     ref tn = schema.store.nodes[af.type]
     if tn.kind != TK_PRIMITIVE:
-        raise Error(
-            "iceberg: cannot filter on nested column '" + n.name + "'"
-        )
+        raise Error("iceberg: cannot filter on nested column '" + n.name + "'")
     # A required column can never be null, and a non-floating column never NaN.
     if n.op == OP_IS_NULL and af.required:
         return out.constant(False)
@@ -495,9 +495,7 @@ def project_inclusive(
     return out^
 
 
-def project_strict(
-    e: Expr, spec: PartitionSpec, schema: Schema
-) raises -> Expr:
+def project_strict(e: Expr, spec: PartitionSpec, schema: Schema) raises -> Expr:
     """Project strictly: true only for partitions where *every* row matches.
 
     A scan uses this to drop the filter from a partition's residual — if the
@@ -509,7 +507,11 @@ def project_strict(
 
 
 def _project(
-    e: Expr, i: Int, spec: PartitionSpec, schema: Schema, mut out: Expr,
+    e: Expr,
+    i: Int,
+    spec: PartitionSpec,
+    schema: Schema,
+    mut out: Expr,
     inclusive: Bool,
 ) raises -> Int:
     ref n = e.nodes[i]
@@ -584,9 +586,7 @@ def _project_one(
         if not inclusive:
             return -1
         if n.op == OP_EQ:
-            return out.bound(
-                OP_EQ, pf.field_id, P_INT, [t.apply(n.lits[0])]
-            )
+            return out.bound(OP_EQ, pf.field_id, P_INT, [t.apply(n.lits[0])])
         if n.op == OP_IN:
             var buckets = List[Datum]()
             for k in range(len(n.lits)):
@@ -782,13 +782,21 @@ def _range_matches(
 ) raises -> Bool:
     """Shared bound logic for manifest summaries and data-file metrics."""
     if op == OP_LT:
-        return ROWS_CANNOT_MATCH if compare(lo, lits[0]) >= 0 else ROWS_MIGHT_MATCH
+        return (
+            ROWS_CANNOT_MATCH if compare(lo, lits[0]) >= 0 else ROWS_MIGHT_MATCH
+        )
     if op == OP_LT_EQ:
-        return ROWS_CANNOT_MATCH if compare(lo, lits[0]) > 0 else ROWS_MIGHT_MATCH
+        return (
+            ROWS_CANNOT_MATCH if compare(lo, lits[0]) > 0 else ROWS_MIGHT_MATCH
+        )
     if op == OP_GT:
-        return ROWS_CANNOT_MATCH if compare(hi, lits[0]) <= 0 else ROWS_MIGHT_MATCH
+        return (
+            ROWS_CANNOT_MATCH if compare(hi, lits[0]) <= 0 else ROWS_MIGHT_MATCH
+        )
     if op == OP_GT_EQ:
-        return ROWS_CANNOT_MATCH if compare(hi, lits[0]) < 0 else ROWS_MIGHT_MATCH
+        return (
+            ROWS_CANNOT_MATCH if compare(hi, lits[0]) < 0 else ROWS_MIGHT_MATCH
+        )
     if op == OP_EQ:
         if compare(lo, lits[0]) > 0 or compare(hi, lits[0]) < 0:
             return ROWS_CANNOT_MATCH
@@ -846,7 +854,9 @@ struct ColumnMetrics(Copyable, Movable):
 
     @staticmethod
     def blank(field_id: Int) -> Self:
-        return Self(field_id, 0, False, 0, False, 0, False, [], False, [], False)
+        return Self(
+            field_id, 0, False, 0, False, 0, False, [], False, [], False
+        )
 
 
 struct InclusiveMetricsEvaluator(Copyable, Movable):

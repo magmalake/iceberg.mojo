@@ -203,7 +203,8 @@ struct Json(Copyable, Movable):
         return self.as_bool(j)
 
     def string_map(self, i: Int, key: String) raises -> Dict[String, String]:
-        """Read an object of string→string (Iceberg `properties` and friends)."""
+        """Read an object of string→string (Iceberg `properties` and friends).
+        """
         var out = Dict[String, String]()
         var j = self.get(i, key)
         if j < 0 or self.nodes[j].kind != JSON_OBJECT:
@@ -303,8 +304,8 @@ def write_json_string(s: String, mut out: String):
             out += "\\t"
         elif c < 0x20:
             out += "\\u00"
-            out += String(_HEX[byte = Int(c >> 4)])
-            out += String(_HEX[byte = Int(c & 0xF)])
+            out += String(_HEX[byte=Int(c >> 4)])
+            out += String(_HEX[byte=Int(c & 0xF)])
         else:
             out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
     out += '"'

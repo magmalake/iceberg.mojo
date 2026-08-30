@@ -53,7 +53,9 @@ struct Schema(Copyable, Movable):
             self._walk_struct(self.root, "", flat)
         self.flat = flat^
 
-    def _walk_struct(self, node: Int, prefix: String, mut out: List[AccessorField]):
+    def _walk_struct(
+        self, node: Int, prefix: String, mut out: List[AccessorField]
+    ):
         ref n = self.store.nodes[node]
         for k in range(len(n.fields)):
             ref f = n.fields[k]
@@ -76,9 +78,7 @@ struct Schema(Copyable, Movable):
             var vn = prefix + ".value"
             out.append(AccessorField(n.key_id, kn, n.key, True))
             self._walk_type(n.key, kn, out)
-            out.append(
-                AccessorField(n.value_id, vn, n.value, n.value_required)
-            )
+            out.append(AccessorField(n.value_id, vn, n.value, n.value_required))
             self._walk_type(n.value, vn, out)
 
     # ── lookup ─────────────────────────────────────────────────────────────

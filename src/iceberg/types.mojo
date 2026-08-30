@@ -143,7 +143,13 @@ struct NestedField(Copyable, Movable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
-            "NestedField(", self.id, ", ", self.name, ", req=", self.required, ")"
+            "NestedField(",
+            self.id,
+            ", ",
+            self.name,
+            ", req=",
+            self.required,
+            ")",
         )
 
 
@@ -179,8 +185,23 @@ struct TypeNode(Copyable, Movable):
     @staticmethod
     def prim_(kind: UInt8) -> Self:
         return Self(
-            TK_PRIMITIVE, kind, 0, 0, 0, "", "", "", [], -1, -1, False, -1, -1,
-            -1, -1, False,
+            TK_PRIMITIVE,
+            kind,
+            0,
+            0,
+            0,
+            "",
+            "",
+            "",
+            [],
+            -1,
+            -1,
+            False,
+            -1,
+            -1,
+            -1,
+            -1,
+            False,
         )
 
 
@@ -255,7 +276,8 @@ struct TypeStore(Copyable, Movable):
         return self.nodes[i].kind != TK_PRIMITIVE
 
     def type_name(self, i: Int) -> String:
-        """The Iceberg JSON spelling of a primitive; the kind for nested types."""
+        """The Iceberg JSON spelling of a primitive; the kind for nested types.
+        """
         ref n = self.nodes[i]
         if n.kind == TK_STRUCT:
             return "struct"

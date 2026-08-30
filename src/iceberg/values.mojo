@@ -83,7 +83,9 @@ struct Datum(Copyable, Movable, Writable):
 
     @staticmethod
     def bool_(v: Bool) -> Self:
-        return Self(P_BOOLEAN, Int64(1) if v else Int64(0), 0.0, "", [], 0, 0, 0, True)
+        return Self(
+            P_BOOLEAN, Int64(1) if v else Int64(0), 0.0, "", [], 0, 0, 0, True
+        )
 
     @staticmethod
     def int_(v: Int64) -> Self:
@@ -124,9 +126,13 @@ struct Datum(Copyable, Movable, Writable):
         return Self(P_UUID, 0, 0.0, "", v^, 0, 0, 16, True)
 
     @staticmethod
-    def decimal_(var unscaled_be: List[UInt8], precision: Int, scale: Int) -> Self:
+    def decimal_(
+        var unscaled_be: List[UInt8], precision: Int, scale: Int
+    ) -> Self:
         var iv = be_twos_to_int64(unscaled_be)
-        return Self(P_DECIMAL, iv, 0.0, "", unscaled_be^, precision, scale, 0, True)
+        return Self(
+            P_DECIMAL, iv, 0.0, "", unscaled_be^, precision, scale, 0, True
+        )
 
     @staticmethod
     def decimal_int(unscaled: Int64, precision: Int, scale: Int) -> Self:
@@ -134,7 +140,9 @@ struct Datum(Copyable, Movable, Writable):
         return Self(P_DECIMAL, unscaled, 0.0, "", b^, precision, scale, 0, True)
 
     def is_nan(self) -> Bool:
-        return (self.kind == P_FLOAT or self.kind == P_DOUBLE) and self.f != self.f
+        return (
+            self.kind == P_FLOAT or self.kind == P_DOUBLE
+        ) and self.f != self.f
 
     def write_to(self, mut writer: Some[Writer]):
         if not self.valid:
@@ -190,9 +198,18 @@ def compare(a: Datum, b: Datum) raises -> Int:
         return 0 if a.s == b.s else 1
     if a.kind == P_DECIMAL and b.kind == P_DECIMAL:
         return cmp_be_twos(a.b, b.b)
-    if a.kind == P_FLOAT or a.kind == P_DOUBLE or b.kind == P_FLOAT or b.kind == P_DOUBLE:
-        var x = a.f if (a.kind == P_FLOAT or a.kind == P_DOUBLE) else Float64(a.i)
-        var y = b.f if (b.kind == P_FLOAT or b.kind == P_DOUBLE) else Float64(b.i)
+    if (
+        a.kind == P_FLOAT
+        or a.kind == P_DOUBLE
+        or b.kind == P_FLOAT
+        or b.kind == P_DOUBLE
+    ):
+        var x = a.f if (a.kind == P_FLOAT or a.kind == P_DOUBLE) else Float64(
+            a.i
+        )
+        var y = b.f if (b.kind == P_FLOAT or b.kind == P_DOUBLE) else Float64(
+            b.i
+        )
         # Iceberg sorts NaN last and treats -0.0 == 0.0.
         var xn = x != x
         var yn = y != y
@@ -245,7 +262,8 @@ def cmp_be_twos(a: List[UInt8], b: List[UInt8]) -> Int:
 
 # ── two's-complement helpers ────────────────────────────────────────────────
 def be_twos_to_int64(b: List[UInt8]) -> Int64:
-    """Big-endian two's complement → Int64. Wider-than-64-bit input saturates."""
+    """Big-endian two's complement → Int64. Wider-than-64-bit input saturates.
+    """
     if len(b) == 0:
         return 0
     var neg = (b[0] & 0x80) != 0
@@ -288,8 +306,8 @@ comptime _HEXDIG = String("0123456789abcdef")
 def hex_text(b: List[UInt8]) -> String:
     var out = String("")
     for k in range(len(b)):
-        out += String(_HEXDIG[byte = Int(b[k] >> 4)])
-        out += String(_HEXDIG[byte = Int(b[k] & 0xF)])
+        out += String(_HEXDIG[byte=Int(b[k] >> 4)])
+        out += String(_HEXDIG[byte=Int(b[k] & 0xF)])
     return out^
 
 
@@ -510,7 +528,8 @@ def floor_mod(a: Int64, b: Int64) -> Int64:
 
 
 def civil_from_days(z_in: Int64) -> List[Int64]:
-    """Days since 1970-01-01 → [year, month, day]. Howard Hinnant's algorithm."""
+    """Days since 1970-01-01 → [year, month, day]. Howard Hinnant's algorithm.
+    """
     var z = z_in + 719468
     var era = floor_div(z, 146097)
     var doe = z - era * 146097
@@ -575,7 +594,9 @@ def _time_text(v: Int64, frac_digits: Int) -> String:
         var fs = String(frac)
         while fs.byte_length() < frac_digits:
             fs = "0" + fs
-        while fs.byte_length() > 1 and fs.as_bytes()[fs.byte_length() - 1] == UInt8(48):
+        while fs.byte_length() > 1 and fs.as_bytes()[
+            fs.byte_length() - 1
+        ] == UInt8(48):
             fs = substr(fs, 0, fs.byte_length() - 1)
         out += "." + fs
     return out^
@@ -623,7 +644,9 @@ def parse_iso(kind: UInt8, text: String) raises -> Int64:
             var sign: Int64 = -1 if time_part.as_bytes()[pp] == UInt8(43) else 1
             var off = substr(time_part, pp + 1, time_part.byte_length())
             var colon = off.find(":")
-            var oh = parse_int64(String(substr(off, 0, colon))) if colon > 0 else parse_int64(off)
+            var oh = parse_int64(
+                String(substr(off, 0, colon))
+            ) if colon > 0 else parse_int64(off)
             var om = parse_int64(
                 String(substr(off, colon + 1, off.byte_length()))
             ) if colon > 0 else Int64(0)
@@ -779,7 +802,14 @@ def datum_to_bytes(d: Datum) raises -> List[UInt8]:
         return [UInt8(1) if d.i != 0 else UInt8(0)]
     if d.kind == P_INT or d.kind == P_DATE:
         return _le_bytes(d.i, 4)
-    if d.kind == P_LONG or d.kind == P_TIME or d.kind == P_TIMESTAMP or d.kind == P_TIMESTAMPTZ or d.kind == P_TIMESTAMP_NS or d.kind == P_TIMESTAMPTZ_NS:
+    if (
+        d.kind == P_LONG
+        or d.kind == P_TIME
+        or d.kind == P_TIMESTAMP
+        or d.kind == P_TIMESTAMPTZ
+        or d.kind == P_TIMESTAMP_NS
+        or d.kind == P_TIMESTAMPTZ_NS
+    ):
         return _le_bytes(d.i, 8)
     if d.kind == P_FLOAT:
         return _le_bytes(Int64(_f32_to_bits(Float32(d.f))), 4)
@@ -846,7 +876,14 @@ def datum_from_json_prim(
         return Datum.fixed_(bb^) if prim == P_FIXED else Datum.binary_(bb^)
     if prim == P_DECIMAL:
         return decimal_from_text(doc.as_string(i), precision, scale)
-    if prim == P_DATE or prim == P_TIME or prim == P_TIMESTAMP or prim == P_TIMESTAMPTZ or prim == P_TIMESTAMP_NS or prim == P_TIMESTAMPTZ_NS:
+    if (
+        prim == P_DATE
+        or prim == P_TIME
+        or prim == P_TIMESTAMP
+        or prim == P_TIMESTAMPTZ
+        or prim == P_TIMESTAMP_NS
+        or prim == P_TIMESTAMPTZ_NS
+    ):
         # Iceberg's JSON form is ISO text, but partition summaries and
         # hand-written filters often carry the raw integer; accept both.
         if doc.kind(i) == 2 or doc.kind(i) == 3:

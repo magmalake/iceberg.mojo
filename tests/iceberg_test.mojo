@@ -5,9 +5,15 @@ values were produced by iceberg-rust 0.10.1 (through iceberg-rs.mojo) or by
 PyIceberg, never by this implementation. See `tests/fixtures/PROVENANCE.md`.
 """
 
-from std.os import makedirs
+from std.os import getenv, makedirs
 from std.pathlib import Path
-from std.testing import TestSuite, assert_equal, assert_true, assert_false, assert_raises
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_true,
+    assert_false,
+    assert_raises,
+)
 
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
@@ -23,6 +29,7 @@ from iceberg.catalog.filesystem import (
 )
 from iceberg.catalog.rest import (
     LoadTableResult,
+    RestCatalog,
     RestCatalogConfig,
     encode_namespace,
     url_encode,
@@ -191,12 +198,27 @@ def test_schema_nested_names() raises:
 
 def test_schema_all_primitives() raises:
     var names = [
-        String("boolean"), String("int"), String("long"), String("float"),
-        String("double"), String("date"), String("time"), String("timestamp"),
-        String("timestamptz"), String("timestamp_ns"), String("timestamptz_ns"),
-        String("string"), String("uuid"), String("binary"), String("unknown"),
-        String("variant"), String("fixed[16]"), String("decimal(38, 10)"),
-        String("geometry"), String("geometry(srid:3857)"), String("geography"),
+        String("boolean"),
+        String("int"),
+        String("long"),
+        String("float"),
+        String("double"),
+        String("date"),
+        String("time"),
+        String("timestamp"),
+        String("timestamptz"),
+        String("timestamp_ns"),
+        String("timestamptz_ns"),
+        String("string"),
+        String("uuid"),
+        String("binary"),
+        String("unknown"),
+        String("variant"),
+        String("fixed[16]"),
+        String("decimal(38, 10)"),
+        String("geometry"),
+        String("geometry(srid:3857)"),
+        String("geography"),
         String("geography(srid:4269, vincenty)"),
     ]
     var store = TypeStore()
@@ -244,8 +266,12 @@ def test_schema_select() raises:
 # ══ values ══════════════════════════════════════════════════════════════════
 def test_decimal_round_trip() raises:
     var cases = [
-        String("0.00"), String("14.20"), String("-14.20"), String("10.65"),
-        String("-0.01"), String("99999999.99"),
+        String("0.00"),
+        String("14.20"),
+        String("-14.20"),
+        String("10.65"),
+        String("-0.01"),
+        String("99999999.99"),
     ]
     for k in range(len(cases)):
         var d = decimal_from_text(cases[k], 10, 2)
@@ -270,7 +296,10 @@ def test_twos_complement_minimal() raises:
     assert_equal(hex_text(int64_to_be_twos(-128)), "80")
     assert_equal(hex_text(int64_to_be_twos(-129)), "ff7f")
     assert_equal(hex_text(int64_to_be_twos(1420)), "058c")
-    assert_equal(be_twos_to_int64(int64_to_be_twos(-9223372036854775808)), -9223372036854775808)
+    assert_equal(
+        be_twos_to_int64(int64_to_be_twos(-9223372036854775808)),
+        -9223372036854775808,
+    )
 
 
 def test_uuid_text() raises:
@@ -294,8 +323,12 @@ def test_iso_round_trip() raises:
     assert_equal(parse_iso(P_DATE, "2017-11-16"), 17486)
     assert_equal(iso_text(P_DATE, 17486), "2017-11-16")
     assert_equal(parse_iso(P_TIME, "22:31:08"), 81068000000)
-    assert_equal(parse_iso(P_TIMESTAMP, "2017-11-16T22:31:08"), 1510871468000000)
-    assert_equal(parse_iso(P_TIMESTAMPTZ, "2017-11-16T14:31:08-08:00"), 1510871468000000)
+    assert_equal(
+        parse_iso(P_TIMESTAMP, "2017-11-16T22:31:08"), 1510871468000000
+    )
+    assert_equal(
+        parse_iso(P_TIMESTAMPTZ, "2017-11-16T14:31:08-08:00"), 1510871468000000
+    )
     assert_equal(iso_text(P_TIMESTAMP, 1510871468000000), "2017-11-16T22:31:08")
     # Pre-epoch values must floor, not truncate toward zero.
     assert_equal(parse_iso(P_TIMESTAMP, "1969-12-31T23:59:59.999999"), -1)
@@ -305,10 +338,18 @@ def test_iso_round_trip() raises:
 def test_appendix_d_binary() raises:
     assert_equal(hex_text(datum_to_bytes(Datum.int_(1))), "01000000")
     assert_equal(hex_text(datum_to_bytes(Datum.long_(1))), "0100000000000000")
-    assert_equal(hex_text(datum_to_bytes(Datum.double_(1.0))), "000000000000f03f")
-    assert_equal(hex_text(datum_to_bytes(Datum.string_("iceberg"))), "69636562657267")
-    assert_equal(datum_from_bytes_prim(P_INT, 0, 0, 0, hex_bytes("01000000")).i, 1)
-    assert_equal(datum_from_bytes_prim(P_BOOLEAN, 0, 0, 0, hex_bytes("01")).i, 1)
+    assert_equal(
+        hex_text(datum_to_bytes(Datum.double_(1.0))), "000000000000f03f"
+    )
+    assert_equal(
+        hex_text(datum_to_bytes(Datum.string_("iceberg"))), "69636562657267"
+    )
+    assert_equal(
+        datum_from_bytes_prim(P_INT, 0, 0, 0, hex_bytes("01000000")).i, 1
+    )
+    assert_equal(
+        datum_from_bytes_prim(P_BOOLEAN, 0, 0, 0, hex_bytes("01")).i, 1
+    )
     assert_equal(
         datum_from_bytes_prim(P_STRING, 0, 0, 0, hex_bytes("69636562657267")).s,
         "iceberg",
@@ -318,8 +359,13 @@ def test_appendix_d_binary() raises:
 def test_appendix_d_promoted_lengths() raises:
     """Bounds written before a promotion keep the *old* type's byte length."""
     # int -> long: 4 bytes for a long column.
-    assert_equal(datum_from_bytes_prim(P_LONG, 0, 0, 0, hex_bytes("ffffffff")).i, -1)
-    assert_equal(datum_from_bytes_prim(P_LONG, 0, 0, 0, hex_bytes("ffffffffffffffff")).i, -1)
+    assert_equal(
+        datum_from_bytes_prim(P_LONG, 0, 0, 0, hex_bytes("ffffffff")).i, -1
+    )
+    assert_equal(
+        datum_from_bytes_prim(P_LONG, 0, 0, 0, hex_bytes("ffffffffffffffff")).i,
+        -1,
+    )
     # float -> double: 4 bytes for a double column.
     var f = datum_from_bytes_prim(P_DOUBLE, 0, 0, 0, hex_bytes("0000803f"))
     assert_equal(f.f, 1.0)
@@ -364,7 +410,9 @@ def test_truncate_codepoints() raises:
     assert_equal(truncate_codepoints("abc", 0), "")
 
 
-def datum_for(type_name: String, doc: Json, node: Int, int_node: Int) raises -> Datum:
+def datum_for(
+    type_name: String, doc: Json, node: Int, int_node: Int
+) raises -> Datum:
     """Build a Datum from one transform-vector row."""
     if type_name == "int":
         return Datum.int_(doc.as_int(node))
@@ -433,7 +481,9 @@ def test_transform_vectors() raises:
             if type_name == "int" or type_name == "long":
                 assert_equal(out.i, doc.as_int(want), what)
             elif type_name.startswith("decimal"):
-                assert_equal(decimal_text(out.b, out.scale), doc.as_string(want), what)
+                assert_equal(
+                    decimal_text(out.b, out.scale), doc.as_string(want), what
+                )
             elif type_name == "string":
                 assert_equal(out.s, doc.as_string(want), what)
             else:
@@ -441,7 +491,13 @@ def test_transform_vectors() raises:
         else:
             assert_equal(out.i, doc.as_int(want), what)
         checked += 1
-    print("    transform vectors:", checked, "checked,", hashes_checked, "with hashes")
+    print(
+        "    transform vectors:",
+        checked,
+        "checked,",
+        hashes_checked,
+        "with hashes",
+    )
 
 
 def test_bucket_spec_vectors() raises:
@@ -450,15 +506,26 @@ def test_bucket_spec_vectors() raises:
     assert_equal(Int(iceberg_hash(Datum.long_(34))), 2017239379)
     assert_equal(Int(iceberg_hash(Datum.string_("iceberg"))), 1210000089)
     assert_equal(
-        Int(iceberg_hash(Datum.uuid_(uuid_bytes("f79c3e09-677c-4bbd-a479-3f349cb785e7")))),
+        Int(
+            iceberg_hash(
+                Datum.uuid_(uuid_bytes("f79c3e09-677c-4bbd-a479-3f349cb785e7"))
+            )
+        ),
         1488055340,
     )
-    assert_equal(Int(iceberg_hash(Datum.binary_(hex_bytes("00010203")))), -188683207)
-    assert_equal(Int(iceberg_hash(decimal_from_text("14.20", 9, 2))), -500754589)
-    assert_equal(Int(iceberg_hash(Datum.integral(P_DATE, 17486))), -653330422)
-    assert_equal(Int(iceberg_hash(Datum.integral(P_TIME, 81068000000))), -662762989)
     assert_equal(
-        Int(iceberg_hash(Datum.integral(P_TIMESTAMP, 1510871468000000))), -2047944441
+        Int(iceberg_hash(Datum.binary_(hex_bytes("00010203")))), -188683207
+    )
+    assert_equal(
+        Int(iceberg_hash(decimal_from_text("14.20", 9, 2))), -500754589
+    )
+    assert_equal(Int(iceberg_hash(Datum.integral(P_DATE, 17486))), -653330422)
+    assert_equal(
+        Int(iceberg_hash(Datum.integral(P_TIME, 81068000000))), -662762989
+    )
+    assert_equal(
+        Int(iceberg_hash(Datum.integral(P_TIMESTAMP, 1510871468000000))),
+        -2047944441,
     )
     # (2017239379 & Integer.MAX_VALUE) % 16 == 3
     assert_equal(bucket_of(Datum.int_(34), 16), 3)
@@ -505,7 +572,6 @@ def test_partition_type() raises:
     assert_equal(pt.store.type_name(pt.find_field(1003).type), "long")
 
 
-
 # ══ table metadata ══════════════════════════════════════════════════════════
 comptime FIXTURE_TABLES = String(
     "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,deletes_v2"
@@ -533,7 +599,10 @@ def fixture_index() raises -> Json:
 def current_metadata_path(idx: Json, table: String) raises -> String:
     var e = idx.get(idx.root, table)
     return (
-        FIXTURES + "/" + table + "/metadata/"
+        FIXTURES
+        + "/"
+        + table
+        + "/metadata/"
         + idx.req_string(e, "current_metadata")
     )
 
@@ -587,7 +656,10 @@ def metadata_diff(a: TableMetadata, b: TableMetadata) raises -> String:
             return "sort-orders[" + String(k) + "]"
     if a.has_current_snapshot != b.has_current_snapshot:
         return "current-snapshot-id (presence)"
-    if a.has_current_snapshot and a.current_snapshot_id != b.current_snapshot_id:
+    if (
+        a.has_current_snapshot
+        and a.current_snapshot_id != b.current_snapshot_id
+    ):
         return "current-snapshot-id"
     if len(a.snapshots) != len(b.snapshots):
         return "snapshots (count)"
@@ -640,7 +712,9 @@ def test_metadata_round_trip() raises:
         var d = metadata_diff(m1, m2)
         assert_equal(d, "", tables[k] + ": round trip lost " + d)
         # And a second pass is byte-identical, so serialization is stable.
-        assert_equal(m1.to_json(), m2.to_json(), tables[k] + ": unstable output")
+        assert_equal(
+            m1.to_json(), m2.to_json(), tables[k] + ": unstable output"
+        )
         n += 1
     print("    metadata round-trip:", n, "tables")
 
@@ -793,9 +867,7 @@ def test_snapshot_selection() raises:
             read_file(FIXTURES + "/" + table + "/oracle/snapshots.json")
         )
         var n = oracle.size(oracle.root)
-        assert_equal(
-            len(m.snapshots), n, table + ": snapshot count"
-        )
+        assert_equal(len(m.snapshots), n, table + ": snapshot count")
         # The oracle lists snapshots oldest first.
         var last_id: Int64 = 0
         for j in range(n):
@@ -835,7 +907,9 @@ def test_snapshot_selection() raises:
             # as-of at this snapshot's own timestamp must select it.
             var asof = m.snapshot_as_of(s.timestamp_ms)
             assert_equal(
-                asof.snapshot_id, id, table + ": as-of at " + String(s.timestamp_ms)
+                asof.snapshot_id,
+                id,
+                table + ": as-of at " + String(s.timestamp_ms),
             )
             last_id = id
             checked += 1
@@ -856,7 +930,13 @@ def test_snapshot_selection() raises:
             _ = m.snapshot_for_ref("no-such-branch")
         with assert_raises():
             _ = m.snapshot_by_id(1)
-    print("    snapshot selection:", checked, "snapshots across", len(tables), "tables")
+    print(
+        "    snapshot selection:",
+        checked,
+        "snapshots across",
+        len(tables),
+        "tables",
+    )
 
 
 def test_snapshot_ref_and_schema_selection() raises:
@@ -869,7 +949,6 @@ def test_snapshot_ref_and_schema_selection() raises:
         assert_true(len(s.columns()) > 0)
     var cur = m.schema()
     assert_equal(cur.schema_id, m.current_schema_id)
-
 
 
 # ══ expressions ═════════════════════════════════════════════════════════════
@@ -892,12 +971,18 @@ def bound_filter(text: String) raises -> Expr:
 
 def test_filter_dsl_parsing() raises:
     var cases = [
-        String('["true"]'), String('["false"]'),
-        String('["=","region","eu"]'), String('["!=","id",3]'),
-        String('["<","id",5]'), String('["<=","id",5]'),
-        String('[">","id",5]'), String('[">=","id",5]'),
-        String('["is-null","amount"]'), String('["not-null","amount"]'),
-        String('["is-nan","amount"]'), String('["not-nan","amount"]'),
+        String('["true"]'),
+        String('["false"]'),
+        String('["=","region","eu"]'),
+        String('["!=","id",3]'),
+        String('["<","id",5]'),
+        String('["<=","id",5]'),
+        String('[">","id",5]'),
+        String('[">=","id",5]'),
+        String('["is-null","amount"]'),
+        String('["not-null","amount"]'),
+        String('["is-nan","amount"]'),
+        String('["not-nan","amount"]'),
         String('["in","region",["eu","us"]]'),
         String('["not-in","region",["eu","us"]]'),
         String('["starts-with","region","e"]'),
@@ -1004,7 +1089,9 @@ def test_inclusive_projection_bucket() raises:
         rewrite_not(bound_filter('["=","id",34]')), spec, schema
     )
     assert_equal(p.nodes[p.root].op, OP_EQ)
-    assert_equal(p.nodes[p.root].lits[0].i, Int64(bucket_of(Datum.long_(34), 4)))
+    assert_equal(
+        p.nodes[p.root].lits[0].i, Int64(bucket_of(Datum.long_(34), 4))
+    )
     # ...as does `in`, mapped to the set of buckets.
     var q = project_inclusive(
         rewrite_not(bound_filter('["in","id",[1,4,7]]')), spec, schema
@@ -1032,7 +1119,8 @@ def test_inclusive_projection_truncate() raises:
     # A longer prefix becomes equality on its own truncation.
     var q = project_inclusive(
         rewrite_not(bound_filter('["starts-with","region","europe"]')),
-        spec, schema,
+        spec,
+        schema,
     )
     assert_equal(q.nodes[q.root].op, OP_EQ)
     assert_equal(q.nodes[q.root].lits[0].s, "eur")
@@ -1051,7 +1139,8 @@ def test_inclusive_projection_time() raises:
     )
     var p = project_inclusive(
         rewrite_not(bound_filter('[">=","ts","2017-11-16T00:00:00"]')),
-        spec, schema,
+        spec,
+        schema,
     )
     assert_equal(p.nodes[p.root].op, OP_GT_EQ)
     assert_equal(p.nodes[p.root].lits[0].i, 17486)
@@ -1060,14 +1149,16 @@ def test_inclusive_projection_time() raises:
     # earlier, which is still the same day here.
     var q = project_inclusive(
         rewrite_not(bound_filter('["<","ts","2017-11-17T00:00:00"]')),
-        spec, schema,
+        spec,
+        schema,
     )
     assert_equal(q.nodes[q.root].op, OP_LT_EQ)
     assert_equal(q.nodes[q.root].lits[0].i, 17486)
 
 
 def test_projection_ignores_unknown_transform() raises:
-    """Format version 3 requires readers to ignore partition fields they cannot interpret."""
+    """Format version 3 requires readers to ignore partition fields they cannot interpret.
+    """
     var schema = Schema.parse(FILTER_SCHEMA)
     var spec = spec_from(
         '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
@@ -1102,7 +1193,9 @@ def test_strict_projection() raises:
     assert_equal(q.nodes[q.root].op, OP_FALSE)
 
 
-def summary(var lo: List[UInt8], var hi: List[UInt8], nulls: Bool) -> FieldSummary:
+def summary(
+    var lo: List[UInt8], var hi: List[UInt8], nulls: Bool
+) -> FieldSummary:
     return FieldSummary(nulls, False, False, lo^, True, hi^, True)
 
 
@@ -1115,15 +1208,25 @@ def test_manifest_evaluator() raises:
     # This manifest holds partitions from "eu" through "us".
     var s = List[FieldSummary]()
     s.append(summary(hex_bytes("6575"), hex_bytes("7573"), False))
-    var keep = ManifestEvaluator(bound_filter('["=","region","eu"]'), spec, schema)
+    var keep = ManifestEvaluator(
+        bound_filter('["=","region","eu"]'), spec, schema
+    )
     assert_true(keep.eval(s))
-    var drop = ManifestEvaluator(bound_filter('["=","region","zz"]'), spec, schema)
+    var drop = ManifestEvaluator(
+        bound_filter('["=","region","zz"]'), spec, schema
+    )
     assert_false(drop.eval(s))
-    var below = ManifestEvaluator(bound_filter('["<","region","aa"]'), spec, schema)
+    var below = ManifestEvaluator(
+        bound_filter('["<","region","aa"]'), spec, schema
+    )
     assert_false(below.eval(s))
-    var above = ManifestEvaluator(bound_filter('[">","region","zz"]'), spec, schema)
+    var above = ManifestEvaluator(
+        bound_filter('[">","region","zz"]'), spec, schema
+    )
     assert_false(above.eval(s))
-    var isnull = ManifestEvaluator(bound_filter('["is-null","amount"]'), spec, schema)
+    var isnull = ManifestEvaluator(
+        bound_filter('["is-null","amount"]'), spec, schema
+    )
     assert_true(isnull.eval(s), "a non-partition predicate must not prune")
     # A summary that says the field has no nulls kills an is-null on it.
     var pspec = spec_from(
@@ -1136,7 +1239,9 @@ def test_manifest_evaluator() raises:
             hex_bytes("0000000000001a40"), hex_bytes("0000000000001a40"), False
         )
     )
-    var nulls = ManifestEvaluator(bound_filter('["is-null","amount"]'), pspec, schema)
+    var nulls = ManifestEvaluator(
+        bound_filter('["is-null","amount"]'), pspec, schema
+    )
     assert_false(nulls.eval(s2))
 
 
@@ -1146,8 +1251,17 @@ def metric(
     var lob = hex_bytes(lo)
     var hib = hex_bytes(hi)
     return ColumnMetrics(
-        field_id, values, True, nulls, True, 0, False,
-        lob^, True, hib^, True,
+        field_id,
+        values,
+        True,
+        nulls,
+        True,
+        0,
+        False,
+        lob^,
+        True,
+        hib^,
+        True,
     )
 
 
@@ -1167,17 +1281,29 @@ def test_inclusive_metrics_evaluator() raises:
     assert_true(e4.eval(5, m))
     var e5 = InclusiveMetricsEvaluator(bound_filter('["<","id",1]'), schema)
     assert_false(e5.eval(5, m))
-    var e6 = InclusiveMetricsEvaluator(bound_filter('["in","id",[7,8,9]]'), schema)
+    var e6 = InclusiveMetricsEvaluator(
+        bound_filter('["in","id",[7,8,9]]'), schema
+    )
     assert_false(e6.eval(5, m))
-    var e7 = InclusiveMetricsEvaluator(bound_filter('["in","id",[7,3]]'), schema)
+    var e7 = InclusiveMetricsEvaluator(
+        bound_filter('["in","id",[7,3]]'), schema
+    )
     assert_true(e7.eval(5, m))
     # amount is entirely null.
-    var e8 = InclusiveMetricsEvaluator(bound_filter('["not-null","amount"]'), schema)
+    var e8 = InclusiveMetricsEvaluator(
+        bound_filter('["not-null","amount"]'), schema
+    )
     assert_false(e8.eval(5, m))
-    var e9 = InclusiveMetricsEvaluator(bound_filter('["is-null","amount"]'), schema)
+    var e9 = InclusiveMetricsEvaluator(
+        bound_filter('["is-null","amount"]'), schema
+    )
     assert_true(e9.eval(5, m))
-    var e10 = InclusiveMetricsEvaluator(bound_filter('[">","amount",1.0]'), schema)
-    assert_false(e10.eval(5, m), "an all-null column matches no value predicate")
+    var e10 = InclusiveMetricsEvaluator(
+        bound_filter('[">","amount",1.0]'), schema
+    )
+    assert_false(
+        e10.eval(5, m), "an all-null column matches no value predicate"
+    )
     # An empty file matches nothing.
     assert_false(e1.eval(0, m))
 
@@ -1206,7 +1332,6 @@ def test_residual_evaluator() raises:
     assert_false(res2.is_true(res2.root))
 
 
-
 # ══ manifests and scan planning ═════════════════════════════════════════════
 comptime WAREHOUSE_PREFIX = String(
     "file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root"
@@ -1216,6 +1341,25 @@ comptime WAREHOUSE_PREFIX = String(
 verbatim copies, so every manifest list and manifest they name is addressed by
 that path; `fixture_io` redirects it at `tests/fixtures/` so the tests run
 anywhere, including CI where the original warehouse does not exist."""
+
+
+def fixture_filters(table: String) raises -> List[String]:
+    """The six oracle filters recorded for a table, in order."""
+    var out = List[String]()
+    for k in range(6):
+        out.append(
+            String(
+                read_file(
+                    FIXTURES
+                    + "/"
+                    + table
+                    + "/oracle/plan_"
+                    + String(k)
+                    + ".filter.txt"
+                ).strip()
+            )
+        )
+    return out^
 
 
 def fixture_io() -> FileIO:
@@ -1252,9 +1396,7 @@ def test_manifest_list_reading() raises:
         for j in range(len(m.snapshots)):
             ref snap = m.snapshots[j]
             var mfs = read_manifest_list(io.resolve(snap.manifest_list))
-            assert_true(
-                len(mfs) > 0, tables[k] + ": empty manifest list"
-            )
+            assert_true(len(mfs) > 0, tables[k] + ": empty manifest list")
             for i in range(len(mfs)):
                 ref mf = mfs[i]
                 assert_true(mf.manifest_path != "", "manifest_path")
@@ -1327,8 +1469,13 @@ def test_manifest_sequence_inheritance() raises:
                 )
                 checked += 1
     print(
-        "    sequence inheritance:", checked, "entries (",
-        inherited, "inherited,", explicit, "explicit )",
+        "    sequence inheritance:",
+        checked,
+        "entries (",
+        inherited,
+        "inherited,",
+        explicit,
+        "explicit )",
     )
 
 
@@ -1430,7 +1577,9 @@ def _sort_strings_test(mut l: List[String]):
 
 def oracle_bridge_paths(table: String, k: Int) raises -> List[String]:
     var doc = parse_json(
-        read_file(FIXTURES + "/" + table + "/oracle/plan_" + String(k) + ".json")
+        read_file(
+            FIXTURES + "/" + table + "/oracle/plan_" + String(k) + ".json"
+        )
     )
     var out = List[String]()
     for j in range(doc.size(doc.root)):
@@ -1444,7 +1593,12 @@ def oracle_bridge_paths(table: String, k: Int) raises -> List[String]:
 def oracle_pyiceberg_paths(table: String, k: Int) raises -> List[String]:
     var doc = parse_json(
         read_file(
-            FIXTURES + "/" + table + "/oracle/pyiceberg_plan_" + String(k) + ".json"
+            FIXTURES
+            + "/"
+            + table
+            + "/oracle/pyiceberg_plan_"
+            + String(k)
+            + ".json"
         )
     )
     var tasks = doc.get(doc.root, "tasks")
@@ -1477,7 +1631,11 @@ def test_plan_files_matches_oracles() raises:
         var scan = fixture_scan(table)
         for k in range(6):
             var dsl = read_file(
-                FIXTURES + "/" + table + "/oracle/plan_" + String(k)
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/plan_"
+                + String(k)
                 + ".filter.txt"
             ).strip()
             var tasks = scan.filter(String(dsl)).plan_files()
@@ -1489,20 +1647,33 @@ def test_plan_files_matches_oracles() raises:
                 bridge_agree += 1
             else:
                 disagreements += (
-                    "\n      bridge: " + what + "\n        mine:   "
-                    + join_list(mine) + "\n        oracle: " + join_list(bridge)
+                    "\n      bridge: "
+                    + what
+                    + "\n        mine:   "
+                    + join_list(mine)
+                    + "\n        oracle: "
+                    + join_list(bridge)
                 )
             if join_list(mine) == join_list(pyi):
                 pyiceberg_agree += 1
             else:
                 disagreements += (
-                    "\n      pyiceberg: " + what + "\n        mine:   "
-                    + join_list(mine) + "\n        oracle: " + join_list(pyi)
+                    "\n      pyiceberg: "
+                    + what
+                    + "\n        mine:   "
+                    + join_list(mine)
+                    + "\n        oracle: "
+                    + join_list(pyi)
                 )
             cases += 1
     print(
-        "    plan_files:", cases, "cases;", bridge_agree,
-        "match iceberg-rust,", pyiceberg_agree, "match PyIceberg",
+        "    plan_files:",
+        cases,
+        "cases;",
+        bridge_agree,
+        "match iceberg-rust,",
+        pyiceberg_agree,
+        "match PyIceberg",
     )
     if disagreements != "":
         print("    disagreements:", disagreements)
@@ -1533,7 +1704,11 @@ def test_plan_files_never_drops_a_file_the_bridge_keeps() raises:
         var scan = fixture_scan(table)
         for k in range(6):
             var dsl = read_file(
-                FIXTURES + "/" + table + "/oracle/plan_" + String(k)
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/plan_"
+                + String(k)
                 + ".filter.txt"
             ).strip()
             var mine = plan_paths(scan.filter(String(dsl)).plan_files())
@@ -1545,7 +1720,11 @@ def test_plan_files_never_drops_a_file_the_bridge_keeps() raises:
                         found = True
                 assert_true(
                     found,
-                    table + " filter " + String(k) + ": planned " + mine[j]
+                    table
+                    + " filter "
+                    + String(k)
+                    + ": planned "
+                    + mine[j]
                     + ", which iceberg-rust does not",
                 )
             extra += len(bridge) - len(mine)
@@ -1561,7 +1740,9 @@ def test_plan_files_delete_association() raises:
     for k in range(len(tasks)):
         if len(tasks[k].delete_files) > 0:
             with_deletes += 1
-            assert_equal(tasks[k].delete_files[0].content, CONTENT_POSITION_DELETES)
+            assert_equal(
+                tasks[k].delete_files[0].content, CONTENT_POSITION_DELETES
+            )
     # The oracle says both data files carry the delete.
     var doc = parse_json(read_file(FIXTURES + "/deletes_v2/oracle/plan_0.json"))
     var want = 0
@@ -1576,7 +1757,9 @@ def test_plan_files_json_shape() raises:
     var scan = fixture_scan("ident_part")
     var text = scan.filter('["=","region","eu"]').plan_files_json()
     var mine = parse_json(text)
-    var theirs = parse_json(read_file(FIXTURES + "/ident_part/oracle/plan_1.json"))
+    var theirs = parse_json(
+        read_file(FIXTURES + "/ident_part/oracle/plan_1.json")
+    )
     assert_equal(mine.size(mine.root), theirs.size(theirs.root))
     # Compare by path so manifest order does not matter.
     for j in range(mine.size(mine.root)):
@@ -1589,14 +1772,16 @@ def test_plan_files_json_shape() raises:
                 continue
             matched = True
             assert_equal(
-                mine.req_int(a, "record-count"), theirs.req_int(b, "record-count")
+                mine.req_int(a, "record-count"),
+                theirs.req_int(b, "record-count"),
             )
             assert_equal(
                 mine.req_int(a, "file-size-in-bytes"),
                 theirs.req_int(b, "file-size-in-bytes"),
             )
             assert_equal(
-                mine.req_string(a, "file-format"), theirs.req_string(b, "file-format")
+                mine.req_string(a, "file-format"),
+                theirs.req_string(b, "file-format"),
             )
             assert_equal(mine.req_int(a, "start"), theirs.req_int(b, "start"))
             assert_equal(mine.req_int(a, "length"), theirs.req_int(b, "length"))
@@ -1650,14 +1835,14 @@ def test_scan_residuals() raises:
     assert_true(len(tasks) > 0)
     for k in range(len(tasks)):
         assert_equal(
-            tasks[k].residual, '["true"]',
+            tasks[k].residual,
+            '["true"]',
             "an identity-partitioned equality should leave nothing behind",
         )
     # One that partitioning cannot decide does leave a residual.
     var t2 = scan.filter('[">","id",2]').plan_files()
     assert_true(len(t2) > 0)
     assert_true(t2[0].residual != '["true"]', "expected a surviving residual")
-
 
 
 # ══ catalogs ════════════════════════════════════════════════════════════════
@@ -1724,10 +1909,14 @@ def test_version_hint_discovery() raises:
     _write_file(dir + "/version-hint.text", "7\n")
     var io = FileIO.local()
     assert_equal(read_version_hint(io, dir), 7)
-    assert_equal(basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json")
+    assert_equal(
+        basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json"
+    )
     # Without the hint, the highest version still wins.
     _write_file(dir + "/version-hint.text", "")
-    assert_equal(basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json")
+    assert_equal(
+        basename(find_latest_metadata(io, "build/hinted")), "v7.metadata.json"
+    )
 
 
 def _mkdirs(path: String) -> Bool:
@@ -1747,9 +1936,7 @@ def _write_file(path: String, content: String) raises:
 def test_gunzip() raises:
     """A gzip member produced by python's gzip module, decoded in-process."""
     # "iceberg" gzipped: 1f8b header, deflate payload, crc32 + isize trailer.
-    var gz = hex_bytes(
-        "1f8b08000000000002ffcb4c4e4d4a2d4a07004d8a1c4d07000000"
-    )
+    var gz = hex_bytes("1f8b08000000000002ffcb4c4e4d4a2d4a07004d8a1c4d07000000")
     var out = gunzip(gz)
     assert_equal(String(StringSlice(unsafe_from_utf8=Span(out))), "iceberg")
     with assert_raises():
@@ -1758,7 +1945,9 @@ def test_gunzip() raises:
 
 def test_rest_url_and_header_shaping() raises:
     var c = RestCatalogConfig("https://polaris.example.com/api/catalog/")
-    assert_equal(c.config_url(), "https://polaris.example.com/api/catalog/v1/config")
+    assert_equal(
+        c.config_url(), "https://polaris.example.com/api/catalog/v1/config"
+    )
     c.with_warehouse("my_wh")
     assert_equal(
         c.config_url(),
@@ -1799,7 +1988,9 @@ def test_rest_load_table_response() raises:
     var inner = read_file(current_metadata_path(idx, "ident_part"))
     var body = (
         '{"metadata-location":"s3://b/t/metadata/00003-x.metadata.json",'
-        '"metadata":' + inner + ','
+        '"metadata":'
+        + inner
+        + ","
         '"config":{"s3.access-key-id":"AK"},'
         '"storage-credentials":[{"prefix":"s3://b/t",'
         '"config":{"s3.session-token":"tok"}}]}'
@@ -1836,6 +2027,202 @@ def test_rest_list_responses() raises:
     )
     assert_equal(len(ts), 2)
     assert_equal(ts[0], "t1")
+
+
+# ══ REST catalog over a real socket ═════════════════════════════════════════
+# tests/run_tests.sh starts tests/rest_server.py, a mock catalog serving the
+# checked-in fixtures. Every assertion below is about the *client*: that it
+# sends the bearer token and the delegation header, absorbs the `prefix` a
+# config response asks for, parses a LoadTableResult into real metadata, maps
+# status codes onto errors, and produces exactly the plan the local reader
+# produces from the same table.
+def _rest_uri() -> String:
+    return getenv("ICEBERG_TEST_REST", "")
+
+
+def _rest_catalog(token: String = "test-token") raises -> RestCatalog:
+    var io = FileIO.local()
+    io.rebase(WAREHOUSE_PREFIX, FIXTURES)
+    var cat = RestCatalog(RestCatalogConfig(_rest_uri()), io^)
+    cat.config.with_token(token)
+    cat.config.vend_credentials = True
+    return cat^
+
+
+def test_rest_catalog_over_http() raises:
+    if _rest_uri() == "":
+        print("SKIP test_rest_catalog_over_http: no ICEBERG_TEST_REST")
+        return
+    var cat = _rest_catalog()
+    assert_equal(cat.config.prefix, "")
+    cat.connect()
+    # The server sends `overrides.prefix = "ws"`; every later URL must carry it.
+    assert_equal(cat.config.prefix, "ws")
+    assert_true(cat.config.namespaces_url().endswith("/v1/ws/namespaces"))
+
+    var namespaces = cat.list_namespaces()
+    assert_equal(len(namespaces), 1)
+    assert_equal(namespaces[0], "db")
+
+    var tables = cat.list_tables("db")
+    var found = False
+    for k in range(len(tables)):
+        if tables[k] == "unpartitioned":
+            found = True
+    assert_true(found)
+    assert_true(cat.table_exists("db", "unpartitioned"))
+    assert_false(cat.table_exists("db", "no_such_table"))
+
+
+def test_rest_load_table_matches_local() raises:
+    if _rest_uri() == "":
+        print("SKIP test_rest_load_table_matches_local: no ICEBERG_TEST_REST")
+        return
+    var cat = _rest_catalog()
+    cat.connect()
+    var names = [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("bucket_part"),
+        String("day_part"),
+        String("trunc_part"),
+        String("evolved"),
+        String("deletes_v2"),
+    ]
+    var checked = 0
+    for k in range(len(names)):
+        var filters = fixture_filters(names[k])
+        var remote = cat.load_table("db", names[k])
+        var local = load_fixture_metadata(names[k])
+        assert_equal(remote.metadata.table_uuid, local.table_uuid)
+        assert_equal(
+            remote.metadata.current_snapshot_id, local.current_snapshot_id
+        )
+        assert_equal(remote.metadata.format_version, local.format_version)
+        # The catalog vended a credential and echoed the delegation header
+        # back; both prove the request carried what it should have.
+        assert_equal(remote.metadata.location, local.location)
+        for j in range(len(filters)):
+            var want = (
+                TableScan(local.copy(), fixture_io())
+                .filter(filters[j])
+                .plan_files_json()
+            )
+            var got = remote.scan().filter(filters[j]).plan_files_json()
+            assert_equal(got, want)
+            checked += 1
+    assert_equal(checked, len(names) * 6)
+
+
+def test_rest_delegation_and_credentials() raises:
+    if _rest_uri() == "":
+        print("SKIP test_rest_delegation_and_credentials: no ICEBERG_TEST_REST")
+        return
+    var cat = _rest_catalog()
+    cat.connect()
+    var res = cat.load_table_result("db", "unpartitioned")
+    assert_equal(res.config["echo.delegation"], VENDED_CREDENTIALS)
+    assert_equal(len(res.storage_credentials), 1)
+    assert_true("s3.access-key-id" in res.storage_credentials[0].config)
+    assert_true(res.has_metadata_location)
+
+    # Without the delegation header the server vends nothing.
+    var plain = RestCatalog(RestCatalogConfig(_rest_uri()), FileIO.local())
+    plain.config.with_token("test-token")
+    plain.connect()
+    var res2 = plain.load_table_result("db", "unpartitioned")
+    assert_equal(res2.config["echo.delegation"], "")
+    assert_equal(len(res2.storage_credentials), 0)
+
+
+def test_rest_error_mapping() raises:
+    if _rest_uri() == "":
+        print("SKIP test_rest_error_mapping: no ICEBERG_TEST_REST")
+        return
+    var cat = _rest_catalog()
+    cat.connect()
+    # 404 with an ErrorModel body.
+    var missing = String("")
+    try:
+        _ = cat.load_table("db", "no_such_table")
+    except e:
+        missing = String(e)
+    assert_true(missing.find("404") >= 0)
+    assert_true(missing.find("not found") >= 0)
+    assert_true(missing.find("NoSuchTableException") >= 0)
+
+    # 401 when the bearer token is wrong.
+    var bad = _rest_catalog("wrong-token")
+    var unauth = String("")
+    try:
+        bad.connect()
+    except e:
+        unauth = String(e)
+    assert_true(unauth.find("401") >= 0)
+    assert_true(unauth.find("not authenticated") >= 0)
+
+
+# ══ S3 end to end ═══════════════════════════════════════════════════════════
+# tests/run_tests.sh uploads a few fixture tables into MinIO and points
+# $ICEBERG_TEST_S3 at the warehouse prefix. The metadata is byte-identical to
+# what is on disk, so the plan must be too — the only thing that changed is
+# where every byte came from.
+def _s3_warehouse() -> String:
+    return getenv("ICEBERG_TEST_S3", "")
+
+
+def s3_io() raises -> FileIO:
+    var io = FileIO.local()
+    io.set(String("s3.endpoint"), getenv("AWS_ENDPOINT_URL_S3", ""))
+    io.set(String("s3.access-key-id"), getenv("AWS_ACCESS_KEY_ID", ""))
+    io.set(String("s3.secret-access-key"), getenv("AWS_SECRET_ACCESS_KEY", ""))
+    io.set(String("s3.region"), String("us-east-1"))
+    io.rebase(WAREHOUSE_PREFIX, _s3_warehouse())
+    return io^
+
+
+def test_s3_table_load_and_plan() raises:
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_table_load_and_plan: no ICEBERG_TEST_S3")
+        return
+    var names = [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("deletes_v2"),
+        String("evolved"),
+    ]
+    var checked = 0
+    for k in range(len(names)):
+        var filters = fixture_filters(names[k])
+        var t = Table.load(_s3_warehouse() + "/" + names[k], s3_io())
+        var local = load_fixture_metadata(names[k])
+        assert_equal(t.metadata.table_uuid, local.table_uuid)
+        assert_equal(t.metadata.current_snapshot_id, local.current_snapshot_id)
+        for j in range(len(filters)):
+            var want = (
+                TableScan(local.copy(), fixture_io())
+                .filter(filters[j])
+                .plan_files_json()
+            )
+            assert_equal(t.scan().filter(filters[j]).plan_files_json(), want)
+            checked += 1
+    assert_equal(checked, len(names) * 6)
+
+
+def test_s3_catalog_listing() raises:
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_catalog_listing: no ICEBERG_TEST_S3")
+        return
+    var cat = FilesystemCatalog(_s3_warehouse(), s3_io())
+    var tables = cat.list_tables("")
+    assert_true(len(tables) >= 4)
+    var seen = False
+    for k in range(len(tables)):
+        if tables[k] == "ident_part":
+            seen = True
+    assert_true(seen)
+    assert_true(cat.table_exists("", "unpartitioned"))
+    assert_false(cat.table_exists("", "nope"))
 
 
 def main() raises:

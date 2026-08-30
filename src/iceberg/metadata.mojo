@@ -73,15 +73,34 @@ struct Snapshot(Copyable, Movable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
-            "Snapshot(", self.snapshot_id, ", seq=", self.sequence_number,
-            ", ", self.operation(), ")",
+            "Snapshot(",
+            self.snapshot_id,
+            ", seq=",
+            self.sequence_number,
+            ", ",
+            self.operation(),
+            ")",
         )
 
     @staticmethod
     def from_json(doc: Json, i: Int, format_version: Int) raises -> Self:
         var s = Self(
-            doc.req_int(i, "snapshot-id"), 0, False, 0, 0, "", [],
-            Dict[String, String](), 0, False, 0, False, 0, False, "", False,
+            doc.req_int(i, "snapshot-id"),
+            0,
+            False,
+            0,
+            0,
+            "",
+            [],
+            Dict[String, String](),
+            0,
+            False,
+            0,
+            False,
+            0,
+            False,
+            "",
+            False,
         )
         var p = doc.get(i, "parent-snapshot-id")
         if p >= 0 and not doc.is_null(p):
@@ -157,9 +176,15 @@ struct SnapshotRef(Copyable, Movable):
     @staticmethod
     def from_json(doc: Json, i: Int, var name: String) raises -> Self:
         var r = Self(
-            name^, doc.req_int(i, "snapshot-id"),
+            name^,
+            doc.req_int(i, "snapshot-id"),
             doc.opt_string(i, "type", REF_BRANCH),
-            0, False, 0, False, 0, False,
+            0,
+            False,
+            0,
+            False,
+            0,
+            False,
         )
         var a = doc.get(i, "min-snapshots-to-keep")
         if a >= 0 and not doc.is_null(a):
@@ -244,7 +269,9 @@ struct StatisticsFile(Copyable, Movable):
             doc.req_string(i, "statistics-path"),
             doc.opt_int(i, "file-size-in-bytes", 0),
             doc.opt_int(i, "file-footer-size-in-bytes", 0),
-            "", False, blobs^,
+            "",
+            False,
+            blobs^,
         )
         var km = doc.get(i, "key-metadata")
         if km >= 0 and not doc.is_null(km):
@@ -321,7 +348,10 @@ struct EncryptionKey(Copyable, Movable):
         if payload == "":
             payload = doc.opt_string(i, "key-metadata", "")
         var e = Self(
-            doc.opt_string(i, "key-id", ""), payload^, "", False,
+            doc.opt_string(i, "key-id", ""),
+            payload^,
+            "",
+            False,
             doc.string_map(i, "properties"),
         )
         var by = doc.get(i, "encrypted-by-id")
@@ -612,9 +642,7 @@ struct TableMetadata(Copyable, Movable):
         if snaps >= 0 and not doc.is_null(snaps):
             for k in range(doc.size(snaps)):
                 m.snapshots.append(
-                    Snapshot.from_json(
-                        doc, doc.at(snaps, k), m.format_version
-                    )
+                    Snapshot.from_json(doc, doc.at(snaps, k), m.format_version)
                 )
 
         var slog = doc.get(i, "snapshot-log")
@@ -642,11 +670,15 @@ struct TableMetadata(Copyable, Movable):
         var orders = doc.get(i, "sort-orders")
         if orders >= 0 and not doc.is_null(orders):
             for k in range(doc.size(orders)):
-                m.sort_orders.append(SortOrder.from_json(doc, doc.at(orders, k)))
+                m.sort_orders.append(
+                    SortOrder.from_json(doc, doc.at(orders, k))
+                )
         if len(m.sort_orders) == 0:
             m.sort_orders.append(SortOrder(INITIAL_SORT_ORDER_ID, []))
         m.default_sort_order_id = Int(
-            doc.opt_int(i, "default-sort-order-id", Int64(INITIAL_SORT_ORDER_ID))
+            doc.opt_int(
+                i, "default-sort-order-id", Int64(INITIAL_SORT_ORDER_ID)
+            )
         )
 
         var refs = doc.get(i, "refs")
@@ -661,7 +693,9 @@ struct TableMetadata(Copyable, Movable):
         var stats = doc.get(i, "statistics")
         if stats >= 0 and not doc.is_null(stats):
             for k in range(doc.size(stats)):
-                m.statistics.append(StatisticsFile.from_json(doc, doc.at(stats, k)))
+                m.statistics.append(
+                    StatisticsFile.from_json(doc, doc.at(stats, k))
+                )
 
         var pstats = doc.get(i, "partition-statistics")
         if pstats >= 0 and not doc.is_null(pstats):
@@ -703,7 +737,9 @@ struct TableMetadata(Copyable, Movable):
         if self.has_location:
             out += ',"location":' + json_quote(self.location)
         if self.format_version > 1:
-            out += ',"last-sequence-number":' + String(self.last_sequence_number)
+            out += ',"last-sequence-number":' + String(
+                self.last_sequence_number
+            )
         out += ',"last-updated-ms":' + String(self.last_updated_ms)
         out += ',"last-column-id":' + String(self.last_column_id)
         out += ',"current-schema-id":' + String(self.current_schema_id)
@@ -730,7 +766,9 @@ struct TableMetadata(Copyable, Movable):
         out += "]"
         out += ',"properties":' + _string_map_json(self.properties)
         out += ',"current-snapshot-id":' + (
-            String(self.current_snapshot_id) if self.has_current_snapshot else "-1"
+            String(
+                self.current_snapshot_id
+            ) if self.has_current_snapshot else "-1"
         )
         out += ',"refs":{'
         for k in range(len(self.refs)):
@@ -763,7 +801,9 @@ struct TableMetadata(Copyable, Movable):
         for k in range(len(self.snapshot_log)):
             if k > 0:
                 out += ","
-            out += '{"timestamp-ms":' + String(self.snapshot_log[k].timestamp_ms)
+            out += '{"timestamp-ms":' + String(
+                self.snapshot_log[k].timestamp_ms
+            )
             out += ',"snapshot-id":' + String(self.snapshot_log[k].snapshot_id)
             out += "}"
         out += "]"
@@ -771,7 +811,9 @@ struct TableMetadata(Copyable, Movable):
         for k in range(len(self.metadata_log)):
             if k > 0:
                 out += ","
-            out += '{"timestamp-ms":' + String(self.metadata_log[k].timestamp_ms)
+            out += '{"timestamp-ms":' + String(
+                self.metadata_log[k].timestamp_ms
+            )
             out += ',"metadata-file":' + json_quote(
                 self.metadata_log[k].metadata_file
             )

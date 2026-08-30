@@ -123,9 +123,24 @@ def main() raises:
         print("last-updated-ms: ", m.last_updated_ms)
         print("last-sequence:   ", m.last_sequence_number)
         print("last-column-id:  ", m.last_column_id)
-        print("schemas:         ", len(m.schemas), "(current", String(m.current_schema_id) + ")")
-        print("partition-specs: ", len(m.partition_specs), "(default", String(m.default_spec_id) + ")")
-        print("sort-orders:     ", len(m.sort_orders), "(default", String(m.default_sort_order_id) + ")")
+        print(
+            "schemas:         ",
+            len(m.schemas),
+            "(current",
+            String(m.current_schema_id) + ")",
+        )
+        print(
+            "partition-specs: ",
+            len(m.partition_specs),
+            "(default",
+            String(m.default_spec_id) + ")",
+        )
+        print(
+            "sort-orders:     ",
+            len(m.sort_orders),
+            "(default",
+            String(m.default_sort_order_id) + ")",
+        )
         print("snapshots:       ", len(m.snapshots))
         if m.has_current_snapshot:
             print("current-snapshot:", m.current_snapshot_id)

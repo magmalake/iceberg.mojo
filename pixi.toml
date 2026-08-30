@@ -2,7 +2,7 @@
 name = "iceberg-mojo"
 version = "0.1.0"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
-description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests and scan planning."
+description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning and data reads."
 preview = ["pixi-build"]
 channels = [
     "https://conda.modular.com/max-nightly",
@@ -10,17 +10,37 @@ channels = [
 ]
 platforms = ["osx-arm64", "linux-64"]
 
+# Sibling magmalake tins are consumed by *source path* (`-I ../x.mojo/src`),
+# never as a built `.mojopkg`: pixi-build-mojo emits a package compiled with
+# mojo-compiler 1.0.0 and the nightly compiler refuses to load it. CI checks
+# each sibling out next to this repository.
+#
+# Three of the siblings are FFI tins whose C shims must be *installed* into the
+# environment even though their Mojo code comes from the checkout next door:
+# objectstore (libcurl), zstd and lz4 (the two Parquet codecs Iceberg writers
+# actually use). Those are git source dependencies below — a path dependency
+# would break `pixi install` for a bare clone, because pixi solves every
+# environment even when it installs one.
+[dependencies]
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo" }
+zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo" }
+libcurl = ">=8,<9"
+# The REST-catalog mock server and the fixture/oracle tooling.
+python = ">=3.10,<3.14"
+
+[activation.env]
+ICEBERG_INCLUDES = "-I src -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src"
+
 [tasks]
-# Pure Mojo, no FFI. hashes.mojo is consumed by *source path*, not as a pixi
-# package: pixi-build-mojo emits a precompiled `.mojopkg`/`.mojoc` built with
-# mojo-compiler 1.0.0, and the nightly compiler rejects those outright
-# ("Precompiled file ... version 1.0.0 is older than compiler version
-# 1.1.0.dev..."), so a package dependency cannot satisfy both environments.
-# Consumers of *this* tin do the same: `-I ../iceberg.mojo/src`.
-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo -I src -I ../hashes.mojo/src -I ../avro.mojo/src -o build/iceberg-test && ./build/iceberg-test" }
+# Builds the test binary, brings up the REST mock (and MinIO when available),
+# runs everything, tears them down. See tests/run_tests.sh.
+test = { cmd = "bash tests/run_tests.sh" }
 # CI runs `check`: the tests plus a build of the CLI, so a broken CLI fails too.
 check = { depends-on = ["test", "cli"] }
-cli = { cmd = "mkdir -p build && mojo build src/main.mojo -I src -I ../hashes.mojo/src -I ../avro.mojo/src -o build/iceberg-mojo" }
+build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
+cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
+bench = { cmd = "mkdir -p build && mojo build bench/bench_scan.mojo $ICEBERG_INCLUDES -o build/iceberg-bench && ./build/iceberg-bench" }
 fmt = { cmd = "mojo format src tests" }
 format-check = { cmd = "mojo format --check src tests" }
 

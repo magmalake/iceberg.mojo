@@ -16,8 +16,10 @@ jobs:
         env: [default, stable]
     steps:
       # This repo consumes sibling magmalake tins by source path
-      # (`-I ../hashes.mojo/src`, `-I ../avro.mojo/src`), so CI has to lay the
-      # siblings out next to it.
+      # (`-I ../parquet.mojo/src`, …), so CI has to lay the siblings out next
+      # to it. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
+      # source dependencies, which is what installs their C shims into the
+      # environment; the checkouts here supply their Mojo sources.
       - uses: actions/checkout@v4
         with:
           path: iceberg.mojo
@@ -32,8 +34,65 @@ jobs:
           repository: magmalake/avro.mojo
           path: avro.mojo
 
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/thrift.mojo
+          path: thrift.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/snappy.mojo
+          path: snappy.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/parquet.mojo
+          path: parquet.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/roaring.mojo
+          path: roaring.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/objectstore.mojo
+          path: objectstore.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/zstd.mojo
+          path: zstd.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/lz4.mojo
+          path: lz4.mojo
+
+      # MinIO is the only S3 server that actually verifies SigV4 signatures,
+      # which is what makes the s3:// end-to-end test worth running. One static
+      # binary, so no service container; tests/run_tests.sh skips the S3 tests
+      # with a printed reason if this step does not produce one.
+      - name: Fetch MinIO
+        continue-on-error: true
+        run: |
+          mkdir -p iceberg.mojo/build
+          case "$(uname -s)/$(uname -m)" in
+            Linux/x86_64)  URL=https://dl.min.io/server/minio/release/linux-amd64/minio ;;
+            Linux/aarch64) URL=https://dl.min.io/server/minio/release/linux-arm64/minio ;;
+            Darwin/arm64)  URL=https://dl.min.io/server/minio/release/darwin-arm64/minio ;;
+            Darwin/x86_64) URL=https://dl.min.io/server/minio/release/darwin-amd64/minio ;;
+            *) echo "no MinIO build for this platform"; exit 0 ;;
+          esac
+          curl -sSLf -o iceberg.mojo/build/minio "$URL" && chmod +x iceberg.mojo/build/minio
+          ./iceberg.mojo/build/minio --version
+
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:
+          # Pinned: pixi.lock is written by this version, and a newer pixi
+          # rehashes the git source dependencies and then declares the lock
+          # out of date.
+          pixi-version: v0.71.1
           manifest-path: iceberg.mojo/pixi.toml
           environments: ${{ matrix.env }}
 
@@ -41,12 +100,15 @@ jobs:
         working-directory: iceberg.mojo
         run: pixi run -e ${{ matrix.env }} check
 
+      # Through `pixi run`, because the CLI dlopens the objectstore/zstd/lz4
+      # shims from $CONDA_PREFIX/lib and that variable only exists inside the
+      # environment.
       - name: CLI smoke
         working-directory: iceberg.mojo
         run: |
-          ./build/iceberg-mojo describe tests/fixtures/ident_part
-          ./build/iceberg-mojo schema tests/fixtures/evolved
-          ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
-          ./build/iceberg-mojo files tests/fixtures/ident_part \
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo describe tests/fixtures/ident_part
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo schema tests/fixtures/evolved
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo files tests/fixtures/ident_part \
             --filter '["=","region","eu"]' \
             --rebase 'file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db=tests/fixtures'

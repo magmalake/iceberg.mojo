@@ -1,21 +1,12 @@
-"""Iceberg REST catalog — request shaping and response parsing, no transport.
+"""Iceberg REST catalog — URLs, headers, responses, and the socket.
 
-**Status: no HTTP client.** A REST catalog client needs an HTTPS client with
-TLS, and as of this writing there is no Mojo HTTP package that resolves from
-conda on both of this repo's environments:
+The socket is objectstore.mojo's `HttpClient`, a libcurl-backed client behind a
+fixed-arity C shim. It exists because no Mojo HTTP package resolves from conda
+on either of this repo's environments (floki, flare, lightbug-http and
+fire-http were all tried; all reported "no candidates were found"), and an
+Iceberg REST catalog is HTTPS or nothing.
 
-    floki           -> no candidates were found for floki
-    flare           -> no candidates were found for flare
-    lightbug-http   -> no candidates were found
-    fire-http       -> no candidates were found
-
-(`flare` exists as a source checkout at github.com/ehsanmok/flare, but it is
-not published to a channel and builds OpenSSL FFI shims on activation, so
-depending on it would make this tin unbuildable in CI.)
-
-Rather than ship nothing, this module implements **everything about the REST
-catalog that does not need a socket**, so that plugging in a client later is a
-small, obvious change:
+Three layers, separable and separately tested:
 
 * `RestCatalogConfig` builds the URLs and headers for `GET /v1/config`,
   `loadTable`, `listNamespaces` and `listTables`, including the `prefix` a
@@ -24,28 +15,24 @@ small, obvious change:
 * `LoadTableResult` parses a `loadTable` response body — the inline
   `metadata`, its `metadata-location`, per-table `config`, and
   `storage-credentials` — into a real `TableMetadata`.
-
-Both halves are tested. What is missing is only the call itself: give
-`RestCatalog` a function that turns (method, url, headers) into a response body
-and the rest already works.
+* `RestCatalog` puts a client behind them, maps HTTP status codes onto Iceberg
+  error types, and hands back a `Table` whose `FileIO` is already configured
+  with whatever the catalog vended.
 """
 
 from std.collections import Dict
 
+from objectstore.http import Header, HttpClient, Response
+
 from ..io import FileIO
 from ..json import Json, json_quote, parse_json, substr
 from ..metadata import TableMetadata
+from .filesystem import Table
 
 
 comptime ACCESS_DELEGATION_HEADER = String("X-Iceberg-Access-Delegation")
 comptime VENDED_CREDENTIALS = String("vended-credentials")
 comptime REMOTE_SIGNING = String("remote-signing")
-
-
-@fieldwise_init
-struct Header(Copyable, Movable):
-    var name: String
-    var value: String
 
 
 @fieldwise_init
@@ -85,9 +72,7 @@ struct LoadTableResult(Copyable, Movable):
         var root = doc.root
         var mi = doc.get(root, "metadata")
         if mi < 0:
-            raise Error(
-                "iceberg: loadTable response has no 'metadata' object"
-            )
+            raise Error("iceberg: loadTable response has no 'metadata' object")
         var m = TableMetadata.from_json(doc, mi)
         var loc = String("")
         var has_loc = False
@@ -148,7 +133,8 @@ struct RestCatalogConfig(Copyable, Movable):
 
     # ── endpoints ──────────────────────────────────────────────────────────
     def config_url(self) -> String:
-        """`GET /v1/config` — always unprefixed; it is what supplies a prefix."""
+        """`GET /v1/config` — always unprefixed; it is what supplies a prefix.
+        """
         var u = self.uri + "/v1/config"
         if self.warehouse != "":
             u += "?warehouse=" + url_encode(self.warehouse)
@@ -260,6 +246,164 @@ def url_encode(s: String) -> String:
             out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
         else:
             out += "%"
-            out += String(_HEXUP[byte = Int(c >> 4)])
-            out += String(_HEXUP[byte = Int(c & 0xF)])
+            out += String(_HEXUP[byte=Int(c >> 4)])
+            out += String(_HEXUP[byte=Int(c & 0xF)])
     return out^
+
+
+# ── the socket ──────────────────────────────────────────────────────────────
+def rest_error(what: String, resp: Response) raises -> Error:
+    """Turn a REST error response into an Error naming what actually happened.
+
+    The spec's `ErrorModel` carries `{"error": {"message", "type", "code"}}`;
+    servers that do not send one still leave a status code worth reporting.
+    """
+    var detail = String("")
+    try:
+        var doc = parse_json(resp.text())
+        var e = doc.get(doc.root, "error")
+        if e >= 0:
+            var msg = doc.opt_string(e, "message", "")
+            var kind = doc.opt_string(e, "type", "")
+            if kind != "":
+                detail = kind + ": " + msg
+            else:
+                detail = msg^
+    except:
+        detail = resp.body_excerpt(200)
+
+    var name = String("error")
+    if resp.status == 400:
+        name = String("bad request")
+    elif resp.status == 401:
+        name = String("not authenticated")
+    elif resp.status == 403:
+        name = String("forbidden")
+    elif resp.status == 404:
+        name = String("not found")
+    elif resp.status == 409:
+        name = String("conflict")
+    elif resp.status == 419:
+        name = String("credentials expired")
+    elif resp.status == 503:
+        name = String("service unavailable")
+    elif resp.status >= 500:
+        name = String("server error")
+    return Error(
+        "iceberg: "
+        + what
+        + " failed with "
+        + String(resp.status)
+        + " ("
+        + name
+        + ")"
+        + (": " + detail if detail != "" else "")
+    )
+
+
+struct RestCatalog(Copyable, Movable):
+    """An Iceberg REST catalog reachable over HTTP(S).
+
+    ```mojo
+    var cat = RestCatalog("https://catalog.example.com")
+    cat.config.with_token(token)
+    cat.config.vend_credentials = True
+    cat.connect()                        # GET /v1/config, absorb the prefix
+    var t = cat.load_table("db", "orders")
+    ```
+
+    `connect()` is separate from construction because it does I/O, and a caller
+    that already knows the prefix (or is talking to a server without one) can
+    skip it.
+    """
+
+    var config: RestCatalogConfig
+    var client: HttpClient
+    var io: FileIO
+    """The `FileIO` template every loaded table starts from — rebases and
+    storage properties set here survive into each table."""
+
+    def __init__(out self, var uri: String):
+        self.config = RestCatalogConfig(uri^)
+        self.client = HttpClient()
+        self.io = FileIO.local()
+
+    def __init__(out self, var config: RestCatalogConfig, var io: FileIO):
+        self.config = config^
+        self.client = HttpClient()
+        self.io = io^
+
+    def _get(self, url: String, what: String) raises -> String:
+        var resp = self.client.get(url, self.config.headers())
+        if not resp.ok():
+            var err = rest_error(what, resp)
+            raise err^
+        return resp.text()
+
+    def _post(self, url: String, body: String, what: String) raises -> String:
+        var resp = self.client.post(url, body.as_bytes(), self.config.headers())
+        if not resp.ok():
+            var err = rest_error(what, resp)
+            raise err^
+        return resp.text()
+
+    def connect(mut self) raises:
+        """`GET /v1/config` — absorbs `overrides`, `defaults` and `prefix`."""
+        var body = self._get(self.config.config_url(), "GET /v1/config")
+        self.config.apply_config(body)
+
+    def list_namespaces(self, parent: String = "") raises -> List[String]:
+        return RestCatalogConfig.parse_namespaces(
+            self._get(
+                self.config.namespaces_url(parent), "GET /v1/.../namespaces"
+            )
+        )
+
+    def list_tables(self, namespace: String) raises -> List[String]:
+        return RestCatalogConfig.parse_tables(
+            self._get(self.config.tables_url(namespace), "GET /v1/.../tables")
+        )
+
+    def load_table_result(
+        self, namespace: String, table: String
+    ) raises -> LoadTableResult:
+        return LoadTableResult.parse(
+            self._get(
+                self.config.load_table_url(namespace, table),
+                "loadTable " + namespace + "." + table,
+            )
+        )
+
+    def table_exists(self, namespace: String, table: String) raises -> Bool:
+        var resp = self.client.head(
+            self.config.load_table_url(namespace, table), self.config.headers()
+        )
+        if resp.status == 404:
+            return False
+        if not resp.ok():
+            var err = rest_error("HEAD " + namespace + "." + table, resp)
+            raise err^
+        return True
+
+    def load_table(self, namespace: String, table: String) raises -> Table:
+        """Load a table, configuring its `FileIO` from what the catalog says.
+
+        The table's own `config` becomes storage properties (`s3.endpoint`,
+        `s3.region`, …) and every `storage-credentials` entry is registered
+        under its prefix, so a vended, per-prefix STS credential is used for
+        exactly the objects it was issued for.
+        """
+        var res = self.load_table_result(namespace, table)
+        var io = self.io.copy()
+        for entry in res.config.items():
+            io.set(entry.key, entry.value)
+        for k in range(len(res.storage_credentials)):
+            io.add_storage_credential(
+                res.storage_credentials[k].prefix,
+                res.storage_credentials[k].config.copy(),
+            )
+        var loc = res.metadata_location.copy()
+        var m = res.metadata.copy()
+        if m.location != "":
+            io.with_base(m.location)
+        return Table(m^, loc^, io^, namespace + "." + table)

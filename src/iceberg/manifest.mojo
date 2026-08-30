@@ -30,6 +30,7 @@ from std.collections import Dict
 from avro import DataFileReader, Value
 
 from .expressions import ColumnMetrics, FieldSummary
+from .io import FileIO
 from .json import Json, parse_json, json_quote
 from .schema import Schema
 from .transforms import PartitionSpec
@@ -99,8 +100,13 @@ struct ManifestFile(Copyable, Movable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
-            "ManifestFile(", self.manifest_path, ", spec=",
-            self.partition_spec_id, ", seq=", self.sequence_number, ")",
+            "ManifestFile(",
+            self.manifest_path,
+            ", spec=",
+            self.partition_spec_id,
+            ", seq=",
+            self.sequence_number,
+            ")",
         )
 
 
@@ -152,8 +158,13 @@ struct DataFile(Copyable, Movable, Writable):
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
-            "DataFile(", self.file_path, ", content=", self.content,
-            ", rows=", self.record_count, ")",
+            "DataFile(",
+            self.file_path,
+            ", content=",
+            self.content,
+            ", rows=",
+            self.record_count,
+            ")",
         )
 
 
@@ -230,7 +241,9 @@ def _int_map(rec: Value, name: String) raises -> List[Int64]:
     return out^
 
 
-def _bytes_map(rec: Value, name: String) raises -> Tuple[List[Int], List[List[UInt8]]]:
+def _bytes_map(
+    rec: Value, name: String
+) raises -> Tuple[List[Int], List[List[UInt8]]]:
     """Read an Iceberg `map<int, binary>` as parallel key/value lists."""
     var keys = List[Int]()
     var vals = List[List[UInt8]]()
@@ -254,8 +267,29 @@ def _metric_index(mut m: List[ColumnMetrics], field_id: Int) -> Int:
 
 # ── manifest lists ──────────────────────────────────────────────────────────
 def read_manifest_list(path: String) raises -> List[ManifestFile]:
-    """Read a snapshot's manifest list."""
-    var r = DataFileReader.open(path)
+    """Read a snapshot's manifest list from a local path."""
+    return read_manifest_list_bytes(read_local(path))
+
+
+def read_manifest_list_io(
+    io: FileIO, location: String
+) raises -> List[ManifestFile]:
+    """Read a snapshot's manifest list through a `FileIO`.
+
+    A manifest list is small and read whole; there is nothing to seek to.
+    """
+    return read_manifest_list_bytes(io.read_all(location))
+
+
+def read_local(path: String) raises -> List[UInt8]:
+    with open(path, "r") as f:
+        return f.read_bytes()
+
+
+def read_manifest_list_bytes(
+    var data: List[UInt8],
+) raises -> List[ManifestFile]:
+    var r = DataFileReader(data^)
     var out = List[ManifestFile]()
     while r.has_next():
         var rec = r.next()
@@ -354,7 +388,21 @@ def read_manifest(mf: ManifestFile) raises -> Manifest:
 
 
 def read_manifest_at(path: String, mf: ManifestFile) raises -> Manifest:
-    var r = DataFileReader.open(path)
+    """Read a manifest from a local path."""
+    return read_manifest_bytes(read_local(path), mf)
+
+
+def read_manifest_io(
+    io: FileIO, location: String, mf: ManifestFile
+) raises -> Manifest:
+    """Read a manifest through a `FileIO`."""
+    return read_manifest_bytes(io.read_all(location), mf)
+
+
+def read_manifest_bytes(
+    var data: List[UInt8], mf: ManifestFile
+) raises -> Manifest:
+    var r = DataFileReader(data^)
 
     # The manifest's own Avro file metadata carries the schema and spec that
     # its `partition` struct was typed with — not necessarily the table's

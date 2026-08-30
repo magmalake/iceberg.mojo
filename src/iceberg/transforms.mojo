@@ -123,9 +123,7 @@ struct Transform(Copyable, Movable, Writable):
         """True when `a <= b` implies `T(a) <= T(b)` — the projection rules
         for `<`/`>` only hold for these."""
         return (
-            self.kind == T_IDENTITY
-            or self.kind == T_TRUNCATE
-            or self.is_time()
+            self.kind == T_IDENTITY or self.kind == T_TRUNCATE or self.is_time()
         )
 
     def result_type(self, mut store: TypeStore, source: Int) raises -> Int:
@@ -193,9 +191,7 @@ def iceberg_hash(v: Datum) raises -> Int32:
         if d == 0.0:
             d = 0.0
         return iceberg_hash_long(Int64(bitcast[DType.uint64](d)))
-    raise Error(
-        "iceberg: no 32-bit hash is defined for " + primitive_name(k)
-    )
+    raise Error("iceberg: no 32-bit hash is defined for " + primitive_name(k))
 
 
 def bucket_of(v: Datum, n: Int) raises -> Int:
@@ -221,9 +217,7 @@ def truncate_of(v: Datum, w: Int) raises -> Datum:
         for j in range(lim):
             out.append(v.b[j])
         return Datum.binary_(out^)
-    raise Error(
-        "iceberg: truncate is not defined for " + primitive_name(k)
-    )
+    raise Error("iceberg: truncate is not defined for " + primitive_name(k))
 
 
 def truncate_codepoints(s: String, w: Int) -> String:
@@ -403,9 +397,7 @@ struct PartitionSpec(Copyable, Movable):
             else:
                 src = store.primitive(P_UNKNOWN)
             var rt = pf.transform.result_type(store, src)
-            fields.append(
-                NestedField.simple(pf.field_id, pf.name, False, rt)
-            )
+            fields.append(NestedField.simple(pf.field_id, pf.name, False, rt))
         var root = store.struct_(fields^)
         return Schema(store^, root, 0)
 
@@ -434,16 +426,12 @@ struct PartitionSpec(Copyable, Movable):
             else:
                 next_v1_id += 1
             fields.append(
-                PartitionField(
-                    src, sids^, fid, doc.req_string(fi, "name"), t^
-                )
+                PartitionField(src, sids^, fid, doc.req_string(fi, "name"), t^)
             )
         return Self(sid, fields^)
 
     @staticmethod
-    def from_fields_json(
-        doc: Json, i: Int, spec_id: Int
-    ) raises -> Self:
+    def from_fields_json(doc: Json, i: Int, spec_id: Int) raises -> Self:
         """v1's bare `partition-spec` array (no wrapping object)."""
         var fields = List[PartitionField]()
         var next_v1_id = PARTITION_DATA_ID_START
@@ -457,9 +445,7 @@ struct PartitionSpec(Copyable, Movable):
             else:
                 next_v1_id += 1
             fields.append(
-                PartitionField.single(
-                    src, fid, doc.req_string(fi, "name"), t^
-                )
+                PartitionField.single(src, fid, doc.req_string(fi, "name"), t^)
             )
         return Self(spec_id, fields^)
 
@@ -523,12 +509,14 @@ struct SortOrder(Copyable, Movable):
                 src = sids[0]
             if len(sids) == 0:
                 sids.append(src)
-            var dir = SORT_DESC if doc.opt_string(
-                fi, "direction", "asc"
-            ) == "desc" else SORT_ASC
-            var no = NULLS_LAST if doc.opt_string(
-                fi, "null-order", "nulls-first"
-            ) == "nulls-last" else NULLS_FIRST
+            var dir = (
+                SORT_DESC if doc.opt_string(fi, "direction", "asc")
+                == "desc" else SORT_ASC
+            )
+            var no = (
+                NULLS_LAST if doc.opt_string(fi, "null-order", "nulls-first")
+                == "nulls-last" else NULLS_FIRST
+            )
             fields.append(SortField(src, sids^, t^, dir, no))
         return Self(oid, fields^)
 
@@ -544,7 +532,8 @@ struct SortOrder(Copyable, Movable):
                 '"desc"' if f.direction == SORT_DESC else '"asc"'
             )
             out += ',"null-order":' + (
-                '"nulls-last"' if f.null_order == NULLS_LAST else '"nulls-first"'
+                '"nulls-last"' if f.null_order
+                == NULLS_LAST else '"nulls-first"'
             )
             out += "}"
         out += "]}"
