@@ -1,0 +1,15 @@
+{
+  "filter": "[\"and\",[\">\",\"id\",2],[\"not-null\",\"addr\"]]",
+  "tasks": [
+    {
+      "data_file": "00000-0-9c4a384f-144d-49e1-920e-b270fe92bc91.parquet",
+      "record_count": 4,
+      "delete_files": []
+    },
+    {
+      "data_file": "00000-0-aeb89c39-0133-4378-aa57-3e8dfdb139c9.parquet",
+      "record_count": 4,
+      "delete_files": []
+    }
+  ]
+}

@@ -917,6 +917,371 @@ def pyiceberg_append(table_dir, start, n, namespace="db"):
     return t.metadata_location.replace("file://", "")
 
 
+# ── nested columns ──────────────────────────────────────────────────────────
+def _canon(value, t):
+    """A nested value in the shape `nest/rows.json` is written in."""
+    from pyiceberg.types import ListType, MapType, StructType
+
+    if value is None:
+        return None
+    if isinstance(t, StructType):
+        if not isinstance(value, dict):
+            value = dict(value)
+        return {f.name: _canon(value.get(f.name), f.field_type) for f in t.fields}
+    if isinstance(t, ListType):
+        return [_canon(v, t.element_type) for v in value]
+    if isinstance(t, MapType):
+        pairs = list(value.items()) if isinstance(value, dict) else list(value)
+        return {
+            "keys": [_canon(k, t.key_type) for k, _ in pairs],
+            "values": [_canon(v, t.value_type) for _, v in pairs],
+        }
+    return value
+
+
+def _holds_a_struct(t):
+    """A list of structs, or a map whose value is a struct.
+
+    **PyIceberg 0.11.1 loses the null on exactly these.** A null `list<struct>`
+    comes back as `[]` — on the way *out* as well as on the way in: a fixture
+    it writes itself with `None` has `[]` in the Parquet file. pyarrow reading
+    the same file directly, DuckDB 1.5.5 and this library all say null, so the
+    relaxation below is applied to PyIceberg's answer only.
+    """
+    from pyiceberg.types import ListType, MapType, StructType
+
+    if isinstance(t, ListType):
+        return isinstance(t.element_type, StructType)
+    if isinstance(t, MapType):
+        return isinstance(t.value_type, StructType)
+    return False
+
+
+def _row_diff(got, want, types, relax):
+    """The name of the first column that differs, or None."""
+    from pyiceberg.types import ListType
+
+    for name in want:
+        g, w = got.get(name), want[name]
+        if g == w:
+            continue
+        if relax and w is None and _holds_a_struct(types[name]):
+            empty = [] if isinstance(types[name], ListType) else {
+                "keys": [], "values": []
+            }
+            if g == empty:
+                continue
+        return name
+    return None
+
+
+def _nested_rows(schema, records):
+    out = {}
+    for rec in records:
+        out[rec["id"]] = {
+            f.name: _canon(rec.get(f.name), f.field_type)
+            for f in schema.fields
+            if f.name != "id"
+        }
+    return out
+
+
+def _leaf_names(schema):
+    """{field id: dotted name} for every field of a schema, nested included."""
+    out = {}
+
+    def walk(prefix, t):
+        from pyiceberg.types import ListType, MapType, StructType
+
+        if isinstance(t, StructType):
+            for f in t.fields:
+                name = f.name if not prefix else prefix + "." + f.name
+                out[f.field_id] = name
+                walk(name, f.field_type)
+        elif isinstance(t, ListType):
+            out[t.element_id] = prefix + ".element"
+            walk(prefix + ".element", t.element_type)
+        elif isinstance(t, MapType):
+            out[t.key_id] = prefix + ".key"
+            walk(prefix + ".key", t.key_type)
+            out[t.value_id] = prefix + ".value"
+            walk(prefix + ".value", t.value_type)
+
+    walk("", schema.as_struct())
+    return out
+
+
+def _metrics_by_name(table):
+    """`inspect.files()` counts, summed over the files and keyed by name."""
+    names = _leaf_names(table.schema())
+    files = table.inspect.files()
+    totals = {"value_counts": {}, "null_value_counts": {}}
+    bounds = set()
+    for key in ("value_counts", "null_value_counts"):
+        for entry in files.column(key).to_pylist():
+            for fid, count in dict(entry or {}).items():
+                n = names.get(fid)
+                if n is None:
+                    continue
+                totals[key][n] = totals[key].get(n, 0) + count
+    for entry in files.column("lower_bounds").to_pylist():
+        for fid in dict(entry or {}):
+            if fid in names:
+                bounds.add(names[fid])
+    return totals, bounds
+
+
+def verify_nested_table(name, table_dir, con, want, reference):
+    """A table with structs, lists and maps in it, read by somebody else.
+
+    The expectation is `nest/rows.json` — the literal JSON the writer was fed
+    — so what this checks end to end is: JSON in, our Arrow builder, our
+    Parquet writer, PyIceberg's or DuckDB's reader, the same JSON out.
+    """
+    from pyiceberg.table import StaticTable
+
+    meta = latest_metadata(table_dir)
+    t = StaticTable.from_metadata("file://" + meta)
+    facts = {"name": "nest." + name, "format-version": t.metadata.format_version}
+
+    got = _nested_rows(t.schema(), t.scan().to_arrow().to_pylist())
+    check(
+        set(got) == set(want),
+        "nest.%s: ids %s, expected %s" % (name, sorted(got), sorted(want)),
+    )
+    types = {f.name: f.field_type for f in t.schema().fields}
+    for i in sorted(want):
+        bad = _row_diff(got[i], want[i], types, relax=True)
+        check(
+            not bad,
+            "nest.%s row %d, column %s:\n     got %s\n    want %s"
+            % (name, i, bad, json.dumps(got[i], sort_keys=True),
+               json.dumps(want[i], sort_keys=True)),
+        )
+    facts["pyiceberg_rows"] = len(want)
+
+    if con is not None:
+        try:
+            cur = con.execute("SELECT * FROM iceberg_scan(?)", [meta])
+            cols = [d[0] for d in cur.description]
+            records = [dict(zip(cols, r)) for r in cur.fetchall()]
+            duck = _nested_rows(t.schema(), records)
+            check(
+                set(duck) == set(want),
+                "nest.%s/duckdb: ids %s" % (name, sorted(duck)),
+            )
+            for i in sorted(want):
+                bad = _row_diff(duck[i], want[i], types, relax=False)
+                check(
+                    not bad,
+                    "nest.%s/duckdb row %d, column %s:\n     got %s\n"
+                    "    want %s"
+                    % (name, i, bad, json.dumps(duck[i], sort_keys=True),
+                       json.dumps(want[i], sort_keys=True)),
+                )
+            facts["duckdb_rows"] = len(want)
+        except Failure:
+            raise
+        except Exception as e:
+            facts["duckdb_error"] = str(e).split("\n")[0]
+
+    # ── metrics for the nested leaves ──────────────────────────────────────
+    # The gate is against the *truth* counted from `nest/rows.json`, not
+    # against PyIceberg: pyarrow 25.0.1 miscounts a fixed-width leaf under a
+    # `list<struct>` (see `reference_disagrees` below). PyIceberg's numbers are
+    # compared too, and every leaf on which pyarrow's own statistics contradict
+    # its own data is named in the report rather than silently accepted.
+    mine, my_bounds = _metrics_by_name(t)
+    theirs, their_bounds, truth = reference
+    for key in ("value_counts", "null_value_counts"):
+        check(
+            mine[key] == truth[key],
+            "nest.%s %s differ from the rows written:\n     ours %s\n    "
+            "truth %s" % (name, key, json.dumps(mine[key], sort_keys=True),
+                          json.dumps(truth[key], sort_keys=True)),
+        )
+    disagree = sorted(
+        n for n in truth["null_value_counts"]
+        if theirs["null_value_counts"].get(n) != truth["null_value_counts"][n]
+    )
+    for key in ("value_counts", "null_value_counts"):
+        for n in mine[key]:
+            if n in disagree:
+                continue
+            check(
+                mine[key][n] == theirs[key].get(n),
+                "nest.%s %s[%s] = %r, PyIceberg says %r"
+                % (name, key, n, mine[key][n], theirs[key].get(n)),
+            )
+    facts["metrics_leaves"] = len(mine["value_counts"])
+    if disagree:
+        facts["pyarrow_miscounts"] = disagree
+    # Deliberate difference: PyIceberg downgrades any column whose name has a
+    # dot in it to COUNTS (io/pyarrow.py, `is_nested`), so it writes bounds for
+    # top-level columns only. We keep the truncated bounds Java-style, which is
+    # what lets `addr.zip > 5` prune a whole file.
+    facts["bounds_ours"] = sorted(my_bounds)
+    facts["bounds_pyiceberg"] = sorted(their_bounds)
+    check(
+        their_bounds <= my_bounds,
+        "nest.%s: PyIceberg has bounds we do not: %s"
+        % (name, sorted(their_bounds - my_bounds)),
+    )
+    return facts
+
+
+def pyiceberg_nested_reference(warehouse, rows):
+    """The same rows, written by PyIceberg, as a metrics yardstick.
+
+    PyIceberg renumbers a schema on `create_table`, so the comparison is by
+    dotted column name rather than by field id.
+    """
+    import pyarrow as pa
+    from pyiceberg.catalog.sql import SqlCatalog
+    from pyiceberg.schema import Schema
+    from pyiceberg.types import (
+        IntegerType,
+        ListType,
+        LongType,
+        MapType,
+        NestedField,
+        StringType,
+        StructType,
+    )
+
+    root = os.path.join(warehouse, "nestref")
+    os.makedirs(os.path.join(root, "warehouse"), exist_ok=True)
+    cat = SqlCatalog(
+        "ref",
+        **{
+            "uri": "sqlite:///" + os.path.join(root, "catalog.db"),
+            "warehouse": "file://" + os.path.join(root, "warehouse"),
+        },
+    )
+    try:
+        cat.create_namespace("ref")
+    except Exception:
+        pass
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=True),
+        NestedField(2, "addr", StructType(
+            NestedField(10, "city", StringType(), required=False),
+            NestedField(11, "zip", IntegerType(), required=False),
+        ), required=False),
+        NestedField(3, "tags", ListType(
+            element_id=20, element_type=StringType(), element_required=False
+        ), required=False),
+        NestedField(4, "props", MapType(
+            key_id=30, key_type=StringType(), value_id=31,
+            value_type=LongType(), value_required=False,
+        ), required=False),
+        NestedField(5, "items", ListType(
+            element_id=40,
+            element_type=StructType(
+                NestedField(41, "sku", StringType(), required=False),
+                NestedField(42, "qty", IntegerType(), required=False),
+            ),
+            element_required=False,
+        ), required=False),
+    )
+    try:
+        cat.drop_table("ref.nested")
+    except Exception:
+        pass
+    import shutil
+
+    shutil.rmtree(os.path.join(root, "warehouse", "ref", "nested"), ignore_errors=True)
+    t = cat.create_table("ref.nested", schema=schema)
+    sa = t.schema().as_arrow()
+    data = {}
+    for f in t.schema().fields:
+        if f.name == "props":
+            values = [
+                None if r["props"] is None
+                else list(zip(r["props"]["keys"], r["props"]["values"]))
+                for r in rows
+            ]
+        else:
+            values = [r[f.name] for r in rows]
+        data[f.name] = pa.array(values, type=sa.field(f.name).type)
+    # Two appends, as the Mojo writer does, so the file counts line up.
+    t.append(pa.table({k: v[:6] for k, v in data.items()}, schema=sa))
+    t.append(pa.table({k: v[6:] for k, v in data.items()}, schema=sa))
+    theirs, bounds = _metrics_by_name(t)
+    return theirs, bounds, _counted_metrics(rows, t.schema())
+
+
+def _counted_metrics(rows, schema):
+    """What the Parquet level records *must* say, counted from the rows.
+
+    One slot per leaf per row, except under a repeated group: a list with `n`
+    entries contributes `n` slots to every leaf beneath it, and an empty **or**
+    null one contributes a single null slot — which is exactly one level
+    record, the shape Dremel gives an absent container.
+    """
+    out = {}
+    for r in rows:
+        _emit(r, schema.as_struct(), "", out)
+    return {
+        "value_counts": {k: v[0] for k, v in out.items()},
+        "null_value_counts": {k: v[1] for k, v in out.items()},
+    }
+
+
+def _emit(value, t, prefix, out):
+    from pyiceberg.types import ListType, MapType, StructType
+
+    if isinstance(t, StructType):
+        for f in t.fields:
+            name = f.name if not prefix else prefix + "." + f.name
+            v = None if value is None else value.get(f.name)
+            _emit(v, f.field_type, name, out)
+        return
+    if isinstance(t, ListType):
+        name = prefix + ".element"
+        if not value:
+            _emit_absent(t.element_type, name, out)
+        else:
+            for v in value:
+                _emit(v, t.element_type, name, out)
+        return
+    if isinstance(t, MapType):
+        kn, vn = prefix + ".key", prefix + ".value"
+        pairs = []
+        if value:
+            pairs = list(zip(value["keys"], value["values"]))
+        if not pairs:
+            _emit_absent(t.key_type, kn, out)
+            _emit_absent(t.value_type, vn, out)
+        else:
+            for k, v in pairs:
+                _emit(k, t.key_type, kn, out)
+                _emit(v, t.value_type, vn, out)
+        return
+    slot = out.setdefault(prefix, [0, 0])
+    slot[0] += 1
+    if value is None:
+        slot[1] += 1
+
+
+def _emit_absent(t, prefix, out):
+    """One null slot for every leaf under an absent container."""
+    from pyiceberg.types import ListType, MapType, StructType
+
+    if isinstance(t, StructType):
+        for f in t.fields:
+            _emit_absent(f.field_type, prefix + "." + f.name, out)
+    elif isinstance(t, ListType):
+        _emit_absent(t.element_type, prefix + ".element", out)
+    elif isinstance(t, MapType):
+        _emit_absent(t.key_type, prefix + ".key", out)
+        _emit_absent(t.value_type, prefix + ".value", out)
+    else:
+        slot = out.setdefault(prefix, [0, 0])
+        slot[0] += 1
+        slot[1] += 1
+
+
 def main():
     warehouse = os.path.abspath(sys.argv[1])
     do_append = "--append-with-pyiceberg" in sys.argv
@@ -975,6 +1340,38 @@ def main():
             if not os.path.isdir(os.path.join(delns, name, "metadata")):
                 failures.append("del.%s was never written" % name)
                 print("FAIL del.%s: missing" % name)
+
+    nest = os.path.join(warehouse, "nest")
+    rows_json = os.path.join(nest, "rows.json")
+    if os.path.isdir(nest) and os.path.exists(rows_json):
+        with open(rows_json) as fh:
+            rows = json.load(fh)
+        want = {r["id"]: {k: v for k, v in r.items() if k != "id"} for r in rows}
+        try:
+            reference = pyiceberg_nested_reference(warehouse, rows)
+        except Exception as e:
+            reference = (
+                {"value_counts": {}, "null_value_counts": {}},
+                set(),
+                {"value_counts": {}, "null_value_counts": {}},
+            )
+            failures.append("pyiceberg nested reference: %s" % e)
+            print("FAIL nested reference: %s: %s" % (type(e).__name__, e))
+        for name in sorted(os.listdir(nest)):
+            table_dir = os.path.join(nest, name)
+            if not os.path.isdir(os.path.join(table_dir, "metadata")):
+                continue
+            try:
+                report.append(
+                    verify_nested_table(name, table_dir, con, want, reference)
+                )
+                print("ok   nest.%s" % name)
+            except Failure as e:
+                failures.append(str(e))
+                print("FAIL nest.%s: %s" % (name, e))
+            except Exception as e:
+                failures.append("nest.%s: %s" % (name, e))
+                print("FAIL nest.%s: %s: %s" % (name, type(e).__name__, e))
 
     if do_append and not failures:
         # PyIceberg must still be able to *write* to a table we deleted from.

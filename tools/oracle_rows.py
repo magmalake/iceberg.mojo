@@ -55,6 +55,9 @@ import uuid as _uuid
 from pyiceberg.table import StaticTable
 from pyiceberg.types import (
     BinaryType,
+    ListType,
+    MapType,
+    StructType,
     BooleanType,
     DateType,
     DecimalType,
@@ -72,6 +75,8 @@ from pyiceberg.types import (
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from oracle_pyiceberg import (  # noqa: E402
+    NESTED_TABLE_PROJECTIONS,
+    NESTED_TABLE_SQL,
     PYICEBERG_TABLE_FILTERS,
     catalog_metadata_basenames,
     find_metadata,
@@ -122,8 +127,62 @@ def encode(value, iceberg_type):
         return binascii.hexlify(bytes(value)).decode()
     if isinstance(t, DecimalType):
         return str(decimal.Decimal(value))
-    # Anything else (struct/list/map) is JSON, which is enough to compare.
+    if isinstance(t, (StructType, ListType, MapType)):
+        return json.dumps(
+            canonical(value, t), separators=(",", ":"), ensure_ascii=False
+        )
     return json.dumps(value, sort_keys=True, default=str)
+
+
+def canonical(value, t):
+    """A nested value in the shape `ScanResult.cell` prints.
+
+    A struct is an object keyed by **field name**, a list is an array, and a
+    map is `{"keys": [...], "values": [...]}` — Appendix D's own shape, except
+    that a struct is keyed by name rather than by field id, because these are
+    rows a caller reads rather than a default stored in metadata. Leaves are
+    plain JSON: a number for an integer, a quoted string for text, a quoted
+    ISO-8601 string for a date or a timestamp. Map entries keep the order the
+    file stores them in; the fixtures write their keys in ascending order, so
+    the two oracles and this library all agree without anyone sorting.
+    """
+    if value is None:
+        return None
+    if isinstance(t, StructType):
+        if not isinstance(value, dict):
+            value = dict(value)
+        return {f.name: canonical(value.get(f.name), f.field_type) for f in t.fields}
+    if isinstance(t, ListType):
+        return [canonical(v, t.element_type) for v in value]
+    if isinstance(t, MapType):
+        pairs = list(value.items()) if isinstance(value, dict) else list(value)
+        return {
+            "keys": [canonical(k, t.key_type) for k, _ in pairs],
+            "values": [canonical(v, t.value_type) for _, v in pairs],
+        }
+    return _leaf_json(value, t)
+
+
+def _leaf_json(value, t):
+    """One primitive, as `Datum.to_json` would print it inside a container."""
+    if value is None:
+        return None
+    if isinstance(t, BooleanType):
+        return bool(value)
+    if isinstance(t, (IntegerType, LongType)):
+        return int(value)
+    if isinstance(t, (FloatType, DoubleType)):
+        return float(value)
+    if isinstance(t, StringType):
+        return str(value)
+    if isinstance(t, UUIDType):
+        return str(value).lower()
+    if isinstance(t, (BinaryType, FixedType)):
+        return binascii.hexlify(bytes(value)).decode()
+    if isinstance(t, DecimalType):
+        return str(decimal.Decimal(value))
+    # date / time / timestamp: the ISO-8601 spelling Appendix D uses.
+    return str(value)
 
 
 def sort_key(row):
@@ -146,21 +205,38 @@ def pyiceberg_rows(table, dsl):
     return names, encode_rows(names, types, arrow.to_pylist())
 
 
-def duckdb_rows(table, metadata_path):
+def duckdb_rows(table, metadata_path, where=None):
     import duckdb
 
     schema = table.schema()
     names = [f.name for f in schema.fields]
     types = [f.field_type for f in schema.fields]
+    sql = "SELECT * FROM iceberg_scan(?) AS t"
+    if where:
+        sql += " WHERE " + where
     con = duckdb.connect()
     con.execute("INSTALL iceberg; LOAD iceberg;")
     try:
-        cur = con.execute("SELECT * FROM iceberg_scan(?)", [metadata_path])
+        cur = con.execute(sql, [metadata_path])
         cols = [d[0] for d in cur.description]
         records = [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
         con.close()
     return names, encode_rows(names, types, records)
+
+
+def pyiceberg_projection(table, fields):
+    """`select(["a.b", "c"])` — a projection that reaches inside a struct.
+
+    PyIceberg returns the columns in *schema* order whatever order they were
+    asked in, so the comparison is by name, and the struct comes back holding
+    only the fields that were selected.
+    """
+    arrow = table.scan(selected_fields=tuple(fields)).to_arrow()
+    projected = table.schema().select(*fields)
+    names = [f.name for f in projected.fields]
+    types = [f.field_type for f in projected.fields]
+    return names, encode_rows(names, types, arrow.to_pylist())
 
 
 def main(argv):
@@ -173,9 +249,13 @@ def main(argv):
         catalog_db = argv[argv.index("--catalog") + 1]
     hints = catalog_metadata_basenames(catalog_db) if catalog_db else {}
 
+    only = ()
+    if "--only" in argv:
+        only = tuple(argv[argv.index("--only") + 1].split(","))
     names = sorted(
         d for d in os.listdir(fixtures)
         if os.path.isdir(os.path.join(fixtures, d, "metadata"))
+        and (not only or d in only)
     )
     summary = {}
     for name in names:
@@ -196,12 +276,17 @@ def main(argv):
                         filters.append(fh.read().strip())
 
         ok = 0
+        refused = []
         for k, dsl in enumerate(filters):
             try:
                 cols, rows = pyiceberg_rows(table, dsl)
             except Exception as e:
+                # One filter PyIceberg cannot answer does not stop the rest:
+                # `IS NULL` on a list or a map raises in 0.11.1, and DuckDB
+                # covers it below.
                 info.setdefault("pyiceberg_error", str(e).split("\n")[0])
-                break
+                refused.append(k)
+                continue
             with open(
                 os.path.join(oracle_dir, "rows_pyiceberg_%d.json" % k), "w"
             ) as fh:
@@ -212,6 +297,8 @@ def main(argv):
                 fh.write("\n")
             ok += 1
         info["pyiceberg_filters"] = ok
+        if refused:
+            info["pyiceberg_refused"] = refused
 
         try:
             cols, rows = duckdb_rows(table, meta)
@@ -224,6 +311,53 @@ def main(argv):
             info["duckdb_rows"] = len(rows)
         except Exception as e:
             info["duckdb_error"] = str(e).split("\n")[0]
+
+        # DuckDB, filter by filter, for the nested tables: a second and wholly
+        # independent answer, and the only one where PyIceberg refuses.
+        sql = NESTED_TABLE_SQL.get(name)
+        if sql:
+            n_sql = 0
+            for k, where in enumerate(sql):
+                try:
+                    cols, rows = duckdb_rows(table, meta, where)
+                except Exception as e:
+                    info.setdefault(
+                        "duckdb_filter_error", str(e).split("\n")[0]
+                    )
+                    continue
+                with open(
+                    os.path.join(oracle_dir, "rows_duckdb_%d.json" % k), "w"
+                ) as fh:
+                    json.dump(
+                        {"filter": filters[k], "sql": where,
+                         "columns": cols, "rows": rows},
+                        fh, indent=1,
+                    )
+                    fh.write("\n")
+                n_sql += 1
+            info["duckdb_filters"] = n_sql
+
+        projections = NESTED_TABLE_PROJECTIONS.get(name)
+        if projections:
+            n_proj = 0
+            for k, fields in enumerate(projections):
+                try:
+                    cols, rows = pyiceberg_projection(table, fields)
+                except Exception as e:
+                    info.setdefault(
+                        "projection_error", str(e).split("\n")[0]
+                    )
+                    continue
+                with open(
+                    os.path.join(oracle_dir, "rows_project_%d.json" % k), "w"
+                ) as fh:
+                    json.dump(
+                        {"select": fields, "columns": cols, "rows": rows},
+                        fh, indent=1,
+                    )
+                    fh.write("\n")
+                n_proj += 1
+            info["projections"] = n_proj
         summary[name] = info
         print("%-16s %s" % (name, json.dumps(info)))
 

@@ -1,0 +1,36 @@
+{
+ "filter": "[\"is-null\",\"tags\"]",
+ "sql": "tags IS NULL",
+ "columns": [
+  "id",
+  "addr",
+  "tags",
+  "props",
+  "items",
+  "matrix",
+  "who",
+  "deep"
+ ],
+ "rows": [
+  [
+   "3",
+   "{\"city\":null,\"zip\":30}",
+   null,
+   null,
+   "[]",
+   null,
+   "{\"keys\":[],\"values\":[]}",
+   null
+  ],
+  [
+   "8",
+   "{\"city\":\"us\",\"zip\":80}",
+   null,
+   "{\"keys\":[],\"values\":[]}",
+   "[]",
+   "[[8],[9,10]]",
+   "{\"keys\":[],\"values\":[]}",
+   "{\"inner\":[{\"tag\":\"t4\"},{\"tag\":\"t5\"}]}"
+  ]
+ ]
+}

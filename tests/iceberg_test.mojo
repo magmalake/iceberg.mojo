@@ -5,6 +5,7 @@ values were produced by iceberg-rust 0.10.1 (through iceberg-rs.mojo) or by
 PyIceberg, never by this implementation. See `tests/fixtures/PROVENANCE.md`.
 """
 
+from std.collections import Dict
 from std.memory import bitcast
 from std.os import getenv, makedirs
 from std.pathlib import Path
@@ -94,6 +95,7 @@ from iceberg.write import (
     truncate_upper,
 )
 from parquet import RecordBatch
+from parquet.arrow import AT_LIST, AT_MAP, AT_STRUCT
 from iceberg.manifest import (
     ManifestFile,
     ManifestEntry,
@@ -637,7 +639,7 @@ def test_partition_type() raises:
 # ══ table metadata ══════════════════════════════════════════════════════════
 comptime FIXTURE_TABLES = String(
     "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,"
-    "deletes_v2,dv_v3"
+    "deletes_v2,dv_v3,nested_v2,nested_evo_v2,nested_part_v2"
 )
 """The tables with a *plan* oracle. `eq_deletes_v2` is deliberately absent:
 PyIceberg 0.11.1 refuses to plan a scan of a table with equality deletes at
@@ -646,8 +648,18 @@ oracle for it — DuckDB supplies its row oracle instead."""
 
 comptime ALL_FIXTURE_TABLES = String(
     "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,"
-    "deletes_v2,dv_v3,eq_deletes_v2"
+    "deletes_v2,dv_v3,eq_deletes_v2,nested_v2,nested_evo_v2,nested_part_v2"
 )
+
+comptime NESTED_FIXTURE_TABLES = String(
+    "nested_v2,nested_evo_v2,nested_part_v2"
+)
+"""The three fixtures with structs, lists and maps in them, written by
+PyIceberg 0.11.1 — see tools/make_nested_tables.py."""
+
+
+def nested_fixture_table_names() -> List[String]:
+    return _split_commas(NESTED_FIXTURE_TABLES)
 
 
 def all_fixture_table_names() -> List[String]:
@@ -1961,7 +1973,7 @@ def test_table_load_and_scan() raises:
 def test_filesystem_catalog() raises:
     var cat = FilesystemCatalog(FIXTURES, fixture_io())
     var names = cat.list_tables("")
-    assert_equal(len(names), 9, "expected 9 fixture tables")
+    assert_equal(len(names), 12, "expected 12 fixture tables")
     assert_true(cat.table_exists("", "ident_part"))
     assert_false(cat.table_exists("", "no_such_table"))
     var t = cat.load_table("", "bucket_part")
@@ -2806,7 +2818,14 @@ def test_to_table_matches_pyiceberg_rows() raises:
         "rows",
     )
     assert_equal(failures, "", "row mismatches vs PyIceberg:" + failures)
-    assert_equal(cases, 48, "expected 8 tables x 6 filters")
+    assert_equal(
+        cases,
+        65,
+        (
+            "expected 11 tables x 6 filters, less the 1\n"
+            "        PyIceberg refuses (is-null on a list)"
+        ),
+    )
 
 
 def test_to_table_matches_duckdb_rows() raises:
@@ -2829,7 +2848,281 @@ def test_to_table_matches_duckdb_rows() raises:
             failures += "\n  " + table + _diff(mine, want[1])
     print("    rows vs DuckDB:", cases, "tables,", rows_compared, "rows")
     assert_equal(failures, "", "row mismatches vs DuckDB:" + failures)
-    assert_equal(cases, 9, "expected 9 tables with a DuckDB oracle")
+    assert_equal(cases, 12, "expected 12 tables with a DuckDB oracle")
+
+
+def test_nested_rows_match_duckdb_filters() raises:
+    """Gate (a), nested: three tables x six filters, against DuckDB 1.5.5.
+
+    DuckDB reads the nested columns and evaluates the predicate itself, so
+    this is a second and wholly independent answer — and the only one for
+    `is-null` on a list, which PyIceberg 0.11.1 cannot even project
+    ("Cannot explicitly project List or Map types").
+    """
+    var tables = nested_fixture_table_names()
+    var cases = 0
+    var rows_compared = 0
+    var failures = String("")
+    for t in range(len(tables)):
+        var table = tables[t]
+        for k in range(6):
+            var path = (
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/rows_duckdb_"
+                + String(k)
+                + ".json"
+            )
+            if not _file_exists(path):
+                continue
+            var want = oracle_rows(path)
+            var dsl = read_file(
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/plan_"
+                + String(k)
+                + ".filter.txt"
+            ).strip()
+            var got = fixture_scan(table).filter(String(dsl)).to_table()
+            var mine = encoded_rows(got)
+            cases += 1
+            rows_compared += len(mine)
+            if len(mine) != len(want[1]) or _diff(mine, want[1]) != "":
+                failures += (
+                    "\n  "
+                    + table
+                    + " filter "
+                    + String(k)
+                    + " "
+                    + String(dsl)
+                    + _diff(mine, want[1])
+                )
+    print("    nested rows vs DuckDB:", cases, "cases,", rows_compared, "rows")
+    assert_equal(failures, "", "nested row mismatches vs DuckDB:" + failures)
+    assert_equal(cases, 18, "expected 3 nested tables x 6 filters")
+
+
+def test_nested_subfield_projection_matches_pyiceberg() raises:
+    """Gate (a), projection: `select(["a.b", "c"])` gives back the column `a`
+    holding only `b`, with the same cells PyIceberg produces.
+
+    PyIceberg returns the columns in schema order whatever order they were
+    asked in, so the comparison is by name: each oracle column is looked up
+    in our result and its cells compared.
+    """
+    var tables = nested_fixture_table_names()
+    var cases = 0
+    var failures = String("")
+    for t in range(len(tables)):
+        var table = tables[t]
+        for k in range(8):
+            var path = (
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/rows_project_"
+                + String(k)
+                + ".json"
+            )
+            if not _file_exists(path):
+                continue
+            var doc = parse_json(read_file(path))
+            var sel = List[String]()
+            var si = doc.get(doc.root, "select")
+            for j in range(doc.size(si)):
+                sel.append(doc.as_string(doc.at(si, j)))
+            var want = oracle_rows(path)
+            var got = fixture_scan(table).select(sel.copy()).to_table()
+            # Same columns, whatever order each side puts them in.
+            var mine_names = List[String]()
+            for c in range(got.num_columns()):
+                mine_names.append(got.name(c))
+            _sort_strings(mine_names)
+            var want_names = want[0].copy()
+            _sort_strings(want_names)
+            var same_names = len(mine_names) == len(want_names)
+            if same_names:
+                for c in range(len(mine_names)):
+                    if mine_names[c] != want_names[c]:
+                        same_names = False
+            if not same_names:
+                failures += (
+                    "\n  "
+                    + table
+                    + " projection "
+                    + String(k)
+                    + ": columns differ"
+                )
+                cases += 1
+                continue
+            var mine = _rows_in_oracle_order(got, want[0])
+            cases += 1
+            if len(mine) != len(want[1]) or _diff(mine, want[1]) != "":
+                failures += (
+                    "\n  "
+                    + table
+                    + " projection "
+                    + String(k)
+                    + _diff(mine, want[1])
+                )
+    print("    nested sub-field projections vs PyIceberg:", cases, "cases")
+    assert_equal(failures, "", "projection mismatches:" + failures)
+    assert_equal(cases, 7, "expected 7 sub-field projections")
+
+
+def _rows_in_oracle_order(
+    result: ScanResult, order: List[String]
+) raises -> List[String]:
+    """`encoded_rows`, with the columns permuted into the oracle's order."""
+    var slots = List[Int]()
+    for k in range(len(order)):
+        var at = -1
+        for c in range(result.num_columns()):
+            if result.name(c) == order[k]:
+                at = c
+                break
+        slots.append(at)
+    var rows = List[String]()
+    for r in range(result.num_rows()):
+        var line = String("")
+        for k in range(len(slots)):
+            if k > 0:
+                line += "\x01"
+            line += oracle_cell(result.value(r, slots[k]))
+        rows.append(line^)
+    _sort_strings(rows)
+    return rows^
+
+
+def test_nested_batches_export_over_the_c_data_interface() raises:
+    """Gate (c): a nested scan batch is exportable as it stands.
+
+    A struct, a list and a map each come out of the scan as a tree in the
+    column's own arena; `to_batch` renumbers them into the batch's arena and
+    `export_c` walks the children. The format strings are the Arrow ones —
+    `+s`, `+l`, `+m` — and a map's child is the two-field `entries` struct.
+    """
+    var batches = fixture_scan("nested_v2").to_batches()
+    assert_true(len(batches) > 0)
+    var rows = 0
+    for k in range(len(batches)):
+        ref b = batches[k]
+        assert_equal(b.num_columns(), 8)
+        rows += b.num_rows
+        for c in range(b.num_columns()):
+            var exported = b.export_c(c)
+            assert_true(exported.array != 0, "ArrowArray address")
+            assert_true(exported.schema != 0, "ArrowSchema address")
+        assert_equal(b.type(1).id, AT_STRUCT)
+        assert_equal(b.type(2).id, AT_LIST)
+        assert_equal(b.type(3).id, AT_MAP)
+        assert_equal(len(b.column(3).children), 1)
+        assert_equal(len(b.child(b.roots[3], 0).children), 2)
+    assert_equal(rows, fixture_scan("nested_v2").to_table().num_rows())
+
+
+def test_nested_is_null_on_containers() raises:
+    """`is-null` binds against a struct, a list and a map; anything else on a
+    container is refused, and so is any predicate inside one."""
+    var scan = fixture_scan("nested_v2")
+    assert_equal(scan.filter('["is-null","tags"]').to_table().num_rows(), 2)
+    assert_equal(scan.filter('["is-null","props"]').to_table().num_rows(), 1)
+    assert_equal(scan.filter('["is-null","addr"]').to_table().num_rows(), 2)
+    assert_equal(scan.filter('["not-null","deep"]').to_table().num_rows(), 7)
+    with assert_raises():
+        _ = scan.filter('["=","tags","a"]').to_table()
+    with assert_raises():
+        _ = scan.filter('["=","tags.element","a"]').to_table()
+    with assert_raises():
+        _ = scan.filter('["=","props.value",1]').to_table()
+
+
+def test_nested_schema_evolution_inside_a_struct() raises:
+    """A field added, a field renamed and an `int` promoted to `long`, all
+    inside a struct, resolved by field id against the older file."""
+    var schema = fixture_scan("nested_evo_v2").current_schema()
+    assert_equal(
+        schema.store.type_name(schema.find_by_name("addr.zip").type), "long"
+    )
+    assert_true(schema.has_name("addr.town"))
+    assert_true(schema.has_name("addr.country"))
+    assert_false(schema.has_name("addr.city"))
+
+    var rows = fixture_scan("nested_evo_v2").to_table()
+    var by_id = Dict[Int64, String]()
+    for r in range(rows.num_rows()):
+        by_id[rows.value(r, 0).i] = rows.cell(r, 1)
+    # Written before the change: `country` is absent from the file, so it
+    # reads as null; `town` is the renamed `city`; `zip` was an int32.
+    assert_equal(by_id[1], '{"town":"eu","zip":10,"country":null}')
+    assert_equal(by_id[3], "null")
+    # Written after: a value no int32 could hold.
+    assert_equal(by_id[7], '{"town":"apac","zip":7000000000,"country":"sg"}')
+
+
+def test_nested_partition_source_is_read_and_pruned() raises:
+    """`identity(addr.city)` — a partition field whose source is nested."""
+    var t = load_fixture_metadata("nested_part_v2")
+    var spec = t.spec_by_id(t.default_spec_id)
+    assert_equal(len(spec.fields), 1)
+    var schema = t.schema()
+    assert_equal(schema.name_of(spec.fields[0].source_id), "addr.city")
+
+    # The metrics and partition evaluators still prune on the nested leaf.
+    var all_files = len(fixture_scan("nested_part_v2").plan_files())
+    var eu = fixture_scan("nested_part_v2").filter('["=","addr.city","eu"]')
+    assert_true(len(eu.plan_files()) < all_files)
+    assert_equal(eu.to_table().num_rows(), 3)
+
+
+def test_nested_sub_field_projection_prunes_the_read() raises:
+    """Selecting `addr.city` gives the column `addr` with only `city` in it."""
+    var rows = (
+        fixture_scan("nested_v2")
+        .select([String("addr.city"), String("id")])
+        .to_table()
+    )
+    assert_equal(rows.num_columns(), 2)
+    assert_equal(rows.name(0), "addr")
+    assert_equal(rows.name(1), "id")
+    var seen = String("")
+    for r in range(rows.num_rows()):
+        if rows.value(r, 0).i == 0:
+            pass
+        seen += rows.cell(r, 0) + ";"
+    assert_true(seen.find('"zip"') < 0, "zip must not be read: " + seen)
+    assert_true(seen.find('{"city":"eu"}') >= 0, seen)
+
+    # The whole column, for comparison.
+    var whole = fixture_scan("nested_v2").select([String("addr")]).to_table()
+    assert_equal(whole.num_columns(), 1)
+    assert_true(whole.cell(0, 0).find('"zip"') >= 0)
+
+
+def test_nested_cells_render_as_json_and_csv() raises:
+    """A nested cell is JSON in `to_json`, and the same JSON as a CSV field."""
+    var rows = (
+        fixture_scan("nested_v2")
+        .filter('["=","id",1]')
+        .select([String("id"), String("props"), String("matrix")])
+        .to_table()
+    )
+    assert_equal(rows.num_rows(), 1)
+    assert_equal(rows.cell(0, 1), '{"keys":["x","y"],"values":[1,2]}')
+    assert_equal(rows.cell(0, 2), "[[1,2],[3]]")
+    assert_equal(
+        rows.to_json(),
+        (
+            '[{"id":1,"props":{"keys":["x","y"],"values":[1,2]},'
+            '"matrix":[[1,2],[3]]}]'
+        ),
+    )
+    var csv = rows.to_csv()
+    assert_true(
+        csv.find('"{""keys"":[""x"",""y""],""values"":[1,2]}"') >= 0, csv
+    )
 
 
 def _file_exists(path: String) -> Bool:
@@ -3071,7 +3364,7 @@ def test_lazy_read_matches_eager() raises:
         assert_equal(len(lazy), len(eager), "lazy row count for " + tables[t])
         assert_equal(_diff(lazy, eager), "", "lazy rows for " + tables[t])
         checked += 1
-    assert_equal(checked, 9)
+    assert_equal(checked, 12)
 
 
 def test_name_mapping_parses() raises:

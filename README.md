@@ -75,6 +75,7 @@ operation needs it any more**.
 | `overwrite(batches, filter?)` | copy-on-write delete + append, one snapshot | PyIceberg, DuckDB |
 | `dynamic_partition_overwrite` | replaces exactly the partitions the rows land in | PyIceberg, DuckDB |
 | `expire_snapshots` | prunes snapshots, then unreachable files | itself, file by file |
+| nested columns, read and written | struct / list / map, sub-field projection, nested predicates, `identity(addr.city)` | PyIceberg, DuckDB, pyarrow over the C Data Interface |
 
 Everything under this line is another magmalake tin, consumed by source path.
 iceberg.mojo is the part that knows what Iceberg *means*; the tins below know
@@ -134,8 +135,10 @@ self-checked — the expected values come from them, never from this code. See
 
 | Gate | Oracle | Result |
 |---|---|---|
-| **(a)** Rows returned by `to_table()`, all columns, nulls included | PyIceberg | ✅ **48 / 48 cases** (8 tables × 6 filters), **152 rows**, compared cell-exactly |
-| **(a′)** The same rows, unfiltered | DuckDB `iceberg_scan` | ✅ **9 / 9 tables**, **51 rows** |
+| **(a)** Rows returned by `to_table()`, all columns, nulls included | PyIceberg | ✅ **65 / 65 cases** (11 tables × 6 filters, less the one PyIceberg refuses), **224 rows**, compared cell-exactly |
+| **(a′)** The same rows, unfiltered | DuckDB `iceberg_scan` | ✅ **12 / 12 tables**, **75 rows** |
+| **(a″)** Nested rows — struct, list and map — filter by filter | **DuckDB** (PyIceberg cannot project a list or a map) | ✅ **18 / 18 cases** (3 tables × 6 filters), **74 rows** |
+| **(a‴)** Sub-field projection: `select(["addr.city", "id"])` | PyIceberg | ✅ **7 / 7 projections**, the struct holding exactly the fields asked for |
 | **(b)** Position deletes: deleted rows absent, counts match | PyIceberg | ✅ ids 1, 2, 5 survive of 5 written |
 | **(c)** Equality deletes, incl. `null` matching `null` | **DuckDB** (PyIceberg refuses the table) | ✅ ids 1, 3, 4 survive of 6 written |
 | **(d)** Deletion vectors, format v3, Puffin | **PyIceberg and DuckDB** | ✅ ids 1, 2, 5, 6 survive of 6 written; both agree |
@@ -148,6 +151,8 @@ self-checked — the expected values come from them, never from this code. See
 | **(j)** Partition transforms | PyIceberg + Appendix B | ✅ **252 / 252 vectors**, 87 also checking the raw 32-bit hash |
 | **(k)** Manifests decode with inherited sequence numbers | the manifest lists themselves | ✅ **38 entries**, 36 inherited and 2 explicit |
 | **(l)** Puffin footer vs the manifest's `content_offset` | the spec's "must exactly match" | ✅ 2 / 2 blobs |
+| **(m′)** Nested schema evolution — a field added, renamed and promoted **inside a struct** | PyIceberg | ✅ `addr.country` null in the older file, `addr.city`→`addr.town` found by id, `addr.zip` `int`→`long` reading 7 000 000 000 |
+| **(m″)** A partition field whose `source-id` is a nested leaf, `identity(addr.city)` | PyIceberg | ✅ written *and* read; the partition filter prunes files on the nested leaf |
 | **(m)** Column projection rules 2–5 — partition value, name mapping, `initial-default`, null | the spec | ✅ each reached by giving the reader a schema whose ids the file does not have |
 | **(n)** Tables **we write** — rows, snapshots, partition values, statistics | PyIceberg **and** DuckDB | ✅ **10 / 10 tables** (5 partition shapes × v2/v3), 18 rows each, cell-exact both ways |
 | **(o)** Row lineage on tables we write | **fastavro** + the v3 spec's rules | ✅ manifest-list `first_row_id`s tile `0..next-row-id` on all 5 shapes; data files inherit (null), as the spec requires. PyIceberg cannot check this — see below |
@@ -159,9 +164,11 @@ self-checked — the expected values come from them, never from this code. See
 | **(u)** The **position delete files we write** (v2) | pyarrow + the spec | ✅ sorted by `(file_path, pos)` under ids 2147483546 / 2147483545; every pair points at a row that vanished |
 | **(v)** Manifest maintenance on a delete | fastavro | ✅ every `EXISTING`/`DELETED` entry carries its own `sequence_number`, `file_sequence_number` and (v3) `first_row_id`; every `ADDED` entry leaves them null; no manifest with nothing live survives |
 | **(w)** PyIceberg **appends to a table we deleted from**, and we read the result | PyIceberg | ✅ 2 tables, 14 + 3 = 17 rows, our deletes still applied |
+| **(x′)** Nested columns **we write** — rows, and per-leaf metrics | PyIceberg **and** DuckDB, against the JSON the writer was fed | ✅ **4 / 4 tables** (v2, v3, `identity(addr.city)`, `bucket[4](addr.zip)`), 12 rows each, cell-exact both ways; `value_counts` and `null_value_counts` for all **8 nested leaves** equal to the level records the rows imply |
+| **(y)** A nested scan over the **Arrow C Data Interface** | `pyarrow.Array._import_from_c` | ✅ **20 columns** across 4 tables imported into pyarrow and equal to PyIceberg's own read — structs, lists and maps with their children |
 | **(x)** `expire_snapshots` | itself, file by file | ✅ a dry run that touches nothing and never names a live file; an expiry that removes exactly what a copy-on-write delete orphaned; `keep_last` and an age cut; a superseded Puffin file removed while the live one stays |
-| Tests | | **137 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
-| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **32 tables** we wrote |
+| Tests | | **145 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **36 tables** we wrote and importing a nested scan into pyarrow |
 
 ### The one plan disagreement, and why it is not a bug
 
@@ -194,7 +201,25 @@ unknown transforms).
 - **Schema evolution** falls out of that: renamed columns are found by id,
   added columns read as null in older files, and `int`→`long`,
   `float`→`double` and decimal-precision widening are read at the file's
-  physical width and produced at the table's current type.
+  physical width and produced at the table's current type. All of it applies
+  **inside a struct** too — the file's children are matched to the table's
+  fields by field id, so a field added, renamed, reordered or promoted within a
+  struct resolves exactly as a top-level one does.
+- **Nested columns** — `struct`, `list` and `map`, to any depth: `list<struct>`,
+  `list<list<int>>`, `map<int, struct>`, a struct holding a list of structs.
+  A column arrives as an Arrow tree (`iceberg.nested`), and every kernel a flat
+  column gets has a counterpart that walks children and offsets, so deletes,
+  the residual filter and `to_batches()` all work on them unchanged. Null
+  containers stay distinct from empty ones.
+- **Sub-field projection.** `select(["addr.city", "id"])` gives back the column
+  `addr` holding only `city`, and **prunes the Parquet read to the leaves under
+  it** — `addr.zip` is never decoded. On the benchmark table that is 3.5×
+  faster than reading the whole struct.
+- **Nested predicates.** `["=", "addr.city", "eu"]` binds to the leaf's field
+  id, and the leaf is flattened out of its column with the parent structs'
+  nulls folded in, so every vectorised kernel applies to it. `is-null` and
+  `not-null` also bind against a struct, a list or a map itself. Row-group and
+  page pruning use the nested leaf's own Parquet statistics.
 - **Deletes**, in the order the spec implies: a deletion vector replaces every
   position delete file for its data file; position delete files are matched by
   the reserved ids 2147483546 / 2147483545 and filtered to this file's path;
@@ -244,12 +269,27 @@ _ = tx.commit()
   is **not**, because parquet.mojo's writer splits a batch by a row count and
   converting would mean guessing a compression ratio before compressing —
   `write.parquet.row-group-size-rows` says what it means instead.
+- **Nested columns.** A struct, list or map column is aligned child by child
+  **by field id**, so a batch whose struct has its fields in another order,
+  under other names, or one field short still lines up with the table. The
+  Iceberg `element-id`, `key-id` and `value-id` end up on the `element` and
+  `key`/`value` nodes of the Parquet schema, which is where a reader looks for
+  them. A partition field's `source-id` may name a **nested struct leaf** —
+  `identity(addr.city)`, `bucket[4](addr.zip)` — which the spec allows and this
+  writer does. `iceberg.batch.NestedBuilder` takes one JSON value per row, so a
+  nested batch can be built without laying out offsets by hand.
 - **Statistics.** Read back out of the footer the writer just produced —
   column sizes, value counts, null counts, and Appendix-D lower and upper
   bounds truncated the way `write.metadata.metrics.default`'s `truncate(16)`
   says, with an upper bound incremented so that truncating it does not stop
   it bounding. Whatever the writer decided the min and max were is what the
-  manifest reports, which is the only way the two can agree.
+  manifest reports, which is the only way the two can agree. Nested leaves get
+  the same treatment, keyed by their own field ids — the `element-id` of a
+  list, the `key-id` and `value-id` of a map, every field of a struct. **This
+  is where PyIceberg deliberately differs**: `pyiceberg.io.pyarrow` downgrades
+  any column whose name contains a dot to `COUNTS`, so it writes no bounds for
+  a nested leaf at all. Bounds are kept here, Java-style, because they are what
+  lets `addr.zip > 5` prune a whole file.
 - **Manifests and manifest lists.** The Avro schema is generated *per format
   version* — v1's required `snapshot_id` and `block_size_in_bytes`, v2's
   `content` / `sequence_number` / `equality_ids`, v3's `first_row_id` /
@@ -461,7 +501,8 @@ headers are proved rather than assumed.
 | Equality deletes on a partitioned table, or on v3 | One unpartitioned equality delete file applies everywhere; pairing one with a partition tuple needs a caller who knows the data. v3 replaced them with deletion vectors and v4 deprecates writing them. |
 | Schema and spec evolution as a write | `create_table` fixes both; changing them afterwards is a commit this build does not construct. |
 | Writing **format version 1** | The v1 manifest schemas are generated and would be written, but nothing verifies them — v1 has no writers left to check against. v2 and v3 are gated end to end. |
-| Nested columns in a scan or a write | `to_table()` and `write_data_files` handle primitive columns; a struct/list/map raises. The *metadata* for them is complete. |
+| A predicate *inside* a list or a map | `a.b > 5` on a struct leaf works; `tags.element = 'x'` is refused, because "the row matches" is not a question a per-row filter can answer about a repeated field. `is null` on the container itself does work. |
+| An `initial-default` that is itself a struct, list or map | A primitive default resolves at any depth, which is the case schema evolution produces. A nested default falls back to null — which is what the spec tells a reader that does not understand a default to do anyway. |
 | Non-Parquet data files | ORC and Avro data files are rejected by name. Parquet is what every writer in reach produces. |
 | Brotli-compressed Parquet | No Brotli in Mojo. Everything else — uncompressed, Snappy, GZIP, ZSTD, LZ4 — works. |
 | Encryption | Neither Parquet modular encryption nor Iceberg's `encryption-keys` are applied. |
@@ -500,6 +541,25 @@ decoding is cheap enough to stop dominating, reaches **11.5 M rows/s**.
 `to_table()` concatenates those batches into one `ScanResult` and costs one
 extra copy of each buffer, which on this table is under 5 %.
 
+### Nested columns
+
+The same benchmark over 200 000 rows of `id long`, `addr struct<city string,
+zip int>` and `tags list<string>` (two elements a row on average), which
+`pixi run bench` also builds:
+
+| Scan | iceberg.mojo | PyIceberg 0.11.1 |
+|---|---|---|
+| full scan, struct + list | 79 ms — **2.52 M rows/s** | 7 ms — 28.8 M rows/s |
+| projection `addr.city, id` | 22 ms — **8.75 M rows/s** | 4 ms — 49.7 M rows/s |
+| `addr.city = 'eu'` → 36 923 rows | 60 ms — **0.61 M rows/s** | 6 ms — 6.4 M rows/s |
+| `addr.zip > 90000` → 18 460 rows | 30 ms — **0.60 M rows/s** | 5 ms — 3.5 M rows/s |
+
+The ratio to PyIceberg is the same ~11× the flat benchmark shows, and for the
+same reason: Dremel assembly happens in parquet.mojo, not here. What is worth
+reading is the second row — **3.5× the full scan** — which is the sub-field
+projection actually pruning the Parquet read rather than throwing decoded
+columns away.
+
 ### Writing
 
 The same million rows, appended to a fresh table in four commits of 250 000 —
@@ -531,7 +591,9 @@ and only for the leaf that needs one:
 2. **`starts-with` on a column that is not byte-shaped** — which the binder
    should already have rejected, so this is belt and braces.
 3. **`ScanResult.value`, `to_csv` and `to_json`**, which are asking for a tagged
-   value by definition.
+   value by definition. A nested cell has no scalar to be: `value` hands back
+   its canonical JSON as a string `Datum`, and `cell` gives the same text
+   without the `Datum` around it.
 
 A predicate on a *constant* column — an identity partition value, an
 `initial-default` — is evaluated once for the whole batch rather than per row.
@@ -569,7 +631,7 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 |---|---|
 | `iceberg.json` | `parse_json`, `Json` — an arena DOM with exact `Int64` handling |
 | `iceberg.types` | `TypeStore`, `NestedField`, the primitive kinds |
-| `iceberg.schema` | `Schema` — `find_field(id)`, `find_by_name`, `select(ids)` |
+| `iceberg.schema` | `Schema` — `find_field(id)`, `find_by_name` (dotted), `select(ids)`, `struct_path` |
 | `iceberg.values` | `Datum`, `compare`, Appendix-D binary and JSON single values |
 | `iceberg.transforms` | `Transform`, `PartitionSpec`, `SortOrder`, `bucket_of` |
 | `iceberg.expressions` | `parse_filter`, `bind`, projections, the two evaluators |
@@ -577,8 +639,9 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 | `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile` |
 | `iceberg.puffin` | `PuffinFile`, `PuffinWriter`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
+| `iceberg.nested` | the same kernels for a struct/list/map tree: `cast_column`, `filter_tree`, `concat_tree`, `cell_json`, `flatten_leaf` |
 | `iceberg.read` | `ScanResult`, `ScanOptions`, `NameMapping`, the metadata columns |
-| `iceberg.batch` | `ColumnBuilder`, `batch_of` — Mojo values to an Arrow batch |
+| `iceberg.batch` | `ColumnBuilder`, `NestedBuilder`, `batch_of`, `batch_of_columns` — Mojo values to an Arrow batch |
 | `iceberg.write` | `write_data_files`, `WriteOptions`, bound truncation, partition paths |
 | `iceberg.manifest_write` | `write_manifest`, `write_manifest_list`, the per-version Avro schemas |
 | `iceberg.append` | `prepare_append`, `AppendResult`, metadata file naming |
@@ -612,6 +675,40 @@ def main() raises:
 
     for batch in t.scan().to_batches():      # Arrow, straight off the kernels
         print(batch.num_rows, batch.num_columns())
+```
+
+Nested columns need no separate API — a dotted name is a column name, and a
+nested cell prints as JSON:
+
+```mojo
+    # `addr` comes back holding only `city`; `addr.zip` is never decoded.
+    var some = t.scan().select(["addr.city", "id"]).to_table()
+
+    # A predicate on a struct leaf, and one on the container itself.
+    var eu = t.scan().filter('["=","addr.city","eu"]').to_table()
+    var no_tags = t.scan().filter('["is-null","tags"]').to_table()
+
+    print(eu.cell(0, 1))     # {"city":"eu","zip":10}
+    print(eu.to_json())      # nested, all the way down
+    print(eu.to_csv())       # the same JSON, as one CSV field
+```
+
+Building a nested batch to write takes one JSON value per row:
+
+```mojo
+from iceberg.batch import ColumnBuilder, NestedBuilder, batch_of_columns
+
+    var ids = ColumnBuilder.of(schema, 1)
+    var addr = NestedBuilder.of(schema, 2)      # struct<city, zip>
+    var tags = NestedBuilder.of(schema, 3)      # list<string>
+    var props = NestedBuilder.of(schema, 4)     # map<string, long>
+    ids.add(Datum.long_(1))
+    addr.add('{"city":"eu","zip":10}')
+    tags.add('["a","b"]')
+    props.add('{"keys":["x","y"],"values":[1,2]}')
+    var batch = batch_of_columns(
+        [ids^.build_tree(), addr^.build(), tags^.build(), props^.build()]
+    )
 ```
 
 ```mojo
@@ -682,6 +779,13 @@ Literals are typed **against the column**, not by their JSON shape: `["=","id",3
 on a `long` column produces a long, dates and timestamps accept either an ISO-8601
 string or the raw integer, and decimals accept a string.
 
+A column name may be **dotted** to reach inside a struct — `addr.city`,
+`shipping.address.zip` — and such a predicate prunes on that leaf's own
+statistics. `is-null` and `not-null` also apply to a struct, a list or a map
+itself (`["is-null","tags"]`). Anything else on a container, and any predicate
+that would have to look *inside* a list or a map (`tags.element`,
+`props.value`), is refused with a message saying so.
+
 ## CLI
 
 ```sh
@@ -713,7 +817,7 @@ iceberg-mojo cat tests/fixtures/dv_v3 \
 
 ## Fixtures
 
-Nine tables, one coherent warehouse, ~1.9 MB with their Parquet. Full detail in
+Twelve tables, one coherent warehouse, ~2.1 MB with their Parquet. Full detail in
 [`tests/fixtures/PROVENANCE.md`](tests/fixtures/PROVENANCE.md);
 `tools/make_fixtures.sh` regenerates everything.
 
@@ -728,6 +832,9 @@ Nine tables, one coherent warehouse, ~1.9 MB with their Parquet. Full detail in
 | `deletes_v2` | v2 with a **position delete file** | PyIceberg + a delete-manifest writer |
 | `eq_deletes_v2` | v2 with **equality deletes**, one of them on a NULL | `tools/make_delete_tables.py` |
 | `dv_v3` | **v3 with two deletion vectors** in a Puffin file | `tools/make_delete_tables.py` |
+| `nested_v2` | every nested shape at once: struct, `list<string>`, `map<string,long>`, `list<struct>`, `list<list<int>>`, `map<int,struct>`, struct-in-list-in-struct | `tools/make_nested_tables.py` |
+| `nested_evo_v2` | schema evolution **inside** a struct: a field added, one renamed, `int`→`long` | `tools/make_nested_tables.py` |
+| `nested_part_v2` | partitioned by `identity(addr.city)` — a nested struct leaf | `tools/make_nested_tables.py` |
 
 Three of these were not writable by anything to hand, and the workarounds are
 recorded rather than hidden:
@@ -737,6 +844,11 @@ recorded rather than hidden:
   written with a `ManifestWriterV2` subclass reporting `ManifestContent.DELETES`.
 - **`eq_deletes_v2`.** PyIceberg has no equality-delete writer and *refuses to
   plan* a scan of such a table at all, so DuckDB is its only oracle.
+- **`nested_v2`.** PyIceberg 0.11.1 cannot answer a filter on a list or a map
+  at all — `tags IS NULL` raises *"Cannot explicitly project List or Map
+  types"* — so DuckDB is the only oracle for that one filter, and
+  `oracle/rows_duckdb_<k>.json` exists for all six filters of all three nested
+  tables. `tools/make_nested_fixtures.sh` rebuilds just these three in place.
 - **`dv_v3`.** PyIceberg cannot write v3 metadata
   (`TableMetadataV3.model_dump_json` raises `NotImplementedError`) but every v3
   Avro struct is present in it, so the snapshot was assembled from those. Doing
@@ -759,7 +871,7 @@ list's `first_row_id` values tile `0..next-row-id` exactly.
 
 ## Notes for the next reader
 
-Five things this implementation got wrong first, and the gates caught:
+Eleven things this implementation got wrong first, and the gates caught:
 
 1. **`!=` and `not-in` must never prune on bounds.** A bound is not necessarily
    a value that occurs — string upper bounds are rounded *up* — so
@@ -792,6 +904,39 @@ Five things this implementation got wrong first, and the gates caught:
    host `build`, path `/x`, so handing one to an object store's URI parser
    silently addresses the wrong thing. Local locations lose their scheme
    before they get there.
+9. **A projection that reaches inside a struct renumbers it.** `select(["a.c"])`
+   gives back a struct whose only field is `c`, so the child position of `c` in
+   the *projected* type is 0 whatever it was in the table schema. A filter leaf
+   inside that column has to record its path against the projected type, not
+   against the schema, or `a.c > 5` silently reads `a.b`.
+10. **A Parquet statistics predicate must address a leaf by its dotted path.**
+   `addr.city` and a top-level column called `city` are two different leaves
+   with the same short name; pruning on the wrong one drops rows.
+11. **A null container is not an empty one.** A null list has `n + 1` equal
+   offsets over an empty child, an empty list has the same offsets and a
+   *valid* bit, and the difference survives Parquet only if the definition
+   levels do. Half the nested fixtures exist to keep the two apart.
+
+Two upstream bugs the nested gates turned up, both reproducible without any
+Iceberg in the picture:
+
+- **pyarrow 25.0.1 miscounts a fixed-width leaf under a `list<struct>`.**
+  Write a `list<struct<s: string, i32: int32>>` in which some rows' lists are
+  null or empty, and the Parquet `Statistics` for `i32` claim more non-null
+  values than the file's own data contains — the empty-container slots are
+  counted as present. The `string` leaf beside it is correct, and reading the
+  values back gives the right answer, so it is the statistics alone.
+  `tools/verify_written.py` therefore gates our `null_value_counts` against the
+  level records the rows imply and names the leaves where pyarrow disagrees
+  with itself.
+- **PyIceberg 0.11.1 loses the null on a `list<struct>` and a
+  `map<K, struct>`.** A null list of structs comes back as `[]` — on the way
+  *out* as well as in: a fixture PyIceberg writes from `None` has `[]` in the
+  Parquet file. pyarrow reading the same file directly, DuckDB 1.5.5 and this
+  library all say null. It also cannot *filter* on a list or a map at all
+  (`Cannot explicitly project List or Map types`), which is why DuckDB is the
+  oracle for `["is-null","tags"]`.
+
 
 ## License
 

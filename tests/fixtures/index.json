@@ -112,6 +112,44 @@
   "snapshots": 3,
   "table_uuid": "01a04f59-523f-7292-9509-b9b6653e5dac"
  },
+ "nested_evo_v2": {
+  "current_metadata": "00003-d851a4ff-5f6f-4ce3-aa8f-135ff7e8da21.metadata.json",
+  "current_snapshot_id": 5137555673949289258,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-5acf5ec2-8281-4925-b3d1-7c1968bddb73.metadata.json",
+   "00001-2c56cb3f-ff1d-4627-a6d0-4fc3a52e0107.metadata.json",
+   "00002-3081971e-750a-43cf-83a2-a8a30c76696f.metadata.json",
+   "00003-d851a4ff-5f6f-4ce3-aa8f-135ff7e8da21.metadata.json"
+  ],
+  "snapshots": 2,
+  "table_uuid": "c46d168f-c1d8-4fa1-a9d9-d074939aa68f"
+ },
+ "nested_part_v2": {
+  "current_metadata": "00003-ff778e52-b8cc-4584-b5f7-c6e490a39579.metadata.json",
+  "current_snapshot_id": 342378342637413613,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-176bfc58-f2d5-4bb6-804a-e26b2ffb573c.metadata.json",
+   "00001-6f40e26a-6d61-401c-81ca-6cca16062004.metadata.json",
+   "00002-13dee1e3-c558-4d06-ac93-9d44a59a8bc8.metadata.json",
+   "00003-ff778e52-b8cc-4584-b5f7-c6e490a39579.metadata.json"
+  ],
+  "snapshots": 2,
+  "table_uuid": "2cacb24b-7a01-468c-a2b7-c4923e546b46"
+ },
+ "nested_v2": {
+  "current_metadata": "00002-dea0c878-6112-4438-b4a0-4787d4c752f0.metadata.json",
+  "current_snapshot_id": 5189680154156433541,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-c4b5b1f0-e6e8-4f49-b00a-75c06c434be1.metadata.json",
+   "00001-370ca14c-5df3-4f61-8b12-236374d73f44.metadata.json",
+   "00002-dea0c878-6112-4438-b4a0-4787d4c752f0.metadata.json"
+  ],
+  "snapshots": 2,
+  "table_uuid": "f5a561cd-af78-413d-a48c-dc1fbbad2241"
+ },
  "trunc_part": {
   "current_metadata": "00003-f9008911-7f3e-4185-aad0-cb2580132eb3.metadata.json",
   "current_snapshot_id": 4437512400196923242,

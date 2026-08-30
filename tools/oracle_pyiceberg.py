@@ -316,6 +316,35 @@ PYICEBERG_TABLE_FILTERS = {
         '["in","region",["eu","apac"]]',
         '["is-null","amount"]',
     ],
+    # The nested-column tables. Four of the six filters are nested-specific:
+    # a struct leaf compared, a struct leaf null, the container itself null,
+    # and a list column null — the last of which PyIceberg 0.11.1 cannot even
+    # project ("Cannot explicitly project List or Map types"), so DuckDB is
+    # the only oracle for it. See NESTED_TABLE_SQL.
+    "nested_v2": [
+        '["true"]',
+        '[">","id",3]',
+        '["=","addr.city","eu"]',
+        '["is-null","addr.city"]',
+        '["is-null","tags"]',
+        '["and",["not-null","addr"],[">","addr.zip",20]]',
+    ],
+    "nested_evo_v2": [
+        '["true"]',
+        '["=","addr.town","eu"]',
+        '["not-null","addr.country"]',
+        '[">","addr.zip",15]',
+        '["is-null","addr.town"]',
+        '["and",[">","id",2],["not-null","addr"]]',
+    ],
+    "nested_part_v2": [
+        '["true"]',
+        '["=","addr.city","eu"]',
+        '["is-null","addr.city"]',
+        '[">","id",3]',
+        '["in","addr.city",["eu","us"]]',
+        '["and",["=","addr.city","us"],[">","addr.zip",0]]',
+    ],
     "dv_v3": [
         '["true"]',
         '["=","region","eu"]',
@@ -326,6 +355,57 @@ PYICEBERG_TABLE_FILTERS = {
     ],
 }
 
+# The same predicates as SQL, for the DuckDB oracle. DuckDB reads a nested
+# column and evaluates the predicate itself, which is what makes it a second
+# *independent* answer rather than a re-run of ours — and the only answer at
+# all where PyIceberg refuses.
+NESTED_TABLE_SQL = {
+    "nested_v2": [
+        None,
+        "id > 3",
+        "addr.city = 'eu'",
+        "addr.city IS NULL",
+        "tags IS NULL",
+        "addr IS NOT NULL AND addr.zip > 20",
+    ],
+    "nested_evo_v2": [
+        None,
+        "addr.town = 'eu'",
+        "addr.country IS NOT NULL",
+        "addr.zip > 15",
+        "addr.town IS NULL",
+        "id > 2 AND addr IS NOT NULL",
+    ],
+    "nested_part_v2": [
+        None,
+        "addr.city = 'eu'",
+        "addr.city IS NULL",
+        "id > 3",
+        "addr.city IN ('eu', 'us')",
+        "addr.city = 'us' AND addr.zip > 0",
+    ],
+}
+
+# Sub-field projections, checked separately from the filters: `select(["a.b"])`
+# must return the column `a` holding only `b`.
+NESTED_TABLE_PROJECTIONS = {
+    "nested_v2": [
+        ["addr.city", "id"],
+        ["items", "addr.zip"],
+        ["deep.inner"],
+    ],
+    "nested_evo_v2": [
+        ["addr.town", "id"],
+        ["addr.country", "addr.zip"],
+    ],
+    "nested_part_v2": [
+        ["addr.city"],
+        ["id", "addr.zip"],
+    ],
+}
+
+NESTED_TABLES = tuple(NESTED_TABLE_SQL)
+
 ALL_TABLES = BRIDGE_TABLES + tuple(PYICEBERG_TABLE_FILTERS)
 
 
@@ -333,9 +413,13 @@ def _compact(obj) -> str:
     return json.dumps(obj, separators=(",", ":"), sort_keys=True)
 
 
-def run_all(fixtures_dir: str, catalog_db: str | None) -> int:
+def run_all(
+    fixtures_dir: str, catalog_db: str | None, only: tuple[str, ...] = ()
+) -> int:
     hints = catalog_metadata_basenames(catalog_db) if catalog_db else {}
     for name in ALL_TABLES:
+        if only and name not in only:
+            continue
         tdir = os.path.join(fixtures_dir, name)
         if not os.path.isdir(tdir):
             print("skip %s: no such fixture dir" % name, file=sys.stderr)
@@ -409,7 +493,10 @@ def main(argv):
         catalog_db = None
         if "--catalog" in argv:
             catalog_db = argv[argv.index("--catalog") + 1]
-        return run_all(argv[2], catalog_db)
+        only = ()
+        if "--only" in argv:
+            only = tuple(argv[argv.index("--only") + 1].split(","))
+        return run_all(argv[2], catalog_db, only)
 
     if len(argv) >= 2 and argv[1] == "snapshots":
         table = open_table(find_metadata(argv[2]))

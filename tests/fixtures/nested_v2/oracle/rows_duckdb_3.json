@@ -1,0 +1,46 @@
+{
+ "filter": "[\"is-null\",\"addr.city\"]",
+ "sql": "addr.city IS NULL",
+ "columns": [
+  "id",
+  "addr",
+  "tags",
+  "props",
+  "items",
+  "matrix",
+  "who",
+  "deep"
+ ],
+ "rows": [
+  [
+   "2",
+   null,
+   "[]",
+   "{\"keys\":[],\"values\":[]}",
+   "[]",
+   "[]",
+   "{\"keys\":[],\"values\":[]}",
+   "{\"inner\":[]}"
+  ],
+  [
+   "3",
+   "{\"city\":null,\"zip\":30}",
+   null,
+   null,
+   "[]",
+   null,
+   "{\"keys\":[],\"values\":[]}",
+   null
+  ],
+  [
+   "7",
+   null,
+   "[\"h\"]",
+   "{\"keys\":[\"q\"],\"values\":[42]}",
+   "[{\"sku\":\"s3\",\"qty\":null}]",
+   null,
+   "{\"keys\":[4],\"values\":[{\"name\":\"bo\",\"age\":null}]}",
+   "{\"inner\":[{\"tag\":\"t3\"}]}"
+  ]
+ ]
+}

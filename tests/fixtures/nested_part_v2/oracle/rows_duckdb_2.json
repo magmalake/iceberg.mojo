@@ -1,0 +1,21 @@
+{
+ "filter": "[\"is-null\",\"addr.city\"]",
+ "sql": "addr.city IS NULL",
+ "columns": [
+  "id",
+  "addr",
+  "tags"
+ ],
+ "rows": [
+  [
+   "4",
+   "{\"city\":null,\"zip\":40}",
+   "[\"b\"]"
+  ],
+  [
+   "8",
+   null,
+   "[\"e\"]"
+  ]
+ ]
+}

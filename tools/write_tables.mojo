@@ -34,9 +34,15 @@ from std.sys import argv
 
 from parquet import RecordBatch
 
-from iceberg.batch import ColumnBuilder, batch_of
+from iceberg.batch import (
+    ColumnBuilder,
+    NestedBuilder,
+    batch_of,
+    batch_of_columns,
+)
+from iceberg.json import parse_json
 from iceberg.catalog.filesystem import FilesystemCatalog, Table
-from iceberg.io import FileIO
+from iceberg.io import FileIO, join_path
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionField, PartitionSpec, parse_transform
 from iceberg.values import Datum
@@ -179,6 +185,7 @@ def main() raises:
                 "next-row-id=" + String(table.metadata.next_row_id),
             )
     write_delete_tables(catalog, schema)
+    write_nested_tables(catalog, warehouse)
 
 
 def seeded(
@@ -305,3 +312,165 @@ def write_delete_tables(catalog: FilesystemCatalog, schema: Schema) raises:
         one.append(make_batch(schema, 100, 1))
         _ = dyn.dynamic_partition_overwrite(one)
         report(name, dyn, "dynamic overwrite of the eu partition")
+
+
+# ── nested columns ──────────────────────────────────────────────────────────
+comptime NESTED_SCHEMA_JSON = String(
+    '{"schema-id":0,"type":"struct","fields":['
+    '{"id":1,"name":"id","required":true,"type":"long"},'
+    '{"id":2,"name":"addr","required":false,"type":{"type":"struct","fields":['
+    '{"id":10,"name":"city","required":false,"type":"string"},'
+    '{"id":11,"name":"zip","required":false,"type":"int"}]}},'
+    '{"id":3,"name":"tags","required":false,"type":'
+    '{"type":"list","element-id":20,"element":"string",'
+    '"element-required":false}},'
+    '{"id":4,"name":"props","required":false,"type":'
+    '{"type":"map","key-id":30,"key":"string","value-id":31,"value":"long",'
+    '"value-required":false}},'
+    '{"id":5,"name":"items","required":false,"type":'
+    '{"type":"list","element-id":40,"element":{"type":"struct","fields":['
+    '{"id":41,"name":"sku","required":false,"type":"string"},'
+    '{"id":42,"name":"qty","required":false,"type":"int"}]},'
+    '"element-required":false}}]}'
+)
+
+comptime NESTED_ROWS = String(
+    "["
+    '{"id":0,"addr":{"city":"eu","zip":10},"tags":["a","b"],'
+    '"props":{"keys":["x","y"],"values":[1,2]},'
+    '"items":[{"sku":"s0","qty":3}]},'
+    '{"id":1,"addr":null,"tags":[],"props":{"keys":[],"values":[]},'
+    '"items":[]},'
+    '{"id":2,"addr":{"city":null,"zip":30},"tags":null,"props":null,'
+    '"items":null},'
+    '{"id":3,"addr":{"city":"us","zip":null},"tags":["c",null],'
+    '"props":{"keys":["z"],"values":[null]},'
+    '"items":[{"sku":null,"qty":7},null]},'
+    '{"id":4,"addr":{"city":"eu","zip":50},"tags":["d"],'
+    '"props":{"keys":["k"],"values":[9]},"items":[{"sku":"s4","qty":1}]},'
+    '{"id":5,"addr":{"city":"apac","zip":60},"tags":["e","f"],'
+    '"props":{"keys":["a","b"],"values":[1,2]},"items":[]},'
+    '{"id":6,"addr":{"city":"us","zip":70},"tags":["g"],'
+    '"props":{"keys":["q"],"values":[42]},'
+    '"items":[{"sku":"s6","qty":null}]},'
+    '{"id":7,"addr":null,"tags":null,"props":{"keys":[],"values":[]},'
+    '"items":[{"sku":"s7","qty":9}]},'
+    '{"id":8,"addr":{"city":"eu","zip":80},"tags":["h","i","j"],'
+    '"props":{"keys":["m"],"values":[5]},"items":null},'
+    '{"id":9,"addr":{"city":"latam","zip":90},"tags":[],'
+    '"props":null,"items":[{"sku":"s9","qty":2},{"sku":null,"qty":null}]},'
+    '{"id":10,"addr":{"city":null,"zip":100},"tags":["k"],'
+    '"props":{"keys":["n","o"],"values":[7,null]},"items":[]},'
+    '{"id":11,"addr":{"city":"eu","zip":110},"tags":null,'
+    '"props":{"keys":["p"],"values":[8]},"items":[{"sku":"sb","qty":4}]}'
+    "]"
+)
+"""The rows the nested tables are written from, verbatim.
+
+`tools/verify_written.py` reads the same text out of `nest/rows.json` and
+compares PyIceberg's and DuckDB's answers against it, so the chain it checks
+is JSON in -> our Arrow builder -> our Parquet writer -> somebody else's
+reader -> the same JSON out. Map keys are in ascending order in every row, so
+no side has to sort to agree."""
+
+
+def nested_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
+    """`n` of `NESTED_ROWS`, starting at `start`, as one `RecordBatch`."""
+    var doc = parse_json(NESTED_ROWS)
+    var ids = ColumnBuilder.of(schema, 1)
+    var addr = NestedBuilder.of(schema, 2)
+    var tags = NestedBuilder.of(schema, 3)
+    var props = NestedBuilder.of(schema, 4)
+    var items = NestedBuilder.of(schema, 5)
+    for k in range(n):
+        var row = doc.at(doc.root, start + k)
+        ids.add(Datum.long_(doc.req_int(row, "id")))
+        addr.add(doc.dump(doc.get(row, "addr")))
+        tags.add(doc.dump(doc.get(row, "tags")))
+        props.add(doc.dump(doc.get(row, "props")))
+        items.add(doc.dump(doc.get(row, "items")))
+    return batch_of_columns(
+        [
+            ids^.build_tree(),
+            addr^.build(),
+            tags^.build(),
+            props^.build(),
+            items^.build(),
+        ]
+    )
+
+
+def nested_spec(kind: String) raises -> PartitionSpec:
+    """A partition spec whose source is a field *inside* a struct."""
+    if kind == "unpartitioned":
+        return PartitionSpec.unpartitioned()
+    if kind == "ident":
+        return PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    10, 1000, String("city"), parse_transform("identity")
+                )
+            ],
+        )
+    if kind == "bucket":
+        return PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    11, 1000, String("zip_bucket"), parse_transform("bucket[4]")
+                )
+            ],
+        )
+    raise Error("unknown nested partition shape: " + kind)
+
+
+def write_nested_tables(catalog: FilesystemCatalog, warehouse: String) raises:
+    """The `nest` namespace: structs, lists and maps, written by this library.
+
+    Four tables — unpartitioned on v2 and v3, and two partitioned by a leaf
+    *inside* a struct, which the spec allows a partition field's `source-id`
+    to name. Each is created empty and appended to twice.
+    """
+    var schema = Schema.parse(NESTED_SCHEMA_JSON)
+    var io = FileIO.local()
+    io.write_all(
+        join_path(join_path(warehouse, "nest"), "rows.json"),
+        NESTED_ROWS.as_bytes(),
+    )
+    var names: List[String] = [
+        String("plain_v2"),
+        String("plain_v3"),
+        String("ident_v2"),
+        String("bucket_v2"),
+    ]
+    var shapes: List[String] = [
+        String("unpartitioned"),
+        String("unpartitioned"),
+        String("ident"),
+        String("bucket"),
+    ]
+    var versions: List[Int] = [2, 3, 2, 2]
+    for k in range(len(names)):
+        var table = catalog.create_table(
+            String("nest"),
+            names[k],
+            schema,
+            nested_spec(shapes[k]),
+            Dict[String, String](),
+            versions[k],
+        )
+        var total: Int64 = 0
+        for b in range(2):
+            var batches = List[RecordBatch]()
+            batches.append(nested_batch(schema, b * 6, 6))
+            var tx = table.new_append()
+            tx.add_batches(batches)
+            total += tx.commit()
+            table.refresh()
+        print(
+            "wrote nest." + names[k],
+            "v" + String(versions[k]),
+            String(total) + " rows",
+            String(len(table.metadata.snapshots)) + " snapshots",
+        )

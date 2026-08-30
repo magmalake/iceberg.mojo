@@ -1,0 +1,15 @@
+{
+  "filter": "[\">\",\"id\",3]",
+  "tasks": [
+    {
+      "data_file": "00000-0-bfd903ca-d99c-4caf-b8ae-7025da77d081.parquet",
+      "record_count": 4,
+      "delete_files": []
+    },
+    {
+      "data_file": "00000-0-d6a16090-93f2-46b9-a5f8-85803dde138a.parquet",
+      "record_count": 4,
+      "delete_files": []
+    }
+  ]
+}

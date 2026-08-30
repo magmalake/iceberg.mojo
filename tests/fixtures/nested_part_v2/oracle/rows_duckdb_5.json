@@ -1,0 +1,21 @@
+{
+ "filter": "[\"and\",[\"=\",\"addr.city\",\"us\"],[\">\",\"addr.zip\",0]]",
+ "sql": "addr.city = 'us' AND addr.zip > 0",
+ "columns": [
+  "id",
+  "addr",
+  "tags"
+ ],
+ "rows": [
+  [
+   "2",
+   "{\"city\":\"us\",\"zip\":20}",
+   "[]"
+  ],
+  [
+   "6",
+   "{\"city\":\"us\",\"zip\":60}",
+   null
+  ]
+ ]
+}

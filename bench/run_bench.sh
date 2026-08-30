@@ -39,6 +39,25 @@ echo
 echo "== PyIceberg $("$PY" -c 'import pyiceberg; print(pyiceberg.__version__)')"
 "$PY" tools/bench_pyiceberg.py "$META" | grep -v '^{'
 
+# ── nested columns ─────────────────────────────────────────────────────────
+NESTED_WAREHOUSE="${ICEBERG_NESTED_BENCH_ROOT:-$ROOT/build/nested-bench}"
+NESTED_ROWS="${ICEBERG_NESTED_BENCH_ROWS:-200000}"
+if [ ! -f "$NESTED_WAREHOUSE/metadata_location.txt" ]; then
+    echo
+    echo "== building the nested bench table ($NESTED_ROWS rows)"
+    "$PY" tools/make_nested_bench_table.py "$NESTED_WAREHOUSE" "$NESTED_ROWS"
+fi
+NESTED_META="$(cat "$NESTED_WAREHOUSE/metadata_location.txt")"
+
+echo
+echo "== iceberg.mojo, nested columns"
+mojo build bench/bench_nested.mojo $ICEBERG_INCLUDES -o build/iceberg-nested-bench
+ICEBERG_NESTED_BENCH_ROOT="$NESTED_WAREHOUSE" ./build/iceberg-nested-bench
+
+echo
+echo "== PyIceberg, nested columns"
+"$PY" tools/bench_pyiceberg_nested.py "$NESTED_META" | grep -v '^{'
+
 # ── the write side ─────────────────────────────────────────────────────────
 echo
 echo "== appending a million rows"

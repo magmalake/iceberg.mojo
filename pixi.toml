@@ -1,8 +1,8 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
-description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, data reads, and writes: append, delete, overwrite and deletion vectors."
+description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
 channels = [
     "https://conda.modular.com/max-nightly",
@@ -41,12 +41,21 @@ check = { depends-on = ["test", "cli"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
 bench = { cmd = "bash bench/run_bench.sh" }
+# The Arrow C Data Interface, from a nested scan into pyarrow. macOS wants
+# .dylib and Linux .so; the shared-library task reads $SHLIB_EXT.
+carrow-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_scan.mojo $ICEBERG_INCLUDES -o build/libibcarrow$SHLIB_EXT" }
 # Writes ten tables with this library and has PyIceberg and DuckDB read them
 # back — then lets PyIceberg append to two of them and reads the result here.
 # Needs `uv`, which builds the venv; CI runs it as a fifth job.
 verify-writes = { cmd = "bash tools/verify_writes.sh" }
 fmt = { cmd = "mojo format src tests bench tools" }
 format-check = { cmd = "mojo format --check src tests bench tools" }
+
+[target.osx-arm64.activation.env]
+SHLIB_EXT = ".dylib"
+
+[target.linux-64.activation.env]
+SHLIB_EXT = ".so"
 
 [feature.nightly.dependencies]
 modular = ">=26.6.0.dev2026082605,<27"
@@ -62,7 +71,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.2.0"
+version = "0.3.0"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }

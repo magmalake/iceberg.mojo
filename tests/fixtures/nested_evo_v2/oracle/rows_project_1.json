@@ -1,0 +1,35 @@
+{
+ "select": [
+  "addr.country",
+  "addr.zip"
+ ],
+ "columns": [
+  "addr"
+ ],
+ "rows": [
+  [
+   null
+  ],
+  [
+   null
+  ],
+  [
+   "{\"zip\":10,\"country\":null}"
+  ],
+  [
+   "{\"zip\":20,\"country\":null}"
+  ],
+  [
+   "{\"zip\":40,\"country\":null}"
+  ],
+  [
+   "{\"zip\":50,\"country\":\"de\"}"
+  ],
+  [
+   "{\"zip\":60,\"country\":null}"
+  ],
+  [
+   "{\"zip\":7000000000,\"country\":\"sg\"}"
+  ]
+ ]
+}

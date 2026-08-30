@@ -1,0 +1,15 @@
+{
+  "filter": "[\"=\",\"addr.city\",\"eu\"]",
+  "tasks": [
+    {
+      "data_file": "00000-0-2f1e9dca-9435-48e4-b3f0-e9a8ad952acc.parquet",
+      "record_count": 2,
+      "delete_files": []
+    },
+    {
+      "data_file": "00000-2-0678753a-1107-424e-895b-b89d8ba72ef4.parquet",
+      "record_count": 1,
+      "delete_files": []
+    }
+  ]
+}

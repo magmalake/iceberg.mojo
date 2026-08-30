@@ -1,0 +1,21 @@
+{
+ "filter": "[\"=\",\"addr.town\",\"eu\"]",
+ "sql": "addr.town = 'eu'",
+ "columns": [
+  "id",
+  "addr",
+  "tags"
+ ],
+ "rows": [
+  [
+   "1",
+   "{\"town\":\"eu\",\"zip\":10,\"country\":null}",
+   "[\"a\"]"
+  ],
+  [
+   "5",
+   "{\"town\":\"eu\",\"zip\":50,\"country\":\"de\"}",
+   "[\"d\"]"
+  ]
+ ]
+}

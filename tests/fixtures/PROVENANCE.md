@@ -26,11 +26,35 @@ sqlite catalog : /Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root
 namespace      : db
 ```
 
-All **nine** tables live in that one warehouse and one catalog, so the fixture
-set is a single coherent Iceberg warehouse rather than nine unrelated ones.
-Seven were made by the original run (see below); `eq_deletes_v2` and `dv_v3`
-were added later by `tools/make_delete_tables.py` into the same warehouse,
-which is why their UUIDs and paths differ in generation but not in kind.
+All **twelve** tables live in that one warehouse and one catalog, so the
+fixture set is a single coherent Iceberg warehouse rather than twelve
+unrelated ones. Seven were made by the original run (see below);
+`eq_deletes_v2` and `dv_v3` were added later by `tools/make_delete_tables.py`,
+and `nested_v2`, `nested_evo_v2` and `nested_part_v2` later still by
+`tools/make_nested_tables.py` — all into the same warehouse, which is why
+their UUIDs and paths differ in generation but not in kind.
+
+### The three nested tables
+
+`tools/make_nested_fixtures.sh` rebuilds just these three, in place, without
+touching anything else (a full `make_fixtures.sh` run also produces them, as
+step 3b). They are the only fixtures with structs, lists and maps in them:
+
+| table | shape |
+|---|---|
+| `nested_v2` | `struct`, `list<string>`, `map<string,long>`, `list<struct>`, `list<list<int>>`, `map<int,struct>`, and a struct holding a list of structs. Null containers sit next to *empty* ones, a list holds a null element, a map holds a null value, and one struct is present with every field null. |
+| `nested_evo_v2` | schema evolution **inside** a struct: `addr.country` added, `addr.city` renamed to `addr.town`, `addr.zip` promoted `int` -> `long`. Four rows written on each side of the change, so the older file has to be resolved by field id, widened, and filled with nulls for the added field. |
+| `nested_part_v2` | partitioned by `identity(addr.city)` — a partition field whose `source-id` is a nested struct leaf, which the spec allows and PyIceberg 0.11.1 both writes and reads. |
+
+Map keys are written in ascending order in every row, so the two oracles and
+this library agree on map order without anyone having to sort.
+
+**PyIceberg 0.11.1 cannot read a filter on a list or a map**: `tags IS NULL`
+raises `Cannot explicitly project List or Map types`, so filter 4 of
+`nested_v2` has no `rows_pyiceberg_4.json` and DuckDB is the only oracle for
+it. `oracle/rows_duckdb_<k>.json` therefore exists for all six filters of all
+three nested tables, and `oracle/rows_project_<k>.json` records the sub-field
+projections (`select(["addr.city", "id"])` and friends).
 
 ### Absolute paths — Mojo tests must rewrite them
 
@@ -68,6 +92,10 @@ tests/fixtures/
       plan_<k>.filter.txt         filter k, in the bridge's JSON S-expression DSL
       plan_<k>.json               bridge-shaped scan plan for filter k
       pyiceberg_plan_<k>.json     PyIceberg scan plan for filter k (basenames)
+      rows_pyiceberg_<k>.json     PyIceberg rows for filter k
+      rows_duckdb.json            DuckDB rows, unfiltered
+      rows_duckdb_<k>.json        DuckDB rows for filter k (nested tables)
+      rows_project_<k>.json       PyIceberg rows for a sub-field projection
   deletes_v2/oracle_delete_report.json
 ```
 

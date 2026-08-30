@@ -1,0 +1,20 @@
+{
+ "filter": "[\"not-null\",\"addr.country\"]",
+ "columns": [
+  "id",
+  "addr",
+  "tags"
+ ],
+ "rows": [
+  [
+   "5",
+   "{\"town\":\"eu\",\"zip\":50,\"country\":\"de\"}",
+   "[\"d\"]"
+  ],
+  [
+   "7",
+   "{\"town\":\"apac\",\"zip\":7000000000,\"country\":\"sg\"}",
+   "[]"
+  ]
+ ]
+}

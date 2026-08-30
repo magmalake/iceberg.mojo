@@ -22,12 +22,16 @@
 #      sqlite catalog and warehouse;
 #   3. adds the two delete tables PyIceberg's public API cannot make
 #      (eq_deletes_v2, dv_v3) — see tools/make_delete_tables.py;
+#   3b. adds the three nested-column tables (nested_v2, nested_evo_v2,
+#      nested_part_v2) — see tools/make_nested_tables.py;
 #   4. regenerates tests/fixtures/transform_vectors.json;
 #   5. copies each table's metadata/ AND data/ dirs into tests/fixtures/;
 #   6. runs the PyIceberg plan oracle over all nine tables and six filters,
 #      which also writes the bridge-shaped oracle for the PyIceberg tables;
-#   7. runs the row-level oracles (PyIceberg for eight tables x six filters,
-#      DuckDB unfiltered for eight) — see tools/oracle_rows.py.
+#   7. runs the row-level oracles: PyIceberg per filter, DuckDB unfiltered for
+#      every table and *per filter* for the nested ones (PyIceberg 0.11.1
+#      cannot project a list or a map, so it has no answer for `tags IS
+#      NULL`), plus the sub-field projection oracles — tools/oracle_rows.py.
 #
 # NOTE the fixture metadata JSON keeps ABSOLUTE file:// paths into the
 # warehouse built in step 1 — see tests/fixtures/PROVENANCE.md.  Rerunning this
@@ -48,7 +52,8 @@ CATALOG_DB="$FIXTURE_ROOT/catalog.db"
 
 BRIDGE_TABLES=(unpartitioned ident_part bucket_part day_part trunc_part)
 PY_TABLES=(evolved deletes_v2 eq_deletes_v2 dv_v3)
-ALL_TABLES=("${BRIDGE_TABLES[@]}" "${PY_TABLES[@]}")
+NESTED_TABLES=(nested_v2 nested_evo_v2 nested_part_v2)
+ALL_TABLES=("${BRIDGE_TABLES[@]}" "${PY_TABLES[@]}" "${NESTED_TABLES[@]}")
 
 # ---------------------------------------------------------------- preflight --
 for bin in pixi uv; do
@@ -109,6 +114,11 @@ echo "== 3/7  delete tables (eq_deletes_v2, dv_v3) =="
 FIXTURE_ROOT="$FIXTURE_ROOT" FIXTURE_OUT="$FIXTURE_OUT" \
   "$PY" "$ROOT/tools/make_delete_tables.py"
 
+# ----------------------------------------- 3b. nested-column tables ---------
+echo "== 3b/7  nested tables (nested_v2, nested_evo_v2, nested_part_v2) =="
+FIXTURE_ROOT="$FIXTURE_ROOT" FIXTURE_OUT="$FIXTURE_OUT" \
+  "$PY" "$ROOT/tools/make_nested_tables.py"
+
 # ----------------------------------------------- 4. transform vectors --------
 echo "== 4/7  transform vectors =="
 "$PY" "$ROOT/tools/gen_transform_vectors.py" "$FIXTURE_OUT/transform_vectors.json"
@@ -128,7 +138,7 @@ printf 'WAREHOUSE_ROOT=%s\n' "$WAREHOUSE" > "$FIXTURE_OUT/WAREHOUSE_ROOT.txt"
 # ------------------------------------------------- 6. PyIceberg oracle -------
 # Also writes the bridge-shaped metadata.json / snapshots.json / plan_<k>.json
 # for the four PyIceberg-built tables, which the Rust bridge never saw.
-echo "== 6/7  PyIceberg plan oracle (9 tables x 6 filters) =="
+echo "== 6/7  PyIceberg plan oracle (12 tables x 6 filters) =="
 "$PY" "$ROOT/tools/oracle_pyiceberg.py" all "$FIXTURE_OUT" --catalog "$CATALOG_DB"
 
 # ------------------------------------------------- 7. row-level oracles ------

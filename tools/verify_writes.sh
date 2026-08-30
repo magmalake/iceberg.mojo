@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Write thirty-two tables with this library — ten appended to, twenty-two
-# deleted from or overwritten — then read every one of them with PyIceberg
-# 0.11.1 and DuckDB 1.5.5 and check they agree, cell for cell. Finally let
-# PyIceberg *append* to four of them, two of which this library has deleted
-# from, and read the results back here.
+# Write thirty-six tables with this library — ten appended to, twenty-two
+# deleted from or overwritten, and four with structs, lists and maps in them —
+# then read every one of them with PyIceberg 0.11.1 and DuckDB 1.5.5 and check
+# they agree, cell for cell. Then import a nested *scan* into pyarrow over the
+# Arrow C Data Interface. Finally let PyIceberg *append* to four of them, two
+# of which this library has deleted from, and read the results back here.
 #
 # The venv is the same one `pixi run bench` builds; `uv` creates it if it is
 # not there. Nothing is checked in: the tables live under build/.
@@ -54,4 +55,10 @@ for t in mor_unpartitioned_v2 cow_unpartitioned_v2; do
     echo "   del.$t: $n rows"
     [ "$n" = "17" ] || { echo "expected 17 rows in del.$t" >&2; exit 1; }
 done
+echo "== importing a nested scan into pyarrow over the C Data Interface"
+mojo build --emit shared-lib tools/carrow_scan.mojo $ICEBERG_INCLUDES \
+    -o "build/libibcarrow${SHLIB_EXT:-.so}"
+"$VENV/bin/python" tools/consume_c_data.py \
+    "build/libibcarrow${SHLIB_EXT:-.so}" tests/fixtures
+
 echo "== ok"
