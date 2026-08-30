@@ -40,9 +40,9 @@ test = { cmd = "bash tests/run_tests.sh" }
 check = { depends-on = ["test", "cli"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
-bench = { cmd = "mkdir -p build && mojo build bench/bench_scan.mojo $ICEBERG_INCLUDES -o build/iceberg-bench && ./build/iceberg-bench" }
-fmt = { cmd = "mojo format src tests" }
-format-check = { cmd = "mojo format --check src tests" }
+bench = { cmd = "bash bench/run_bench.sh" }
+fmt = { cmd = "mojo format src tests bench" }
+format-check = { cmd = "mojo format --check src tests bench" }
 
 [feature.nightly.dependencies]
 modular = ">=26.6.0.dev2026082605,<27"
