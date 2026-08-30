@@ -2151,6 +2151,15 @@ def test_rest_load_table_matches_local() raises:
             var got = remote.scan().filter(filters[j]).plan_files_json()
             assert_equal(got, want)
             checked += 1
+        # And the rows themselves, through the FileIO the catalog handed back.
+        var local_rows = encoded_rows(
+            TableScan(local.copy(), fixture_io()).to_table()
+        )
+        var remote_rows = encoded_rows(remote.scan().to_table())
+        assert_equal(
+            _diff(remote_rows, local_rows), "", "REST rows for " + names[k]
+        )
+        assert_equal(len(remote_rows), len(local_rows))
     assert_equal(checked, len(names) * 6)
 
 
@@ -2247,6 +2256,37 @@ def test_s3_table_load_and_plan() raises:
             assert_equal(t.scan().filter(filters[j]).plan_files_json(), want)
             checked += 1
     assert_equal(checked, len(names) * 6)
+
+
+def test_s3_read_matches_local() raises:
+    """Gate (f): the same rows over `s3://` as on disk, eagerly and lazily.
+
+    The lazy path is the one that matters here: it fetches the footer and then
+    only the byte ranges of the row groups it needs, which is a different set
+    of HTTP requests entirely.
+    """
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_read_matches_local: no ICEBERG_TEST_S3")
+        return
+    var names = [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("deletes_v2"),
+        String("evolved"),
+    ]
+    var lazy = ScanOptions()
+    lazy.lazy = True
+    var rows = 0
+    for k in range(len(names)):
+        var want = encoded_rows(fixture_scan(names[k]).to_table())
+        var t = Table.load(_s3_warehouse() + "/" + names[k], s3_io())
+        var got = encoded_rows(t.scan().to_table())
+        assert_equal(_diff(got, want), "", "s3 rows for " + names[k])
+        assert_equal(len(got), len(want))
+        var got_lazy = encoded_rows(t.scan().to_table(lazy))
+        assert_equal(_diff(got_lazy, want), "", "s3 lazy rows for " + names[k])
+        rows += len(got)
+    print("    s3 rows:", rows, "over", len(names), "tables")
 
 
 def test_s3_catalog_listing() raises:

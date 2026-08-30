@@ -109,6 +109,12 @@ jobs:
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo describe tests/fixtures/ident_part
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo schema tests/fixtures/evolved
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
+          REBASE='file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db=tests/fixtures'
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo files tests/fixtures/ident_part \
-            --filter '["=","region","eu"]' \
-            --rebase 'file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db=tests/fixtures'
+            --filter '["=","region","eu"]' --rebase "$REBASE"
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/dv_v3 \
+            --rebase "$REBASE"
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/eq_deletes_v2 \
+            --rebase "$REBASE" --select id,region,_file --limit 2 --format json
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/evolved \
+            --rebase "$REBASE" --filter '[">","id",3]' --lazy
