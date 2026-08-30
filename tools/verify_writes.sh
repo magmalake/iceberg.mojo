@@ -15,12 +15,12 @@ WAREHOUSE="${ICEBERG_WRITE_ROOT:-$ROOT/build/write-verify}"
 VENV="$ROOT/build/pyiceberg-venv"
 
 if [ ! -x "$VENV/bin/python" ] \
-    || ! "$VENV/bin/python" -c "import pyiceberg, pyarrow, duckdb" 2>/dev/null; then
+    || ! "$VENV/bin/python" -c "import pyiceberg, pyarrow, duckdb, fastavro" 2>/dev/null; then
     command -v uv >/dev/null 2>&1 || {
         echo "error: uv is needed to build the verification venv" >&2; exit 1; }
     uv venv --python 3.12 "$VENV" >/dev/null
     VIRTUAL_ENV="$VENV" uv pip install --quiet \
-        "pyiceberg[sql-sqlite,pyarrow]==0.11.1" "duckdb==1.5.5" >/dev/null
+        "pyiceberg[sql-sqlite,pyarrow]==0.11.1" "duckdb==1.5.5" fastavro >/dev/null
 fi
 
 mkdir -p build

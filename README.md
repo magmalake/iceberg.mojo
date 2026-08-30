@@ -118,7 +118,7 @@ self-checked — the expected values come from them, never from this code. See
 | **(l)** Puffin footer vs the manifest's `content_offset` | the spec's "must exactly match" | ✅ 2 / 2 blobs |
 | **(m)** Column projection rules 2–5 — partition value, name mapping, `initial-default`, null | the spec | ✅ each reached by giving the reader a schema whose ids the file does not have |
 | **(n)** Tables **we write** — rows, snapshots, partition values, statistics | PyIceberg **and** DuckDB | ✅ **10 / 10 tables** (5 partition shapes × v2/v3), 18 rows each, cell-exact both ways |
-| **(o)** Row lineage on tables we write | the v3 spec's assignment rules | ✅ `first-row-id` ranges tile `0..next-row-id` with no overlap, on all 5 shapes |
+| **(o)** Row lineage on tables we write | **fastavro** + the v3 spec's rules | ✅ manifest-list `first_row_id`s tile `0..next-row-id` on all 5 shapes; data files inherit (null), as the spec requires. PyIceberg cannot check this — see below |
 | **(p)** PyIceberg **appends to a table we created**, and we read the result | PyIceberg | ✅ 2 tables, 18 + 6 = 24 rows, `_row_id` still intact |
 | **(q)** REST commit — requirements, 409 retry, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried, a rigged applied-then-500 reported, not retried |
 | **(r)** `s3://` write end to end | itself, read back | ✅ create, 2 appends, 12 rows, partition pruning; MinIO verifies every signature |
@@ -613,6 +613,17 @@ recorded rather than hidden:
   file at the writer's own version, so a v3 manifest silently writes null for
   `first_row_id`, `referenced_data_file`, `content_offset` and
   `content_size_in_bytes`.
+
+Verifying the *write* path found the same bug facing the other way.
+`ManifestList` and `ManifestFile` are read with
+`MANIFEST_LIST_FILE_SCHEMAS[DEFAULT_READ_VERSION]` and
+`MANIFEST_ENTRY_SCHEMAS[DEFAULT_READ_VERSION]`, and `DEFAULT_READ_VERSION` is
+2, so field **520 (`first_row_id`)** and the v3 `data_file` fields 142–145 are
+dropped on the way *in* as well. PyIceberg therefore reports `first_row_id =
+None` for manifests that plainly carry it, and cannot be the oracle for v3 row
+lineage. `tools/verify_written.py` uses **fastavro** for that layer instead: it
+decodes with the schema the file itself carries, and confirms the manifest
+list's `first_row_id` values tile `0..next-row-id` exactly.
 
 ## Notes for the next reader
 

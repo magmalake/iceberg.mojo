@@ -15,7 +15,15 @@ checks:
   * **manifests** — `inspect.manifests()`: one added manifest per snapshot,
     with the partition summaries;
   * **row lineage (v3)** — `first_row_id` on every data file, assigned in
-    manifest order with no overlap, and `next-row-id` == the total.
+    manifest order with no overlap, and `next-row-id` == the total. PyIceberg
+    0.11.1 cannot check this one: it reads manifest lists and manifests with
+    `MANIFEST_LIST_FILE_SCHEMAS[DEFAULT_READ_VERSION]`, and
+    `DEFAULT_READ_VERSION` is 2, so field 520 (`first_row_id`) and the v3
+    `data_file` fields 142-145 are dropped on the way in — the read-side twin
+    of the write-side bug this repo's fixtures already documented. **fastavro**
+    reads them without a schema of its own, so it is the oracle for the Avro
+    layer: file metadata keys, entry statuses, inherited sequence numbers and
+    the row-id ranges.
 
 Finally it does the interop in the other direction: PyIceberg *appends* to a
 table we created, which the Mojo reader then has to read.
@@ -271,12 +279,148 @@ def verify_table(name, table_dir, con, want):
             at += adds[f]
         check(at == doc["next-row-id"], "%s: row ranges do not reach next-row-id" % name)
         facts["next_row_id"] = doc["next-row-id"]
+        facts["row_lineage_oracle"] = "fastavro (PyIceberg drops field 520)"
     else:
         check(
             "next-row-id" not in doc,
             "%s: a v2 table must not carry next-row-id" % name,
         )
+    facts.update(avro_check(name, table_dir, meta, doc))
     return facts
+
+
+def avro_check(name, table_dir, meta, doc):
+    """Read the manifest list and the manifests with fastavro, not PyIceberg.
+
+    This is the only reader in the loop that decodes the Avro with the schema
+    the *file* carries rather than one of its own, which is what makes it able
+    to see v3's `first_row_id`.
+    """
+    import fastavro
+
+    version = doc["format-version"]
+    snap = [s for s in doc["snapshots"]
+            if s["snapshot-id"] == doc["current-snapshot-id"]][0]
+    path = snap["manifest-list"].replace("file://", "")
+    with open(path, "rb") as fh:
+        reader = fastavro.reader(fh)
+        md = {k: v for k, v in reader.metadata.items() if k != "avro.schema"}
+        entries = list(reader)
+    check(
+        md.get("snapshot-id") == str(snap["snapshot-id"]),
+        "%s: manifest list snapshot-id %r" % (name, md.get("snapshot-id")),
+    )
+    check(
+        md.get("format-version") == str(version),
+        "%s: manifest list format-version %r" % (name, md.get("format-version")),
+    )
+    check(
+        md.get("sequence-number") == str(snap["sequence-number"]),
+        "%s: manifest list sequence-number %r" % (name, md.get("sequence-number")),
+    )
+    want_parent = str(snap.get("parent-snapshot-id", "null"))
+    check(
+        md.get("parent-snapshot-id") == want_parent,
+        "%s: manifest list parent-snapshot-id %r != %r"
+        % (name, md.get("parent-snapshot-id"), want_parent),
+    )
+    check(len(entries) == 3, "%s: %d manifest_file entries" % (name, len(entries)))
+
+    total_rows = 0
+    ranges = []
+    for e in entries:
+        check(e["content"] == 0, "%s: manifest content %r" % (name, e["content"]))
+        check(
+            e["added_files_count"] >= 1 and e["existing_files_count"] == 0
+            and e["deleted_files_count"] == 0,
+            "%s: manifest counts %r" % (name, e),
+        )
+        check(
+            e["min_sequence_number"] == e["sequence_number"],
+            "%s: min_sequence_number != sequence_number for an all-added manifest"
+            % name,
+        )
+        total_rows += e["added_rows_count"]
+        if version >= 3:
+            check(
+                e.get("first_row_id") is not None,
+                "%s: a v3 manifest_file must carry first_row_id" % name,
+            )
+            ranges.append((e["first_row_id"], e["added_rows_count"]))
+        else:
+            check(
+                e.get("first_row_id") is None,
+                "%s: a v2 manifest_file must not carry first_row_id" % name,
+            )
+        # And the manifest it names.
+        mpath = e["manifest_path"].replace("file://", "")
+        with open(mpath, "rb") as fh:
+            mr = fastavro.reader(fh)
+            mmd = {k: v for k, v in mr.metadata.items() if k != "avro.schema"}
+            mentries = list(mr)
+        for key in ("schema", "schema-id", "partition-spec",
+                    "partition-spec-id", "format-version", "content"):
+            check(key in mmd, "%s: manifest metadata has no %r" % (name, key))
+        check(
+            mmd["content"] == "data" and mmd["format-version"] == str(version),
+            "%s: manifest metadata %r" % (name, mmd),
+        )
+        json.loads(mmd["schema"])
+        json.loads(mmd["partition-spec"])
+        check(
+            len(mentries) == e["added_files_count"],
+            "%s: %d entries for added_files_count %d"
+            % (name, len(mentries), e["added_files_count"]),
+        )
+        for me in mentries:
+            check(me["status"] == 1, "%s: entry status %r" % (name, me["status"]))
+            check(
+                me["snapshot_id"] is not None,
+                "%s: an ADDED entry names its snapshot" % name,
+            )
+            check(
+                me["sequence_number"] is None
+                and me["file_sequence_number"] is None,
+                "%s: an ADDED entry inherits its sequence numbers (they must"
+                " be null)" % name,
+            )
+            df = me["data_file"]
+            check(df["content"] == 0, "%s: data_file content" % name)
+            check(df["file_format"] == "PARQUET", "%s: file_format" % name)
+            check(df["equality_ids"] is None, "%s: equality_ids" % name)
+            check(df["sort_order_id"] == 0, "%s: sort_order_id" % name)
+            if version >= 3:
+                check(
+                    df["first_row_id"] is None,
+                    "%s: a data file's first_row_id is inherited, so it must"
+                    " be null" % name,
+                )
+                check(df["referenced_data_file"] is None, "%s: referenced" % name)
+            else:
+                check(
+                    "first_row_id" not in df,
+                    "%s: a v2 data_file has no first_row_id field" % name,
+                )
+
+    check(
+        total_rows == 18,
+        "%s: manifest list rows %d != 18" % (name, total_rows),
+    )
+    if version >= 3:
+        at = 0
+        for first, n in sorted(ranges):
+            check(
+                first == at,
+                "%s: manifest first_row_id %d does not follow %d"
+                % (name, first, at),
+            )
+            at += n
+        check(
+            at == doc["next-row-id"],
+            "%s: manifest row-id ranges reach %d, next-row-id is %s"
+            % (name, at, doc["next-row-id"]),
+        )
+    return {"manifest_list_entries": len(entries), "avro_rows": total_rows}
 
 
 def pyiceberg_append(table_dir, start, n):
