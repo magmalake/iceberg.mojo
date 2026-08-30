@@ -747,6 +747,23 @@ def _cmp_float(x: Float64, y: Float64) -> Int:
     return 0 if x == y else 1
 
 
+@always_inline
+def _cmp_span(v: Span[UInt8, _], lit: Span[UInt8, _], m: Int) -> Int:
+    """Unsigned lexicographic order of two byte spans."""
+    var n = len(v)
+    var k = 0
+    var upto = n if n < m else m
+    while k < upto:
+        var x = v[k]
+        var y = lit[k]
+        if x != y:
+            return -1 if x < y else 1
+        k += 1
+    if n == m:
+        return 0
+    return -1 if n < m else 1
+
+
 def _cmp_bytes_at(a: ArrayData, i: Int, lit: List[UInt8]) raises -> Int:
     """Unsigned lexicographic order of element `i` against a literal."""
     var extent = value_extent(a, i)
@@ -779,6 +796,40 @@ def _literal_bytes(d: Datum) -> List[UInt8]:
     else:
         out.extend(Span(d.b))
     return out^
+
+
+@fieldwise_init
+struct _Accept(Copyable, Movable):
+    """One comparison operator, resolved out of the row loop.
+
+    A comparison kernel walks a million values; asking `_accept` which
+    operator this is for each of them costs more than the comparison. The
+    operator decides three booleans once, and the loop reduces to a sign test.
+    """
+
+    var lt: Bool
+    var eq: Bool
+    var gt: Bool
+
+    @staticmethod
+    def of(op: UInt8) raises -> Self:
+        if op == OP_EQ:
+            return Self(False, True, False)
+        if op == OP_NOT_EQ:
+            return Self(True, False, True)
+        if op == OP_LT:
+            return Self(True, False, False)
+        if op == OP_LT_EQ:
+            return Self(True, True, False)
+        if op == OP_GT:
+            return Self(False, False, True)
+        if op == OP_GT_EQ:
+            return Self(False, True, True)
+        raise Error("iceberg: cannot evaluate operator " + String(op))
+
+    @always_inline
+    def takes(self, c: Int) -> Bool:
+        return self.lt if c < 0 else (self.eq if c == 0 else self.gt)
 
 
 def _accept(op: UInt8, c: Int) raises -> Bool:
@@ -927,36 +978,76 @@ def _vector_leaf(
     if len(nd.lits) == 0:
         return False
 
+    var acc = _Accept.of(nd.op)
+
     if cls == CMP_INT:
         var lit = nd.lits[0].i
+        var id = a.type.id
+        if (
+            id == AT_INT64
+            or id == AT_TIME64
+            or id == AT_TIMESTAMP
+            or id == AT_UINT64
+        ):
+            # The overwhelmingly common width, read without the per-row
+            # type switch `int_at` would do.
+            var vals = Span(a.values)
+            for r in range(n):
+                if not no_nulls and not bit_get(Span(a.validity), r):
+                    out[r] = False
+                    continue
+                var v = load_i64(vals, r)
+                out[r] = acc.takes(0 if v == lit else (-1 if v < lit else 1))
+            return True
         for r in range(n):
             var valid = True if no_nulls else bit_get(Span(a.validity), r)
             if not valid:
                 out[r] = False
                 continue
             var v = int_at(a, r)
-            var c = 0 if v == lit else (-1 if v < lit else 1)
-            out[r] = _accept(nd.op, c)
+            out[r] = acc.takes(0 if v == lit else (-1 if v < lit else 1))
         return True
     if cls == CMP_FLOAT:
         ref d = nd.lits[0]
         var flit = d.f if (
             d.kind == P_FLOAT or d.kind == P_DOUBLE
         ) else Float64(d.i)
+        if a.type.id == AT_FLOAT64:
+            var vals = Span(a.values)
+            for r in range(n):
+                if not no_nulls and not bit_get(Span(a.validity), r):
+                    out[r] = False
+                    continue
+                out[r] = acc.takes(_cmp_float(load_f64(vals, r), flit))
+            return True
         for r in range(n):
             var valid = True if no_nulls else bit_get(Span(a.validity), r)
             if not valid:
                 out[r] = False
                 continue
-            out[r] = _accept(nd.op, _cmp_float(float_at(a, r), flit))
+            out[r] = acc.takes(_cmp_float(float_at(a, r), flit))
         return True
     var blit = _literal_bytes(nd.lits[0])
+    if a.type.id == AT_UTF8 or a.type.id == AT_BINARY:
+        # 32-bit offsets, read directly: `value_extent` per row is a type
+        # switch and a tuple for what is two array loads.
+        var vals = Span(a.values)
+        var lit = Span(blit)
+        var m = len(blit)
+        for r in range(n):
+            if not no_nulls and not bit_get(Span(a.validity), r):
+                out[r] = False
+                continue
+            var lo = Int(a.offsets[r])
+            var hi = Int(a.offsets[r + 1])
+            out[r] = acc.takes(_cmp_span(vals[lo:hi], lit, m))
+        return True
     for r in range(n):
         var valid = True if no_nulls else bit_get(Span(a.validity), r)
         if not valid:
             out[r] = False
             continue
-        out[r] = _accept(nd.op, _cmp_bytes_at(a, r, blit))
+        out[r] = acc.takes(_cmp_bytes_at(a, r, blit))
     return True
 
 
