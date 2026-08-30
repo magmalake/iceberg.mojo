@@ -1,8 +1,8 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
-description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning and data reads."
+description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, data reads, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
 channels = [
     "https://conda.modular.com/max-nightly",
@@ -62,7 +62,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.1.0"
+version = "0.2.0"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }

@@ -6,10 +6,12 @@
 
 Native, pure-Mojo **Apache Iceberg**: read a table's `metadata.json`, pick a
 snapshot, decode its manifests, plan a scan, and **read the rows** — deletes
-applied, filters evaluated, projection resolved by field id — then **create a
-table and append to it**, manifests, snapshot and optimistic commit included.
-Over local files, S3, GCS, Azure or plain HTTP, from a filesystem layout or a
-live REST catalog. No JVM, no Python, no Rust.
+applied, filters evaluated, projection resolved by field id — then **write**:
+create a table, append to it, delete rows from it (copy-on-write, or
+merge-on-read with real deletion vectors), overwrite it, and expire what is no
+longer reachable. Manifests, snapshots and optimistic commits included. Over
+local files, S3, GCS, Azure or plain HTTP, from a filesystem layout or a live
+REST catalog. No JVM, no Python, no Rust.
 
 ```mojo
 from iceberg.catalog.rest import RestCatalog, RestCatalogConfig
@@ -39,6 +41,11 @@ var table = catalog.create_table("db", "orders", schema, spec)
 var tx = table.new_append()
 tx.add(batch)                       # an Arrow RecordBatch
 _ = tx.commit()                     # manifest, manifest list, snapshot, commit
+
+_ = table.delete_where('["<","id",100]')          # copy-on-write by default
+_ = table.overwrite([batch], '["=","region","eu"]')
+_ = table.dynamic_partition_overwrite([batch])    # only the partitions it hits
+_ = table.expire_snapshots(keep_last=5)           # and the files nobody needs
 ```
 
 ```console
@@ -48,13 +55,26 @@ $ iceberg-mojo cat --rest https://catalog --table db.orders --token $TOKEN
 
 ## The stack
 
-**Native read and native fast-append.** Scans decode Parquet through
-parquet.mojo and come out as Arrow; appends write Parquet and Avro back
-through the same tins and commit against a filesystem layout or a REST
-catalog. `overwrite`, `delete` and compaction are not here — they merge
-manifests rather than appending to them — and go through
-[iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge over
-iceberg-rust.
+**Native reads and native writes.** Scans decode Parquet through parquet.mojo
+and come out as Arrow; writes push Parquet, Avro and Puffin back through the
+same tins and commit against a filesystem layout or a REST catalog. Nothing
+here calls out to another implementation — the
+[iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo) bridge over
+iceberg-rust is still a useful second opinion in the test fixtures, but **no
+operation needs it any more**.
+
+| Operation | How | Checked by |
+|---|---|---|
+| `create_table` | filesystem or REST `createTable` | PyIceberg, DuckDB |
+| `new_append()` / `append` | new manifest, parent's carried by reference | PyIceberg, DuckDB, fastavro |
+| `delete_where` — copy-on-write | affected files rewritten, originals `DELETED` | PyIceberg, DuckDB |
+| `delete_where` — merge-on-read, v3 | one Puffin **deletion vector** per data file | PyIceberg, DuckDB, pyiceberg's Puffin reader + zlib CRC |
+| `delete_where` — merge-on-read, v2 | **position delete files**, sorted `(file_path, pos)` | PyIceberg, DuckDB |
+| metadata delete | files whose every row matches are removed unread | PyIceberg, DuckDB |
+| `delete_by_equality` (v2) | an **equality delete file** and its `equality_ids` | **DuckDB** (PyIceberg refuses to plan them) |
+| `overwrite(batches, filter?)` | copy-on-write delete + append, one snapshot | PyIceberg, DuckDB |
+| `dynamic_partition_overwrite` | replaces exactly the partitions the rows land in | PyIceberg, DuckDB |
+| `expire_snapshots` | prunes snapshots, then unreachable files | itself, file by file |
 
 Everything under this line is another magmalake tin, consumed by source path.
 iceberg.mojo is the part that knows what Iceberg *means*; the tins below know
@@ -134,8 +154,14 @@ self-checked — the expected values come from them, never from this code. See
 | **(p)** PyIceberg **appends to a table we created**, and we read the result | PyIceberg | ✅ 2 tables, 18 + 6 = 24 rows, `_row_id` still intact |
 | **(q)** REST commit — requirements, 409 retry, `Idempotency-Key` replay, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried; a rigged applied-then-500 recovered by the key, landing **one** snapshot; a server that will not deduplicate reported as unknown state |
 | **(r)** `s3://` write end to end | itself, read back | ✅ create, 2 appends, 12 rows, partition pruning; MinIO verifies every signature |
+| **(s)** Tables **we delete from and overwrite** — rows, snapshots, summaries | PyIceberg **and** DuckDB | ✅ **22 / 22 tables**: merge-on-read and copy-on-write deletes across unpartitioned / identity / bucket[4] / day at v2 and v3, a second delete that merges a vector, a filtered and an unfiltered overwrite, two dynamic partition overwrites, one equality delete — cell-exact both ways |
+| **(t)** The **deletion vectors we write** | pyiceberg's own Puffin reader, and zlib for the CRC | ✅ every blob's length, `D1 D3 39 64` magic and CRC-32 checked here; the bitmap decoded by PyIceberg, and every position it names is a row that vanished |
+| **(u)** The **position delete files we write** (v2) | pyarrow + the spec | ✅ sorted by `(file_path, pos)` under ids 2147483546 / 2147483545; every pair points at a row that vanished |
+| **(v)** Manifest maintenance on a delete | fastavro | ✅ every `EXISTING`/`DELETED` entry carries its own `sequence_number`, `file_sequence_number` and (v3) `first_row_id`; every `ADDED` entry leaves them null; no manifest with nothing live survives |
+| **(w)** PyIceberg **appends to a table we deleted from**, and we read the result | PyIceberg | ✅ 2 tables, 14 + 3 = 17 rows, our deletes still applied |
+| **(x)** `expire_snapshots` | itself, file by file | ✅ a dry run that touches nothing and never names a live file; an expiry that removes exactly what a copy-on-write delete orphaned; `keep_last` and an age cut; a superseded Puffin file removed while the live one stays |
 | Tests | | **137 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
-| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against tables we wrote |
+| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **32 tables** we wrote |
 
 ### The one plan disagreement, and why it is not a bug
 
@@ -257,6 +283,65 @@ _ = tx.commit()
 - **`iceberg.batch`** turns Mojo values into an Arrow `RecordBatch`, for
   callers whose data is not already Arrow.
 
+### Delete and overwrite
+
+An append never rewrites anything: its manifest list is the new manifest plus
+the parent's, carried by reference. Everything else has to rewrite the
+manifests that mention a file it removes, and `iceberg.commit` is where that
+happens. The parent's manifest list is walked once:
+
+- a manifest that mentions nothing removed is **carried by reference** — same
+  path, same counts, same `sequence_number`, `min_sequence_number` and
+  `first_row_id`. A delete of one row does not touch the rest of the table;
+- a manifest that does is **rewritten**: the entries it keeps become
+  `EXISTING` with their `sequence_number`, `file_sequence_number`,
+  `snapshot_id` and (v3) `first_row_id` spelled out, because inheritance is
+  **ADDED-only** and a null there would silently re-date the rows — which
+  would change which deletes apply to them. The entries it drops become
+  `DELETED` with the same numbers, so an expiry can still find the files;
+- a rewritten manifest with nothing live left is **dropped from the list**
+  rather than written empty.
+
+`write.delete.mode` picks the strategy, and the default is **copy-on-write**,
+as in Java (PyIceberg has nothing else):
+
+- **copy-on-write** rewrites every affected data file without the matching
+  rows and marks the originals `DELETED`. The result carries no delete files,
+  so any reader can read it.
+- **merge-on-read** leaves the rows where they are. On **v3** that is a
+  deletion vector: one Puffin `deletion-vector-v1` blob per data file, and a
+  manifest entry with `content=1`, `file_format=puffin`,
+  `referenced_data_file`, `record_count` = cardinality, and the
+  `content_offset` / `content_size_in_bytes` the footer must match exactly. On
+  **v2** it is a position delete file per partition: Parquet `(file_path,
+  pos)` under the reserved ids 2147483546 and 2147483545, sorted by path then
+  position.
+
+A **second** merge-on-read delete against a file that already has a vector
+reads the old one, unions the new positions in, and marks the old entry
+`DELETED` — the spec makes a new vector absorb everything it replaces, because
+a reader that finds a vector ignores every position delete file for that data
+file.
+
+Either way, a data file whose rows *all* match is removed rather than marked
+up. When the scan's residual for it is already `true` — the partition
+predicate proved it — the file is never opened: `DELETE WHERE region = 'eu'`
+on an `identity(region)` table costs one manifest rewrite and reads no
+Parquet at all.
+
+`overwrite(batches, filter?)` is a copy-on-write delete and an append in one
+`overwrite` snapshot; with no filter it replaces the table.
+`dynamic_partition_overwrite(batches)` derives the filter from where the new
+rows land and replaces exactly those partitions, examining no row.
+
+`expire_snapshots(older_than_ms, keep_last, dry_run)` drops old snapshots and
+then the files nothing points at. The keep set is built from the *retained*
+snapshots first — a data file added five snapshots ago is in every snapshot
+since, and expiring the oldest of them must not touch it — and only then is
+the expired snapshots' inventory subtracted from it. The pruned metadata is
+committed **before** any file is deleted, so an interruption leaves orphans
+rather than a snapshot with holes in it.
+
 ### Puffin and deletion vectors
 
 `iceberg.puffin` reads a footer (`PFA1`, the little-endian size and flags, the
@@ -267,6 +352,15 @@ manifest entry already carries `content_offset` and `content_size_in_bytes`,
 and the spec requires them to match it exactly, so the blob is read directly.
 `apache-datasketches-theta-v1` blobs are listed with their metadata (`ndv` and
 all) but their sketches are not decoded.
+
+`PuffinWriter` is the other direction. Blobs go into the body as they arrive,
+each recording the offset and length its `BlobMetadata` will claim, and
+`finish` appends `Magic payload size flags Magic` — the payload plain JSON, or
+one LZ4 frame with bit 0 of the flags set, which is the only footer
+compression the format defines. `add_deletion_vector` writes a
+`deletion-vector-v1` blob the one way the spec allows: never compressed,
+`snapshot-id` and `sequence-number` both -1, empty `fields`, and the
+`referenced-data-file` and `cardinality` properties a reader needs.
 
 ### Everything under it
 
@@ -361,8 +455,10 @@ headers are proved rather than assumed.
 
 | Not here | Why |
 |---|---|
-| `overwrite`, `delete`, `replace`, compaction | Every one of them merges manifests rather than appending to them, which is a different machine. [iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge covers them. |
-| Writing delete files or deletion vectors | Same reason. They are *read* completely. |
+| Compaction / `rewrite_manifests` / `rewrite_data_files` | The machinery is here — `iceberg.commit` writes a snapshot that adds and removes files — but no operation drives it, and nothing measures whether the result is any faster. |
+| Row lineage across a **copy-on-write** rewrite | A v3 rewrite should carry each row's `_row_id` into the new file; this one assigns fresh ids to rewritten rows. Merge-on-read, which is where v3 wants a delete to go, moves nothing and preserves them exactly. |
+| Removing a position delete *file* when a vector absorbs it | One position delete file can serve several data files, so dropping it would resurrect rows in the others. The superseded *vectors* are removed; a leftover position delete file is inert, because a reader that finds a vector ignores them. |
+| Equality deletes on a partitioned table, or on v3 | One unpartitioned equality delete file applies everywhere; pairing one with a partition tuple needs a caller who knows the data. v3 replaced them with deletion vectors and v4 deprecates writing them. |
 | Schema and spec evolution as a write | `create_table` fixes both; changing them afterwards is a commit this build does not construct. |
 | Writing **format version 1** | The v1 manifest schemas are generated and would be written, but nothing verifies them — v1 has no writers left to check against. v2 and v3 are gated end to end. |
 | Nested columns in a scan or a write | `to_table()` and `write_data_files` handle primitive columns; a struct/list/map raises. The *metadata* for them is complete. |
@@ -479,13 +575,16 @@ rules out EmberJson, which is why `iceberg.json` is a small in-repo parser.
 | `iceberg.expressions` | `parse_filter`, `bind`, projections, the two evaluators |
 | `iceberg.metadata` | `TableMetadata`, `Snapshot`, `SnapshotRef`, snapshot selection |
 | `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile` |
-| `iceberg.puffin` | `PuffinFile`, `BlobMetadata`, `read_deletion_vector` |
+| `iceberg.puffin` | `PuffinFile`, `PuffinWriter`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.read` | `ScanResult`, `ScanOptions`, `NameMapping`, the metadata columns |
 | `iceberg.batch` | `ColumnBuilder`, `batch_of` — Mojo values to an Arrow batch |
 | `iceberg.write` | `write_data_files`, `WriteOptions`, bound truncation, partition paths |
 | `iceberg.manifest_write` | `write_manifest`, `write_manifest_list`, the per-version Avro schemas |
 | `iceberg.append` | `prepare_append`, `AppendResult`, metadata file naming |
+| `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
+| `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
+| `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
 | `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `to_table`, `to_batches` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
@@ -548,6 +647,17 @@ def main() raises:
     var tx = table.new_append()
     tx.add(batch_of([ids^, region^]))
     print(tx.commit(), "rows committed")
+    table.refresh()
+
+    # Copy-on-write, because that is the default. `merge-on-read` writes
+    # deletion vectors on v3 and position delete files on v2 — either through
+    # the `write.delete.mode` table property or as an argument here.
+    print(table.delete_where('["=","region","us"]'), "rows deleted")
+    table.refresh()
+
+    # And the files nothing points at any more, once the old snapshots go.
+    var expired = table.expire_snapshots(keep_last=1)
+    print(len(expired.expired), "snapshots,", expired.total_deleted(), "files")
 ```
 
 ### Filter DSL
