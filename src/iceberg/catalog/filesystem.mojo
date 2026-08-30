@@ -38,6 +38,7 @@ from ..delete import (
     prepare_dynamic_partition_overwrite,
     prepare_overwrite,
 )
+from ..maintain import ExpireResult, delete_expired_files, expire_snapshots
 from ..read import ScanOptions
 from ..io import FileIO, basename, dirname, join_path, strip_scheme
 from ..json import substr
@@ -378,8 +379,34 @@ struct Table(Copyable, Movable):
                     raise e
                 self.refresh()
 
+    def expire_snapshots(
+        mut self,
+        older_than_ms: Int64 = -1,
+        keep_last: Int = 1,
+        dry_run: Bool = False,
+    ) raises -> ExpireResult:
+        """Drop old snapshots and the files nothing points at any more.
+
+        The pruned metadata is committed **first** and the files go after, so
+        an interruption leaves orphans rather than a snapshot with holes in
+        it. `dry_run` stops after the decision and returns the list.
+        """
+        var decided = expire_snapshots(
+            self.io, self.metadata, older_than_ms, keep_last, dry_run
+        )
+        var result = decided[1].copy()
+        if dry_run or len(result.expired) == 0:
+            return result^
+        self.commit_metadata(decided[0].copy())
+        _ = delete_expired_files(self.io, result)
+        return result^
+
     def commit(mut self, result: AppendResult) raises:
-        """Persist a prepared commit as a new `<V>-<uuid>.metadata.json`.
+        """Persist a prepared commit as a new `<V>-<uuid>.metadata.json`."""
+        self.commit_metadata(result.metadata.copy())
+
+    def commit_metadata(mut self, var metadata: TableMetadata) raises:
+        """Persist table metadata as a new `<V>-<uuid>.metadata.json`.
 
         The new file is written with *create* semantics — it must not already
         exist — which is what makes two writers racing on the same version
@@ -403,9 +430,9 @@ struct Table(Copyable, Movable):
                 + " while this commit was based on "
                 + basename(self.metadata_location)
             )
-        var version = next_metadata_version(result.metadata)
+        var version = next_metadata_version(metadata)
         var path = join_path(dir, metadata_file_name(version))
-        var doc = result.metadata.to_json()
+        var doc = metadata.to_json()
         self.io.write_new(path, doc.as_bytes())
         # And nobody else claimed the same version in the meantime.
         var clashes = 0
@@ -433,7 +460,7 @@ struct Table(Copyable, Movable):
             )
         except:
             pass
-        self.metadata = result.metadata.copy()
+        self.metadata = metadata^
         self.metadata.metadata_file_location = path
         self.metadata_location = path^
 

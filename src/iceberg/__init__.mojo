@@ -63,6 +63,12 @@ from iceberg.kernels import (
     filter_array,
 )
 from iceberg.json import Json, parse_json
+from iceberg.maintain import (
+    ExpireResult,
+    choose_expired,
+    delete_expired_files,
+    expire_snapshots,
+)
 from iceberg.manifest import (
     DataFile,
     Manifest,

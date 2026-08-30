@@ -3919,6 +3919,53 @@ def test_rest_commit_retries_a_409() raises:
     )
 
 
+def test_rest_delete_and_overwrite() raises:
+    """A delete and an overwrite committed through the catalog.
+
+    The `CommitTableRequest` is the same shape an append sends — the spec has
+    no per-operation update action — so this proves the whole delete path
+    survives a real optimistic commit, requirements checked by the server.
+    """
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var name = String("rest_delete_a")
+    _ = catalog.create_table(
+        String("wr"), name, schema, PartitionSpec.unpartitioned(), 
+        Dict[String, String](), 3
+    )
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 12))
+    _ = catalog.append(String("wr"), name, batches)
+    assert_equal(
+        catalog.load_table(String("wr"), name).scan().to_table().num_rows(), 12
+    )
+
+    # Merge-on-read, so the rows stay put and a deletion vector records them.
+    var after = catalog.delete_where(
+        String("wr"), name, String('["=","region","eu"]'), MODE_MERGE_ON_READ
+    )
+    assert_equal(after.metadata.current_snapshot().operation(), "delete")
+    var back = catalog.load_table(String("wr"), name)
+    assert_equal(back.scan().to_table().num_rows(), 9)
+    # One batch, so one data file, so one vector — with all three positions.
+    var deletes = delete_files_of(back)
+    assert_equal(len(deletes), 1)
+    assert_true(deletes[0].is_deletion_vector())
+    assert_equal(deletes[0].record_count, 3)
+
+    # And an overwrite on top of the deletes, which rewrites what is left.
+    var fresh = List[RecordBatch]()
+    fresh.append(write_batch(schema, 50, 2))
+    var done = catalog.overwrite(String("wr"), name, fresh)
+    assert_equal(done.metadata.current_snapshot().operation(), "overwrite")
+    var final = catalog.load_table(String("wr"), name)
+    assert_equal(final.scan().to_table().num_rows(), 2)
+    assert_equal(len(delete_files_of(final)), 0)
+
+
 def test_rest_commit_recovers_from_5xx_with_idempotency_key() raises:
     """Applied, then 500 — and the retry replays the success.
 
@@ -4446,6 +4493,104 @@ def test_rewritten_manifests_keep_their_sequence_numbers() raises:
             was[after[k].data_file.file_path],
             "sequence number of " + basename(after[k].data_file.file_path),
         )
+
+
+def test_expire_snapshots_removes_the_files_nothing_points_at() raises:
+    """A copy-on-write delete orphans the files it rewrote — but only once
+    the snapshots that still list them are gone."""
+    var table = delete_table("expire", "unpartitioned", 2)
+    var originals = List[String]()
+    var before = table.scan().plan_files()
+    for k in range(len(before)):
+        originals.append(before[k].data_file.file_path)
+    _ = table.delete_where(String('["=","region","eu"]'))
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 4)
+    var live = List[String]()
+    var after = table.scan().plan_files()
+    for k in range(len(after)):
+        live.append(after[k].data_file.file_path)
+    assert_equal(len(live), 3)
+
+    # A dry run decides and reports, and changes nothing at all.
+    var dry = table.expire_snapshots(-1, 1, True)
+    assert_equal(len(dry.expired), 3)
+    assert_true(dry.dry_run)
+    assert_true(dry.total_deleted() > 0)
+    for k in range(len(dry.deleted_files)):
+        assert_true(
+            table.io.exists(dry.deleted_files[k]), "a dry run deletes nothing"
+        )
+    for k in range(len(live)):
+        var doomed = False
+        for j in range(len(dry.deleted_files)):
+            if dry.deleted_files[j] == live[k]:
+                doomed = True
+        assert_false(doomed, "a live data file is never a candidate")
+    assert_equal(
+        len(table.metadata.snapshots), 4, "a dry run commits nothing"
+    )
+
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_equal(len(done.expired), 3)
+    assert_equal(len(done.retained), 1)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 1)
+    assert_equal(len(table.metadata.snapshot_log), 1)
+    # The rows are all still there, read through what is left.
+    assert_equal(table.scan().to_table().num_rows(), 14)
+    for k in range(len(live)):
+        assert_true(table.io.exists(live[k]), "the live files stay")
+    for k in range(len(originals)):
+        assert_false(
+            table.io.exists(originals[k]),
+            "the rewritten original " + basename(originals[k]) + " is gone",
+        )
+    for k in range(len(done.deleted_manifests)):
+        assert_false(table.io.exists(done.deleted_manifests[k]))
+
+
+def test_expire_snapshots_keeps_what_it_is_told_to() raises:
+    """`keep_last` is a floor, and the current snapshot is never a candidate.
+    """
+    var table = delete_table("expire_keep", "unpartitioned", 2)
+    assert_equal(len(table.metadata.snapshots), 3)
+    var kept = table.expire_snapshots(-1, 2, False)
+    assert_equal(len(kept.expired), 1, "three snapshots, keep two")
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 2)
+    assert_equal(table.scan().to_table().num_rows(), 18)
+    # Nothing older than the epoch, so nothing to do.
+    var none = table.expire_snapshots(0, 1, False)
+    assert_equal(len(none.expired), 0)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 2)
+    # And an age cut that reaches exactly one of them.
+    var at = table.metadata.snapshots[1].timestamp_ms
+    var one = table.expire_snapshots(at, 1, False)
+    assert_equal(len(one.expired), 1)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 1)
+    assert_equal(table.scan().to_table().num_rows(), 18)
+
+
+def test_expire_snapshots_after_a_merge_on_read_delete() raises:
+    """The Puffin file a superseded vector lived in goes with its snapshot,
+    and the one the current snapshot uses does not."""
+    var table = delete_table("expire_mor", "unpartitioned", 3)
+    _ = table.delete_where(String('["=","id",0]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var first = delete_files_of(table)[0].file_path
+    _ = table.delete_where(String('["=","id",3]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var second = delete_files_of(table)[0].file_path
+    assert_true(first != second)
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_equal(len(done.expired), 4)
+    table.refresh()
+    assert_equal(table.scan().to_table().num_rows(), 16)
+    assert_false(table.io.exists(first), "the superseded vector's file goes")
+    assert_true(table.io.exists(second), "the live one stays")
 
 
 def test_delete_that_matches_nothing_changes_nothing() raises:

@@ -26,6 +26,11 @@ from objectstore.http import Header, HttpClient, Response
 from parquet import RecordBatch
 
 from ..append import AppendResult, prepare_append
+from ..delete import (
+    prepare_delete,
+    prepare_dynamic_partition_overwrite,
+    prepare_overwrite,
+)
 from ..io import FileIO
 from ..json import Json, json_quote, parse_json, substr
 from ..manifest import DataFile
@@ -38,6 +43,10 @@ from .filesystem import Table
 
 
 comptime ACCESS_DELEGATION_HEADER = String("X-Iceberg-Access-Delegation")
+
+comptime COMMIT_DELETE = 0
+comptime COMMIT_OVERWRITE = 1
+comptime COMMIT_DYNAMIC = 2
 comptime VENDED_CREDENTIALS = String("vended-credentials")
 comptime REMOTE_SIGNING = String("remote-signing")
 
@@ -514,6 +523,142 @@ struct RestCatalog(Copyable, Movable):
                 )
             var err = rest_error("commit " + namespace + "." + table, resp)
             raise err^
+
+    def commit_change(
+        self,
+        namespace: String,
+        table: String,
+        kind: Int,
+        filter_dsl: String,
+        batches: List[RecordBatch],
+        mode: String,
+        retries: Int,
+    ) raises -> Table:
+        """A delete or an overwrite, committed the way an append is.
+
+        The `CommitTableRequest` is identical — one `add-snapshot` and one
+        `set-snapshot-ref` behind the same two requirements — because the spec
+        has no per-operation update action: what the snapshot *is* lives
+        entirely in the manifest list it names. So the retry story is the
+        same too, and one 409 reload re-plans the whole operation against the
+        new parent, because a delete planned against a snapshot that has moved
+        may now be missing rows a concurrent writer added.
+        """
+        var loaded = self.load_table(namespace, table)
+        var key = uuid4()
+        var attempt = 0
+        while True:
+            var result: AppendResult
+            if kind == COMMIT_DELETE:
+                result = prepare_delete(
+                    loaded.io, loaded.metadata, filter_dsl, mode
+                )
+            elif kind == COMMIT_OVERWRITE:
+                result = prepare_overwrite(
+                    loaded.io, loaded.metadata, batches, filter_dsl
+                )
+            else:
+                result = prepare_dynamic_partition_overwrite(
+                    loaded.io, loaded.metadata, batches
+                )
+            var body = commit_append_body(
+                namespace, table, loaded.metadata, result
+            )
+            var resp = self._commit(
+                namespace, table, body, key, "commit " + table
+            )
+            if resp.ok():
+                var out = loaded.copy()
+                var doc = parse_json(resp.text())
+                var loc = doc.opt_string(doc.root, "metadata-location", "")
+                var meta = doc.get(doc.root, "metadata")
+                if meta >= 0 and not doc.is_null(meta):
+                    out.metadata = TableMetadata.from_json(doc, meta)
+                else:
+                    out.metadata = result.metadata.copy()
+                if loc != "":
+                    out.metadata.metadata_file_location = loc
+                    out.metadata_location = loc^
+                return out^
+            if resp.status == 409 and attempt < retries:
+                attempt += 1
+                # A fresh key: this is a *different* commit now, planned
+                # against a different parent, and must not be deduplicated
+                # against the one the server refused.
+                key = uuid4()
+                loaded = self.load_table(namespace, table)
+                continue
+            if resp.status >= 500:
+                raise Error(
+                    "iceberg: CommitStateUnknown — the commit of "
+                    + namespace
+                    + "."
+                    + table
+                    + " returned "
+                    + String(resp.status)
+                    + " and may or may not have been applied; reload the"
+                    + " table before retrying: "
+                    + resp.body_excerpt(200)
+                )
+            var err = rest_error("commit " + namespace + "." + table, resp)
+            raise err^
+
+    def delete_where(
+        self,
+        namespace: String,
+        table: String,
+        filter_dsl: String,
+        mode: String = String(""),
+        retries: Int = 4,
+    ) raises -> Table:
+        """`DELETE FROM t WHERE <filter>`, committed through the catalog."""
+        return self.commit_change(
+            namespace,
+            table,
+            COMMIT_DELETE,
+            filter_dsl,
+            List[RecordBatch](),
+            mode,
+            retries,
+        )
+
+    def overwrite(
+        self,
+        namespace: String,
+        table: String,
+        batches: List[RecordBatch],
+        filter_dsl: String = String('["true"]'),
+        retries: Int = 4,
+    ) raises -> Table:
+        """Delete what the filter matches and add `batches`, in one snapshot.
+        """
+        return self.commit_change(
+            namespace,
+            table,
+            COMMIT_OVERWRITE,
+            filter_dsl,
+            batches,
+            String(""),
+            retries,
+        )
+
+    def dynamic_partition_overwrite(
+        self,
+        namespace: String,
+        table: String,
+        batches: List[RecordBatch],
+        retries: Int = 4,
+    ) raises -> Table:
+        """Replace exactly the partitions the new rows land in."""
+        return self.commit_change(
+            namespace,
+            table,
+            COMMIT_DYNAMIC,
+            String('["true"]'),
+            batches,
+            String(""),
+            retries,
+        )
 
     def append(
         self,
