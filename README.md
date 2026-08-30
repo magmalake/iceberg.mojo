@@ -1,5 +1,7 @@
 # iceberg.mojo
 
+[![mojoshelf](https://mojoshelf.org/badge/iceberg-mojo.svg)](https://mojoshelf.org/tins/iceberg-mojo) [![mojo nightly](https://mojoshelf.org/badge/iceberg-mojo/nightly.svg)](https://mojoshelf.org/tins/iceberg-mojo)
+
 > Part of **magmalake** — data lake building blocks in Mojo.
 
 Native, pure-Mojo **Apache Iceberg**: read a table's `metadata.json`, pick a
