@@ -6,7 +6,8 @@
 
 Native, pure-Mojo **Apache Iceberg**: read a table's `metadata.json`, pick a
 snapshot, decode its manifests, plan a scan, and **read the rows** — deletes
-applied, filters evaluated, projection resolved by field id — then **write**:
+applied, filters evaluated, projection resolved by field id, **structs, lists
+and maps included** — then **write**:
 create a table, append to it, delete rows from it (copy-on-write, or
 merge-on-read with real deletion vectors), overwrite it, and expire what is no
 longer reachable. Manifests, snapshots and optimistic commits included. Over
