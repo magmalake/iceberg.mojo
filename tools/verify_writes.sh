@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Write thirty-one tables with this library — ten appended to, twenty-one
+# Write thirty-two tables with this library — ten appended to, twenty-two
 # deleted from or overwritten — then read every one of them with PyIceberg
 # 0.11.1 and DuckDB 1.5.5 and check they agree, cell for cell. Finally let
 # PyIceberg *append* to four of them, two of which this library has deleted

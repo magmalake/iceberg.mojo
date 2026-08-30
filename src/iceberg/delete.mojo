@@ -51,6 +51,7 @@ from .expressions import ColumnMetrics, parse_filter
 from .io import FileIO, join_path
 from .kernels import filter_array, int_at
 from .manifest import (
+    CONTENT_EQUALITY_DELETES,
     CONTENT_POSITION_DELETES,
     DataFile,
 )
@@ -75,6 +76,7 @@ from .values import Datum
 from .write import (
     WriteOptions,
     _partition_key,
+    align_batch,
     data_file_from_parquet,
     partition_path,
     write_data_files,
@@ -736,4 +738,87 @@ def prepare_dynamic_partition_overwrite(
                 break
     return prepare_commit(
         io, metadata, OP_OVERWRITE, changes^, Dict[String, String]()
+    )
+
+
+# ── equality deletes (v2) ───────────────────────────────────────────────────
+def write_equality_deletes(
+    io: FileIO,
+    location: String,
+    rows: RecordBatch,
+    schema: Schema,
+    equality_ids: List[Int],
+    options: WriteOptions,
+) raises -> DataFile:
+    """One equality delete file: the values, and the ids they match on.
+
+    A row is deleted when every one of the `equality_ids` columns equals the
+    delete row's value for it, `null` included — the spec's "a null value in a
+    delete column matches a row if the row's value is null". The file holds
+    only those columns, under the table's own field ids, and the manifest
+    entry carries `equality_ids` so a reader knows which they are.
+
+    Written with the **unpartitioned** spec, which is what makes the file
+    apply to the whole table: a partitioned equality delete only reaches its
+    own partition, and pairing one with the right partition tuple is a job for
+    a caller that knows the data. Format version 2 only — v3 replaced these
+    with deletion vectors for positions and v4 is deprecating writing them.
+    """
+    if len(equality_ids) == 0:
+        raise Error("iceberg: an equality delete needs at least one field id")
+    var sub = schema.select(equality_ids)
+    var columns = align_batch(rows, sub)
+    if rows.num_rows == 0:
+        raise Error("iceberg: an equality delete file needs at least one row")
+    var data = write_parquet(columns, sub, options)
+    var name = (
+        "00000-0-equality-deletes-" + uuid4() + ".parquet"
+    )
+    var path = join_path(join_path(location, "data"), name)
+    io.write_all(path, Span(data))
+    var df = data_file_from_parquet(
+        data,
+        path,
+        sub,
+        PartitionSpec.unpartitioned(),
+        List[Datum](),
+        0,
+        options,
+    )
+    df.content = CONTENT_EQUALITY_DELETES
+    df.equality_ids = equality_ids.copy()
+    df.has_sort_order_id = False
+    return df^
+
+
+def prepare_equality_delete(
+    io: FileIO,
+    metadata: TableMetadata,
+    rows: RecordBatch,
+    equality_ids: List[Int],
+) raises -> AppendResult:
+    """`DELETE FROM t WHERE (a, b) IN (<rows>)`, as one prepared snapshot."""
+    if metadata.format_version != 2:
+        raise Error(
+            "iceberg: equality deletes are a v2 feature; this table is v"
+            + String(metadata.format_version)
+            + " (v3 uses deletion vectors, and v4 deprecates writing them)"
+        )
+    if len(metadata.spec().fields) != 0:
+        raise Error(
+            "iceberg: this build writes equality deletes only for"
+            " unpartitioned tables, where one file applies to every data file"
+        )
+    var df = write_equality_deletes(
+        io,
+        metadata.location,
+        rows,
+        metadata.schema(),
+        equality_ids,
+        WriteOptions.from_properties(metadata.properties),
+    )
+    var changes = FileChanges()
+    changes.added_deletes.append(df^)
+    return prepare_commit(
+        io, metadata, OP_DELETE, changes^, Dict[String, String]()
     )

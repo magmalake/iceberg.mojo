@@ -280,6 +280,23 @@ def write_delete_tables(catalog: FilesystemCatalog, schema: Schema) raises:
     _ = filtered.overwrite(more, String('[">","id",11]'))
     report(String("ovw_filter_v3"), filtered, "overwrite where id > 11")
 
+    # v2 equality deletes: values, not positions. PyIceberg cannot plan
+    # these at all, so DuckDB is the only external reader that can check them.
+    var eq = seeded(
+        catalog,
+        schema,
+        String("eq_v2"),
+        String("unpartitioned"),
+        2,
+        String(""),
+    )
+    var victims = ColumnBuilder.of(schema, 1)
+    victims.add(Datum.long_(Int64(2)))
+    victims.add(Datum.long_(Int64(9)))
+    victims.add(Datum.long_(Int64(16)))
+    _ = eq.delete_by_equality(batch_of([victims^]), [1])
+    report(String("eq_v2"), eq, "equality delete of ids 2, 9 and 16")
+
     for vi in range(len(versions)):
         var v = versions[vi]
         var name = "dyn_ident_v" + String(v)

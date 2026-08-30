@@ -125,6 +125,21 @@ def delete_cases():
                 "dvs": 0,
                 "delete_files": 0,
             }
+    cases["eq_v2"] = {
+        "ids": [i for i in range(18) if i not in (2, 9, 16)],
+        "mode": "equality",
+        "operation": "delete",
+        "version": 2,
+        "total_records": 18,
+        "position_deletes": 0,
+        "equality_deletes": 3,
+        "dvs": 0,
+        "delete_files": 1,
+        # PyIceberg 0.11.1 refuses to plan a scan with equality deletes
+        # (apache/iceberg#6568), so DuckDB is the only external oracle here
+        # and the refusal itself is what gets asserted.
+        "pyiceberg": "refuses",
+    }
     cases["mor_twice_v3"] = {
         "ids": [i for i in range(18) if i not in (0, 3)],
         "mode": "merge-on-read",
@@ -637,7 +652,23 @@ def verify_delete_table(name, table_dir, con, case):
     )
 
     # ── rows, cell for cell, by both readers ───────────────────────────────
-    compare("del.%s/pyiceberg" % name, pyiceberg_rows(t), want)
+    if case.get("pyiceberg") == "refuses":
+        try:
+            pyiceberg_rows(t)
+            raise Failure(
+                "%s: PyIceberg planned an equality-delete scan after all;"
+                " it used to refuse, so this expectation is stale" % name
+            )
+        except Failure:
+            raise
+        except Exception as e:
+            check(
+                "equality deletes" in str(e),
+                "%s: PyIceberg failed for an unexpected reason: %s" % (name, e),
+            )
+        facts["pyiceberg"] = "refuses equality deletes (apache/iceberg#6568)"
+    else:
+        compare("del.%s/pyiceberg" % name, pyiceberg_rows(t), want)
     if con is not None:
         compare("del.%s/duckdb" % name, duckdb_rows(con, meta), want)
         facts["duckdb_rows"] = len(want)
@@ -661,6 +692,13 @@ def verify_delete_table(name, table_dir, con, case):
         int(summary["total-records"]) == case["total_records"],
         "%s: total-records %s != %d"
         % (name, summary["total-records"], case["total_records"]),
+    )
+    check(
+        int(summary["total-equality-deletes"])
+        == case.get("equality_deletes", 0),
+        "%s: total-equality-deletes %s != %d"
+        % (name, summary["total-equality-deletes"],
+           case.get("equality_deletes", 0)),
     )
     check(
         int(summary["total-position-deletes"]) == case["position_deletes"],
@@ -737,6 +775,26 @@ def verify_delete_table(name, table_dir, con, case):
     deleted_ids = sorted(set(range(18)) - set(case["ids"]))
     positions_seen = 0
     for df in delete_entries:
+        if case["mode"] == "equality":
+            check(df["content"] == 2, "%s: equality delete content" % name)
+            check(
+                df["equality_ids"] == [1],
+                "%s: equality_ids %r" % (name, df["equality_ids"]),
+            )
+            check(
+                df["file_format"] == "PARQUET",
+                "%s: equality delete format %r" % (name, df["file_format"]),
+            )
+            values = _parquet_rows(df["file_path"], ["id"])["id"]
+            check(
+                sorted(values) == [2, 9, 16],
+                "%s: equality delete rows %r" % (name, values),
+            )
+            check(
+                len(values) == df["record_count"],
+                "%s: equality delete record_count" % name,
+            )
+            continue
         check(df["content"] == 1, "%s: delete file content != 1" % name)
         if case["dvs"]:
             check(

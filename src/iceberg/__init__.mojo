@@ -37,7 +37,9 @@ from iceberg.delete import (
     prepare_delete,
     prepare_delete_from,
     prepare_dynamic_partition_overwrite,
+    prepare_equality_delete,
     prepare_overwrite,
+    write_equality_deletes,
     write_deletion_vectors,
     write_position_deletes,
 )

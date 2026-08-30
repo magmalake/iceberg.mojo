@@ -36,6 +36,7 @@ from ..delete import (
     prepare_delete,
     prepare_delete_from,
     prepare_dynamic_partition_overwrite,
+    prepare_equality_delete,
     prepare_overwrite,
 )
 from ..maintain import ExpireResult, delete_expired_files, expire_snapshots
@@ -327,6 +328,29 @@ struct Table(Copyable, Movable):
             try:
                 self.commit(result)
                 return rows
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
+
+    def delete_by_equality(
+        mut self, rows: RecordBatch, equality_ids: List[Int]
+    ) raises -> Int64:
+        """Write one equality delete file. Returns the delete rows written.
+
+        The rows are values, not positions: every table row whose
+        `equality_ids` columns match one of them is gone from then on. v2 and
+        unpartitioned only — see `iceberg.delete.write_equality_deletes`.
+        """
+        var attempt = 0
+        while True:
+            var result = prepare_equality_delete(
+                self.io, self.metadata, rows, equality_ids
+            )
+            try:
+                self.commit(result)
+                return Int64(rows.num_rows)
             except e:
                 attempt += 1
                 if attempt > 4:

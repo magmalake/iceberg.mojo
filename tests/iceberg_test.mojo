@@ -4495,6 +4495,65 @@ def test_rewritten_manifests_keep_their_sequence_numbers() raises:
         )
 
 
+def test_equality_deletes_delete_by_value() raises:
+    """A v2 equality delete file: values, not positions.
+
+    PyIceberg 0.11.1 cannot plan equality deletes at all, so this library's
+    own reader is the check here and DuckDB 1.5.5 is the external one, in
+    tools/verify_written.py.
+    """
+    var table = delete_table("del_equality", "unpartitioned", 2)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var ids = ColumnBuilder.of(schema, 1)
+    ids.add(Datum.long_(Int64(2)))
+    ids.add(Datum.long_(Int64(9)))
+    ids.add(Datum.long_(Int64(16)))
+    var rows = batch_of([ids^])
+    var written = table.delete_by_equality(rows, [1])
+    assert_equal(written, 3)
+    table.refresh()
+    var left = ids_of(table)
+    assert_equal(len(left), 15)
+    assert_false(has_id(left, 2))
+    assert_false(has_id(left, 9))
+    assert_false(has_id(left, 16))
+    assert_true(has_id(left, 3))
+
+    var deletes = delete_files_of(table)
+    assert_equal(len(deletes), 1)
+    assert_true(deletes[0].is_equality_delete())
+    assert_equal(deletes[0].record_count, 3)
+    assert_equal(len(deletes[0].equality_ids), 1)
+    assert_equal(deletes[0].equality_ids[0], 1)
+    assert_equal(deletes[0].file_format.lower(), "parquet")
+
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.operation(), "delete")
+    assert_equal(snap.summary_int(String("added-equality-deletes"), -1), 3)
+    assert_equal(
+        snap.summary_int(String("added-equality-delete-files"), -1), 1
+    )
+    assert_equal(snap.summary_int(String("total-equality-deletes"), -1), 3)
+    # Rows are not moved, so the data files still hold all eighteen.
+    assert_equal(snap.summary_int(String("total-records"), -1), 18)
+
+
+def test_equality_deletes_are_refused_where_they_do_not_belong() raises:
+    var v3 = delete_table("del_eq_v3", "unpartitioned", 3)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var ids = ColumnBuilder.of(schema, 1)
+    ids.add(Datum.long_(Int64(2)))
+    var rows = batch_of([ids^])
+    with assert_raises():
+        _ = v3.delete_by_equality(rows, [1])
+    var part = delete_table("del_eq_part", "ident", 2)
+    var more = ColumnBuilder.of(schema, 1)
+    more.add(Datum.long_(Int64(2)))
+    var rows2 = batch_of([more^])
+    with assert_raises():
+        _ = part.delete_by_equality(rows2, [1])
+
+
 def test_expire_snapshots_removes_the_files_nothing_points_at() raises:
     """A copy-on-write delete orphans the files it rewrote — but only once
     the snapshots that still list them are gone."""
