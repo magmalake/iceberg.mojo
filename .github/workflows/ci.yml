@@ -118,6 +118,15 @@ jobs:
             --rebase "$REBASE" --select id,region,_file --limit 2 --format json
           pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/evolved \
             --rebase "$REBASE" --filter '[">","id",3]' --lazy
+          # Nested columns: JSON out, then a sub-field projection and a
+          # predicate on a struct leaf, then CSV (the same JSON, one field).
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
+            --rebase "$REBASE" --format json
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
+            --rebase "$REBASE" --select addr.city,id --format json
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_evo_v2 \
+            --rebase "$REBASE" --filter '["=","addr.town","eu"]'
+          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo schema tests/fixtures/nested_part_v2
 
   write-interop:
     name: write interop (PyIceberg + DuckDB)

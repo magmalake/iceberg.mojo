@@ -12,10 +12,16 @@
 It copies the root `ArrowArray` and `ArrowSchema` into caller-owned storage,
 which is exactly the "move" a C Data Interface consumer performs. This script
 allocates that storage with ctypes, calls in once per column, hands the two
-addresses to `pyarrow.Array._import_from_c`, reassembles a table, and compares
-it — cell for cell, sorted by `id` — with what PyIceberg reads from the same
-Iceberg table. pyarrow then calls our `release` callback when the arrays are
-collected.
+addresses to `pyarrow.Array._import_from_c`, and compares the reassembled
+table — cell for cell, in `tools/oracle_rows.py`'s canonical encoding — with
+the **checked-in row oracle** PyIceberg produced for the same table. pyarrow
+then calls our `release` callback when the arrays are collected.
+
+The oracle rather than a live PyIceberg read, because the fixture metadata
+carries absolute paths into the warehouse it was generated in (see
+tests/fixtures/PROVENANCE.md): the Mojo side rebases them onto the fixtures
+directory, and PyIceberg cannot. Reading the metadata file for its *schema* is
+fine — that touches no manifest.
 
 The interesting columns are the nested ones: a struct is `+s` with children, a
 list is `+l` with one child and an offsets buffer, and a map is `+m` whose
@@ -33,7 +39,9 @@ import os
 import sys
 
 import pyarrow as pa
-import pyarrow.compute as pc
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from oracle_rows import encode_rows  # noqa: E402
 
 LIB = sys.argv[1] if len(sys.argv) > 1 else "build/libibcarrow.dylib"
 FIXTURES = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else "tests/fixtures")
@@ -59,6 +67,17 @@ def current_metadata(table):
     )
 
 
+def oracle(table):
+    """The checked-in expected rows: PyIceberg's if it has any, else DuckDB's."""
+    for name in ("rows_pyiceberg_0.json", "rows_duckdb.json"):
+        path = os.path.join(FIXTURES, table, "oracle", name)
+        if os.path.exists(path):
+            with open(path) as fh:
+                doc = json.load(fh)
+            return doc["columns"], doc["rows"], name
+    return None, None, None
+
+
 def export_column(meta, col):
     arr_buf = (ctypes.c_char * 80)()
     sch_buf = (ctypes.c_char * 72)()
@@ -77,17 +96,6 @@ def export_column(meta, col):
     return got, rc
 
 
-def canon(array):
-    """Values only, with the Arrow spelling normalised away.
-
-    PyIceberg produces `large_string` and `large_list`; this reader produces
-    the 32-bit forms, which hold the same values. Comparing `to_pylist()`
-    sidesteps the spelling entirely — and a map arrives as a list of pairs
-    from both sides.
-    """
-    return array.to_pylist()
-
-
 def main():
     from pyiceberg.table import StaticTable
 
@@ -95,47 +103,52 @@ def main():
     failures = []
     for table in TABLES:
         meta = current_metadata(table)
-        want_table = StaticTable.from_metadata(meta).scan().to_arrow()
-        n_cols = want_table.num_columns
+        # The metadata file alone: its schema, without touching a manifest.
+        schema = StaticTable.from_metadata(meta).schema()
+        names, want_rows, source = oracle(table)
+        if names is None:
+            failures.append("%s: no row oracle" % table)
+            continue
+        types = {f.name: f.field_type for f in schema.fields}
 
         columns = []
-        for col in range(n_cols):
+        for col in range(len(names)):
             got, rc = export_column(meta, col)
             if got is None:
                 failures.append("%s[%d]: exporter returned %d" % (table, col, rc))
                 columns = None
                 break
-            if rc != n_cols:
+            if rc != len(names):
                 failures.append(
-                    "%s: scan produced %d columns, PyIceberg %d"
-                    % (table, rc, n_cols)
+                    "%s: scan produced %d columns, the oracle has %d"
+                    % (table, rc, len(names))
                 )
             columns.append(got)
         if columns is None:
             continue
 
-        got_table = pa.table(
-            {want_table.column_names[i]: columns[i] for i in range(n_cols)}
+        got_table = pa.table({names[i]: columns[i] for i in range(len(names))})
+        got_rows = encode_rows(
+            names, [types[n] for n in names], got_table.to_pylist()
         )
-        # Both readers see the same files, but nothing promises the same order.
-        got_sorted = got_table.sort_by([("id", "ascending")])
-        want_sorted = want_table.sort_by([("id", "ascending")])
-        if got_sorted.num_rows != want_sorted.num_rows:
-            failures.append(
-                "%s: %d rows imported, PyIceberg has %d"
-                % (table, got_sorted.num_rows, want_sorted.num_rows)
+        if got_rows != want_rows:
+            n = min(len(got_rows), len(want_rows))
+            first = next(
+                (i for i in range(n) if got_rows[i] != want_rows[i]), n
             )
-            continue
-        for i, name in enumerate(want_table.column_names):
-            g = canon(got_sorted.column(i).combine_chunks())
-            w = canon(want_sorted.column(i).combine_chunks())
-            if g != w:
-                failures.append(
-                    "%s.%s differs\n  got : %s\n  want: %s" % (table, name, g, w)
+            failures.append(
+                "%s differs from %s at row %d\n  got : %s\n  want: %s"
+                % (
+                    table,
+                    source,
+                    first,
+                    got_rows[first] if first < len(got_rows) else "<missing>",
+                    want_rows[first] if first < len(want_rows) else "<missing>",
                 )
-                continue
-            checked += 1
-        del columns, got_table, got_sorted
+            )
+        else:
+            checked += len(names)
+        del columns, got_table
         gc.collect()
 
     print(
