@@ -1,0 +1,12 @@
+{
+ "filter": "[\"is-null\",\"ts\"]",
+ "columns": [
+  "id",
+  "region",
+  "amount",
+  "ts",
+  "ok",
+  "cnt"
+ ],
+ "rows": []
+}

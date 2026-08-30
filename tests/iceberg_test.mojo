@@ -36,6 +36,13 @@ from iceberg.catalog.rest import (
     ACCESS_DELEGATION_HEADER,
     VENDED_CREDENTIALS,
 )
+from iceberg.puffin import (
+    BLOB_DELETION_VECTOR_V1,
+    BlobMetadata,
+    PuffinFile,
+    deleted_positions,
+    read_deletion_vector,
+)
 from iceberg.scan import TableScan, FileScanTask
 from iceberg.manifest import (
     ManifestFile,
@@ -574,13 +581,30 @@ def test_partition_type() raises:
 
 # ══ table metadata ══════════════════════════════════════════════════════════
 comptime FIXTURE_TABLES = String(
-    "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,deletes_v2"
+    "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,"
+    "deletes_v2,dv_v3"
+)
+"""The tables with a *plan* oracle. `eq_deletes_v2` is deliberately absent:
+PyIceberg 0.11.1 refuses to plan a scan of a table with equality deletes at
+all ("PyIceberg does not yet support equality deletes"), so there is no plan
+oracle for it — DuckDB supplies its row oracle instead."""
+
+comptime ALL_FIXTURE_TABLES = String(
+    "unpartitioned,ident_part,bucket_part,day_part,trunc_part,evolved,"
+    "deletes_v2,dv_v3,eq_deletes_v2"
 )
 
 
+def all_fixture_table_names() -> List[String]:
+    return _split_commas(ALL_FIXTURE_TABLES)
+
+
 def fixture_table_names() -> List[String]:
+    return _split_commas(FIXTURE_TABLES)
+
+
+def _split_commas(t: String) -> List[String]:
     var out = List[String]()
-    var t = FIXTURE_TABLES
     var start = 0
     while True:
         var c = t.find(",", start)
@@ -1882,7 +1906,7 @@ def test_table_load_and_scan() raises:
 def test_filesystem_catalog() raises:
     var cat = FilesystemCatalog(FIXTURES, fixture_io())
     var names = cat.list_tables("")
-    assert_equal(len(names), 7, "expected 7 fixture tables")
+    assert_equal(len(names), 9, "expected 9 fixture tables")
     assert_true(cat.table_exists("", "ident_part"))
     assert_false(cat.table_exists("", "no_such_table"))
     var t = cat.load_table("", "bucket_part")
@@ -2223,6 +2247,145 @@ def test_s3_catalog_listing() raises:
     assert_true(seen)
     assert_true(cat.table_exists("", "unpartitioned"))
     assert_false(cat.table_exists("", "nope"))
+
+
+# ══ Puffin and deletion vectors ═════════════════════════════════════════════
+# `dv_v3` is a format-version 3 table whose deletes live in a Puffin file as
+# `deletion-vector-v1` blobs. It was assembled by tools/make_delete_tables.py
+# from PyIceberg's own v3 structs (PyIceberg cannot write v3 metadata) and
+# validated by reading it back with PyIceberg, which decodes the vectors with
+# entirely separate code; tests/fixtures/delete_tables_report.json is that
+# read-back.
+def dv_report() raises -> Json:
+    return parse_json(read_file(FIXTURES + "/delete_tables_report.json"))
+
+
+def dv_puffin_location() raises -> String:
+    """The Puffin file the dv_v3 delete manifest points at."""
+    var tasks = fixture_scan("dv_v3").plan_files()
+    for k in range(len(tasks)):
+        for j in range(len(tasks[k].delete_files)):
+            if tasks[k].delete_files[j].is_deletion_vector():
+                return tasks[k].delete_files[j].file_path
+    raise Error("no deletion vector in the dv_v3 plan")
+
+
+def test_puffin_footer() raises:
+    var io = fixture_io()
+    var pf = PuffinFile.open(io, dv_puffin_location())
+    assert_equal(len(pf.blobs), 2)
+    assert_false(pf.footer_compressed)
+    assert_equal(pf.created_by(), "iceberg.mojo fixture generator")
+    for k in range(len(pf.blobs)):
+        ref b = pf.blobs[k]
+        assert_equal(b.type, BLOB_DELETION_VECTOR_V1)
+        assert_true(b.is_deletion_vector())
+        # The spec requires these for a deletion vector.
+        assert_true(b.referenced_data_file() != "")
+        assert_equal(b.cardinality(), 1)
+        assert_equal(b.compression_codec, "")
+        assert_equal(b.snapshot_id, -1)
+        assert_equal(b.sequence_number, -1)
+        assert_true(b.offset >= 4)
+        assert_true(b.length > 0)
+
+
+def test_puffin_offsets_match_the_manifest() raises:
+    """`content_offset` / `content_size_in_bytes` must equal the footer's
+    `offset` / `length` for the same blob — the spec says "must exactly
+    match", and a scan trusts the manifest and never reads the footer."""
+    var io = fixture_io()
+    var pf = PuffinFile.open(io, dv_puffin_location())
+    var tasks = fixture_scan("dv_v3").plan_files()
+    var matched = 0
+    for k in range(len(tasks)):
+        for j in range(len(tasks[k].delete_files)):
+            ref d = tasks[k].delete_files[j]
+            if not d.is_deletion_vector():
+                continue
+            assert_true(d.has_content_offset)
+            assert_true(d.has_content_size_in_bytes)
+            var found = False
+            for b in range(len(pf.blobs)):
+                if pf.blobs[b].offset != d.content_offset:
+                    continue
+                found = True
+                assert_equal(pf.blobs[b].length, d.content_size_in_bytes)
+                assert_equal(
+                    pf.blobs[b].referenced_data_file(), d.referenced_data_file
+                )
+                assert_equal(pf.blobs[b].cardinality(), d.record_count)
+            assert_true(found)
+            matched += 1
+    assert_equal(matched, 2)
+
+
+def test_deletion_vector_decodes() raises:
+    """Positions decoded here must equal the ones the generator recorded and
+    PyIceberg read back."""
+    var io = fixture_io()
+    var doc = dv_report()
+    var dv = doc.get(doc.root, "dv_v3")
+    var deleted = doc.get(dv, "deleted")
+    var tasks = fixture_scan("dv_v3").plan_files()
+    var checked = 0
+    for k in range(len(tasks)):
+        for j in range(len(tasks[k].delete_files)):
+            ref d = tasks[k].delete_files[j]
+            if not d.is_deletion_vector():
+                continue
+            var positions = deleted_positions(
+                io, d.file_path, d.content_offset, d.content_size_in_bytes
+            )
+            # Find the report entry for the referenced data file.
+            var want = List[Int64]()
+            for e in range(doc.size(deleted)):
+                var entry = doc.at(deleted, e)
+                if not d.referenced_data_file.endswith(
+                    doc.req_string(entry, "file")
+                ):
+                    continue
+                var pos = doc.get(entry, "positions")
+                for q in range(doc.size(pos)):
+                    want.append(doc.as_int(doc.at(pos, q)))
+            assert_equal(len(positions), len(want))
+            for q in range(len(want)):
+                assert_equal(Int64(Int(positions[q])), want[q])
+            checked += 1
+    assert_equal(checked, 2)
+
+
+def test_deletion_vector_crc_is_checked() raises:
+    """A corrupted vector must be an error, not silently missing deletes."""
+    var io = fixture_io()
+    var tasks = fixture_scan("dv_v3").plan_files()
+    ref d = tasks[0].delete_files[0]
+    with assert_raises():
+        # One byte short: the framing's own length check must reject it.
+        _ = read_deletion_vector(
+            io, d.file_path, d.content_offset, d.content_size_in_bytes - 1
+        )
+
+
+def test_dv_supersedes_and_associates() raises:
+    """Every data file in dv_v3 gets exactly its own vector."""
+    var tasks = fixture_scan("dv_v3").plan_files()
+    assert_equal(len(tasks), 2)
+    for k in range(len(tasks)):
+        assert_equal(len(tasks[k].delete_files), 1)
+        assert_true(tasks[k].delete_files[0].is_deletion_vector())
+        assert_equal(
+            tasks[k].delete_files[0].referenced_data_file,
+            tasks[k].data_file.file_path,
+        )
+        assert_equal(tasks[k].delete_files[0].file_format.lower(), "puffin")
+
+
+def test_dv_table_is_v3() raises:
+    var m = load_fixture_metadata("dv_v3")
+    assert_equal(m.format_version, 3)
+    var snap = m.current_snapshot()
+    assert_equal(snap.operation(), "delete")
 
 
 def main() raises:

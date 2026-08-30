@@ -1,0 +1,26 @@
+{
+ "filter": "[\"and\",[\">=\",\"id\",2],[\"is-null\",\"amount\"]]",
+ "columns": [
+  "id",
+  "label",
+  "cnt",
+  "amount",
+  "extra"
+ ],
+ "rows": [
+  [
+   "2",
+   "beta",
+   "20",
+   null,
+   null
+  ],
+  [
+   "5",
+   "epsilon",
+   "5000000000",
+   null,
+   null
+  ]
+ ]
+}

@@ -1,0 +1,39 @@
+{
+  "bucket_part": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 7
+  },
+  "day_part": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 7
+  },
+  "deletes_v2": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 3
+  },
+  "dv_v3": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 4
+  },
+  "eq_deletes_v2": {
+    "pyiceberg_error": "PyIceberg does not yet support equality deletes: https://github.com/apache/iceberg/issues/6568",
+    "pyiceberg_filters": 0,
+    "duckdb_rows": 3
+  },
+  "evolved": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 6
+  },
+  "ident_part": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 7
+  },
+  "trunc_part": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 7
+  },
+  "unpartitioned": {
+    "pyiceberg_filters": 6,
+    "duckdb_rows": 7
+  }
+}

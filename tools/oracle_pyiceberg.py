@@ -306,6 +306,24 @@ PYICEBERG_TABLE_FILTERS = {
         '["in","region",["eu","apac"]]',
         '["is-null","amount"]',
     ],
+    # Same six filters over the two delete fixtures, so the delete gates and
+    # the plan gates are shaped identically to everything else.
+    "eq_deletes_v2": [
+        '["true"]',
+        '["=","region","eu"]',
+        '[">","id",3]',
+        '["and",["=","region","us"],["not-null","amount"]]',
+        '["in","region",["eu","apac"]]',
+        '["is-null","amount"]',
+    ],
+    "dv_v3": [
+        '["true"]',
+        '["=","region","eu"]',
+        '[">","id",3]',
+        '["and",["=","region","us"],["not-null","amount"]]',
+        '["in","region",["eu","apac"]]',
+        '["is-null","amount"]',
+    ],
 }
 
 ALL_TABLES = BRIDGE_TABLES + tuple(PYICEBERG_TABLE_FILTERS)
@@ -339,10 +357,23 @@ def run_all(fixtures_dir: str, catalog_db: str | None) -> int:
                     os.path.join(oracle_dir, "plan_%d.filter.txt" % k), "w"
                 ) as fh:
                     fh.write(dsl + "\n")
+                try:
+                    plan_json = _compact(bridge_plan(table, dsl))
+                except Exception as e:
+                    # PyIceberg 0.11.1 refuses to plan a scan of a table with
+                    # equality deletes at all. The filters are still written,
+                    # so the Mojo side has the same six cases; there is simply
+                    # no PyIceberg plan oracle for that table.
+                    print(
+                        "  %s filter %d: no plan oracle (%s)"
+                        % (name, k, str(e).split("\n")[0]),
+                        file=sys.stderr,
+                    )
+                    continue
                 with open(
                     os.path.join(oracle_dir, "plan_%d.json" % k), "w"
                 ) as fh:
-                    fh.write(_compact(bridge_plan(table, dsl)))
+                    fh.write(plan_json)
         else:
             filters = []
             for k in range(6):
@@ -351,10 +382,14 @@ def run_all(fixtures_dir: str, catalog_db: str | None) -> int:
                     filters.append(fh.read().strip())
 
         for k, dsl in enumerate(filters):
+            try:
+                got = plan(table, dsl)
+            except Exception:
+                continue
             with open(
                 os.path.join(oracle_dir, "pyiceberg_plan_%d.json" % k), "w"
             ) as fh:
-                json.dump(plan(table, dsl), fh, indent=2, sort_keys=False)
+                json.dump(got, fh, indent=2, sort_keys=False)
                 fh.write("\n")
         print(
             "%-14s %s  (%d filters)"

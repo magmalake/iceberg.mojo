@@ -1,0 +1,89 @@
+{
+  "pyiceberg_version": "0.11.1",
+  "notes": {
+    "eq_deletes": "PyIceberg 0.11.1 has no equality-delete writer and, on read, ignores equality deletes entirely (pyarrow._task_to_record_batches applies only positional deletes). Its row output is therefore recorded as UNFILTERED, and DuckDB is the oracle for the equality-delete gate.",
+    "dv": "PyIceberg 0.11.1 cannot write v3 metadata (TableMetadataV3.model_dump_json raises NotImplementedError) but reads it, and pyiceberg.table.puffin.PuffinFile decodes deletion-vector-v1, so its row output IS the oracle here."
+  },
+  "eq_deletes_v2": {
+    "format_version": 2,
+    "snapshots": 3,
+    "delete_files": [
+      {
+        "path": "00000-0-equality-deletes-id-48c5b231-dd58-4273-b0e5-929a15fcdbf0.parquet",
+        "content": "EQUALITY_DELETES",
+        "record_count": 2,
+        "sequence_number": 3,
+        "equality_ids": [
+          1
+        ],
+        "rows": [
+          {
+            "id": 2
+          },
+          {
+            "id": 6
+          }
+        ]
+      },
+      {
+        "path": "00000-0-equality-deletes-amount-a8a0e969-9f22-4f64-9ee6-54a09f19d53d.parquet",
+        "content": "EQUALITY_DELETES",
+        "record_count": 1,
+        "sequence_number": 3,
+        "equality_ids": [
+          3
+        ],
+        "rows": [
+          {
+            "amount": null
+          }
+        ]
+      }
+    ],
+    "data_files": [
+      {
+        "path": "00000-0-70d8a9f6-24e6-44af-8640-704580391caf.parquet",
+        "content": "DATA",
+        "record_count": 3,
+        "sequence_number": 2
+      },
+      {
+        "path": "00000-0-82fa95d2-d873-411c-96ca-ac77986a4078.parquet",
+        "content": "DATA",
+        "record_count": 3,
+        "sequence_number": 1
+      }
+    ],
+    "pyiceberg_plan": "refused: PyIceberg does not yet support equality deletes: https://github.com/apache/iceberg/issues/6568"
+  },
+  "dv_v3": {
+    "format_version": 3,
+    "snapshots": 3,
+    "puffin_file": "00000-0-deletion-vectors-de425c0b-b73e-49c9-acee-d0843db64a14.puffin",
+    "deleted": [
+      {
+        "file": "00000-0-17165d53-27cd-4727-82a3-009894efd38f.parquet",
+        "positions": [
+          2
+        ]
+      },
+      {
+        "file": "00000-0-9d800e8a-6d90-4f35-82f0-8f39db64dd81.parquet",
+        "positions": [
+          0
+        ]
+      }
+    ],
+    "pyiceberg_rows_after_dv": [
+      1,
+      2,
+      5,
+      6
+    ],
+    "manifest_first_row_ids": {
+      "af83904e-28bc-45e3-973d-894e35941dc6-m0.avro": 0,
+      "127a895b-e58f-4607-b019-4f62f28d56b9-m0.avro": 3
+    },
+    "next_row_id": null
+  }
+}

@@ -1,0 +1,29 @@
+{
+ "filter": "[\"and\",[\"starts-with\",\"region\",\"apac\"],[\">\",\"id\",4]]",
+ "columns": [
+  "id",
+  "region",
+  "amount",
+  "ts",
+  "ok",
+  "cnt"
+ ],
+ "rows": [
+  [
+   "5",
+   "apac-north",
+   "4016000000000000",
+   "1701388800000000",
+   "true",
+   "50"
+  ],
+  [
+   "7",
+   "apac-south",
+   null,
+   "1699920000000000",
+   "false",
+   "70"
+  ]
+ ]
+}

@@ -1,0 +1,26 @@
+{
+ "filter": "[\"is-null\",\"amount\"]",
+ "columns": [
+  "id",
+  "region",
+  "amount",
+  "ts",
+  "ok"
+ ],
+ "rows": [
+  [
+   "2",
+   "us",
+   null,
+   "1700006400000000",
+   "false"
+  ],
+  [
+   "5",
+   "apac",
+   null,
+   "1701388800000000",
+   "true"
+  ]
+ ]
+}

@@ -45,6 +45,32 @@
   "snapshots": 3,
   "table_uuid": "6edf9b93-df02-4975-958a-052d07498f87"
  },
+ "dv_v3": {
+  "current_metadata": "00003-addb2982-e3b1-4844-bec3-b721739b3a27.metadata.json",
+  "current_snapshot_id": 3624823154,
+  "format_version": 3,
+  "metadata_files": [
+   "00000-704393e1-2690-4dc0-869b-a579d66d05e3.metadata.json",
+   "00001-d5514b3b-fb54-4b90-b08c-562d4cdae33a.metadata.json",
+   "00002-23840bd3-4d97-4121-a312-8237d3bf3a44.metadata.json",
+   "00003-addb2982-e3b1-4844-bec3-b721739b3a27.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "26ede16e-0aa2-41b6-9b15-befd576785df"
+ },
+ "eq_deletes_v2": {
+  "current_metadata": "00003-ee952b69-d764-4c84-9113-b2da7a3da439.metadata.json",
+  "current_snapshot_id": 7283329263027707887,
+  "format_version": 2,
+  "metadata_files": [
+   "00000-03fcf13e-0d33-4912-9647-d5b96dbb3c77.metadata.json",
+   "00001-173c55ee-2d9c-4187-bfa1-b0e74a24f254.metadata.json",
+   "00002-bedbf1b1-ef34-4657-94f7-706c691f036a.metadata.json",
+   "00003-ee952b69-d764-4c84-9113-b2da7a3da439.metadata.json"
+  ],
+  "snapshots": 3,
+  "table_uuid": "f5128383-e016-41a1-afe8-2cc986ffa0b9"
+ },
  "evolved": {
   "current_metadata": "00006-4cdfbfe2-4744-467a-ac28-fbeccf64f2ba.metadata.json",
   "current_snapshot_id": 1959063423059298568,

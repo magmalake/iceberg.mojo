@@ -1,0 +1,11 @@
+{
+ "filter": "[\"and\",[\"=\",\"region\",\"us\"],[\"not-null\",\"amount\"]]",
+ "columns": [
+  "id",
+  "region",
+  "amount",
+  "ts",
+  "ok"
+ ],
+ "rows": []
+}

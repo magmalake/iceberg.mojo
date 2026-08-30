@@ -1,0 +1,19 @@
+{
+  "filter": "[\"and\",[\"=\",\"region\",\"us\"],[\"not-null\",\"amount\"]]",
+  "tasks": [
+    {
+      "data_file": "00000-0-17165d53-27cd-4727-82a3-009894efd38f.parquet",
+      "record_count": 3,
+      "delete_files": [
+        "00000-0-deletion-vectors-de425c0b-b73e-49c9-acee-d0843db64a14.puffin"
+      ]
+    },
+    {
+      "data_file": "00000-0-9d800e8a-6d90-4f35-82f0-8f39db64dd81.parquet",
+      "record_count": 3,
+      "delete_files": [
+        "00000-0-deletion-vectors-de425c0b-b73e-49c9-acee-d0843db64a14.puffin"
+      ]
+    }
+  ]
+}
