@@ -1,5 +1,5 @@
 name = "iceberg-mojo"
 version = "0.1.0"
-description = "Native pure-Mojo Apache Iceberg table metadata, transforms, manifests and scan planning"
+description = "Native pure-Mojo Apache Iceberg: metadata, manifests, scan planning, Arrow reads and fast-append writes"
 tags = ["iceberg", "table-format", "data-lake", "metadata", "manifests"]
 tins = ["hashes-mojo"]

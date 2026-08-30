@@ -46,6 +46,14 @@ $ iceberg-mojo cat --rest https://catalog --table db.orders --token $TOKEN
 
 ## The stack
 
+**Native read and native fast-append.** Scans decode Parquet through
+parquet.mojo and come out as Arrow; appends write Parquet and Avro back
+through the same tins and commit against a filesystem layout or a REST
+catalog. `overwrite`, `delete` and compaction are not here — they merge
+manifests rather than appending to them — and go through
+[iceberg-rs.mojo](https://github.com/magmalake/iceberg-rs.mojo)'s bridge over
+iceberg-rust.
+
 Everything under this line is another magmalake tin, consumed by source path.
 iceberg.mojo is the part that knows what Iceberg *means*; the tins below know
 what the bytes mean.
@@ -59,12 +67,12 @@ what the bytes mean.
                          │  puffin · reads · kernels    │
                          │  writes · commits · catalogs │
                          └───┬─────────┬─────────┬──────┘
-             manifests (Avro)│         │         │data files (Parquet)
+        manifests (Avro, r/w)│         │         │data files (Parquet, r/w)
                              │         │         │
         ┌────────────────────▼──┐   ┌──▼─────────▼──────────┐
         │      avro.mojo        │   │     parquet.mojo      │
         │  OCF, field ids       │   │  pages, encodings,    │
-        │  deflate/snappy/zstd  │   │  Arrow C Data out     │
+        │  deflate/snappy/zstd  │   │  Arrow C Data, writer │
         └───────────────────────┘   └──┬─────────┬────────┬─┘
                                        │         │        │
                               ┌────────▼───┐ ┌───▼────┐ ┌─▼─────────┐
