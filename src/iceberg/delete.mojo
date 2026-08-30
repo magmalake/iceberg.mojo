@@ -73,7 +73,7 @@ from .transforms import PartitionSpec
 from .types import P_LONG, P_STRING
 from .util import uuid4
 from .values import Datum
-from .nested import ColumnTree
+from .nested import ColumnTree, filter_tree
 from .write import (
     WriteOptions,
     _partition_key,
@@ -529,8 +529,16 @@ def surviving_batch(
     for c in range(whole.num_columns()):
         if c == pos_at:
             continue
+        # `filter_tree`, not `filter_array`: a struct, list or map column is a
+        # whole subtree, and a rewrite has to carry all of it across.
         batch.roots.append(
-            batch.arena.add(filter_array(whole.columns[c].array(), keep, kept))
+            filter_tree(
+                whole.columns[c].arena,
+                whole.columns[c].root,
+                keep,
+                kept,
+                batch.arena,
+            )
         )
     return batch^
 

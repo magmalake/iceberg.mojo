@@ -165,9 +165,10 @@ self-checked — the expected values come from them, never from this code. See
 | **(v)** Manifest maintenance on a delete | fastavro | ✅ every `EXISTING`/`DELETED` entry carries its own `sequence_number`, `file_sequence_number` and (v3) `first_row_id`; every `ADDED` entry leaves them null; no manifest with nothing live survives |
 | **(w)** PyIceberg **appends to a table we deleted from**, and we read the result | PyIceberg | ✅ 2 tables, 14 + 3 = 17 rows, our deletes still applied |
 | **(x′)** Nested columns **we write** — rows, and per-leaf metrics | PyIceberg **and** DuckDB, against the JSON the writer was fed | ✅ **4 / 4 tables** (v2, v3, `identity(addr.city)`, `bucket[4](addr.zip)`), 12 rows each, cell-exact both ways; `value_counts` and `null_value_counts` for all **8 nested leaves** equal to the level records the rows imply |
+| **(x″)** Delete and overwrite on a nested table | itself, cell by cell, before and after | ✅ a v3 **deletion vector** and a **copy-on-write rewrite** over struct + list + map columns leave every surviving row byte-identical; `overwrite`, `identity(addr.city)` and `bucket[4](addr.zip)` all round-trip |
 | **(y)** A nested scan over the **Arrow C Data Interface** | `pyarrow.Array._import_from_c` | ✅ **20 columns** across 4 tables imported into pyarrow and equal to PyIceberg's own read — structs, lists and maps with their children |
 | **(x)** `expire_snapshots` | itself, file by file | ✅ a dry run that touches nothing and never names a live file; an expiry that removes exactly what a copy-on-write delete orphaned; `keep_last` and an age cut; a superseded Puffin file removed while the live one stays |
-| Tests | | **145 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| Tests | | **150 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
 | CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **36 tables** we wrote and importing a nested scan into pyarrow |
 
 ### The one plan disagreement, and why it is not a bug

@@ -76,7 +76,12 @@ from iceberg.delete import (
     delete_mode_of,
     plan_row_deletes,
 )
-from iceberg.batch import ColumnBuilder, batch_of
+from iceberg.batch import (
+    ColumnBuilder,
+    NestedBuilder,
+    batch_of,
+    batch_of_columns,
+)
 from iceberg.util import now_ms
 from iceberg.manifest_write import (
     manifest_entry_schema_json,
@@ -3100,6 +3105,30 @@ def test_nested_sub_field_projection_prunes_the_read() raises:
     assert_equal(whole.num_columns(), 1)
     assert_true(whole.cell(0, 0).find('"zip"') >= 0)
 
+    # Metadata columns sit beside a nested one exactly as beside a flat one.
+    var meta = (
+        fixture_scan("nested_v2")
+        .select(
+            [
+                String("tags"),
+                String("addr.zip"),
+                String("_file"),
+                String("_pos"),
+            ]
+        )
+        .to_table()
+    )
+    assert_equal(meta.num_columns(), 4)
+    assert_equal(meta.name(2), "_file")
+    assert_equal(meta.name(3), "_pos")
+    assert_equal(meta.num_rows(), 8)
+    for r in range(meta.num_rows()):
+        assert_true(meta.value(r, 2).s.endswith(".parquet"))
+        assert_true(meta.value(r, 3).i >= 0)
+        assert_true(
+            meta.cell(r, 1).find('"city"') < 0, "city was not asked for"
+        )
+
 
 def test_nested_cells_render_as_json_and_csv() raises:
     """A nested cell is JSON in `to_json`, and the same JSON as a CSV field."""
@@ -3620,6 +3649,248 @@ def build_written_table(
         _ = tx.commit()
         table.refresh()
     return table^
+
+
+comptime NESTED_WRITE_SCHEMA = String(
+    '{"schema-id":0,"type":"struct","fields":['
+    '{"id":1,"name":"id","required":true,"type":"long"},'
+    '{"id":2,"name":"addr","required":false,"type":{"type":"struct","fields":['
+    '{"id":10,"name":"city","required":false,"type":"string"},'
+    '{"id":11,"name":"zip","required":false,"type":"int"}]}},'
+    '{"id":3,"name":"tags","required":false,"type":'
+    '{"type":"list","element-id":20,"element":"string",'
+    '"element-required":false}},'
+    '{"id":4,"name":"props","required":false,"type":'
+    '{"type":"map","key-id":30,"key":"string","value-id":31,"value":"long",'
+    '"value-required":false}}]}'
+)
+
+
+def nested_write_batch(
+    schema: Schema, start: Int, n: Int
+) raises -> RecordBatch:
+    """`n` rows from `start`, with a null struct, an empty list and a null map
+    scattered through them so the containers are never all alike."""
+    var ids = ColumnBuilder.of(schema, 1)
+    var addr = NestedBuilder.of(schema, 2)
+    var tags = NestedBuilder.of(schema, 3)
+    var props = NestedBuilder.of(schema, 4)
+    for k in range(n):
+        var i = start + k
+        ids.add(Datum.long_(Int64(i)))
+        if i % 5 == 3:
+            addr.add_null()
+        else:
+            addr.add(
+                '{"city":"'
+                + write_region(i)
+                + '","zip":'
+                + String(i * 10)
+                + "}"
+            )
+        if i % 4 == 0:
+            tags.add("[]")
+        elif i % 4 == 1:
+            tags.add_null()
+        else:
+            tags.add('["t' + String(i) + '","u"]')
+        if i % 3 == 0:
+            props.add_null()
+        else:
+            props.add('{"keys":["k"],"values":[' + String(i) + "]}")
+    return batch_of_columns(
+        [ids^.build_tree(), addr^.build(), tags^.build(), props^.build()]
+    )
+
+
+def nested_written_table(
+    scenario: String, format_version: Int, shape: String = String("")
+) raises -> Table:
+    """A table with a struct, a list and a map, three appends of six rows."""
+    var catalog = fresh_catalog(scenario)
+    var schema = Schema.parse(NESTED_WRITE_SCHEMA)
+    var spec = PartitionSpec.unpartitioned()
+    if shape == "ident":
+        # `identity(addr.city)` — the spec lets a partition source be nested.
+        spec = PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    10, 1000, String("city"), parse_transform("identity")
+                )
+            ],
+        )
+    elif shape == "bucket":
+        spec = PartitionSpec(
+            0,
+            [
+                PartitionField.single(
+                    11,
+                    1000,
+                    String("zip_bucket"),
+                    parse_transform("bucket[4]"),
+                )
+            ],
+        )
+    var table = catalog.create_table(
+        String("db"),
+        String("t"),
+        schema,
+        spec,
+        Dict[String, String](),
+        format_version,
+    )
+    for b in range(3):
+        var batches = List[RecordBatch]()
+        batches.append(nested_write_batch(schema, b * 6, 6))
+        var tx = table.new_append()
+        tx.add_batches(batches)
+        _ = tx.commit()
+        table.refresh()
+    return table^
+
+
+def nested_cells(table: Table) raises -> Dict[Int64, String]:
+    """`{id: the row's other columns, as JSON}` — the shape a cell prints."""
+    var rows = table.scan().to_table()
+    var out = Dict[Int64, String]()
+    for r in range(rows.num_rows()):
+        var line = String("")
+        for c in range(1, rows.num_columns()):
+            if c > 1:
+                line += "|"
+            line += rows.cell(r, c)
+        out[rows.value(r, 0).i] = line^
+    return out^
+
+
+def test_nested_append_round_trips_through_our_own_reader() raises:
+    """Written by this library, read back by it: 18 rows of struct, list and
+    map, with the null and the empty containers still distinct."""
+    var table = nested_written_table(String("nest_append"), 2)
+    var cells = nested_cells(table)
+    assert_equal(len(cells), 18)
+    assert_equal(
+        cells[0],
+        '{"city":"eu","zip":0}|[]|null',
+    )
+    assert_equal(
+        cells[1],
+        '{"city":"us","zip":10}|null|{"keys":["k"],"values":[1]}',
+    )
+    # id 3: a null struct beside a present list and a null map.
+    assert_equal(cells[3], 'null|["t3","u"]|null')
+    # The manifest carries metrics for every nested *leaf*, by its own id.
+    var tasks = table.scan().plan_files()
+    assert_true(len(tasks) > 0)
+    ref df = tasks[0].data_file
+    var ids = List[Int]()
+    for k in range(len(df.metrics)):
+        ids.append(df.metrics[k].field_id)
+    for want in [1, 10, 11, 20, 30, 31]:
+        assert_true(
+            _contains_int(ids, want),
+            "metrics for leaf " + String(want),
+        )
+    for absent in [2, 3, 4]:
+        assert_false(
+            _contains_int(ids, absent),
+            "a container is not a leaf: " + String(absent),
+        )
+
+
+def _contains_int(l: List[Int], v: Int) -> Bool:
+    for k in range(len(l)):
+        if l[k] == v:
+            return True
+    return False
+
+
+def test_nested_merge_on_read_delete() raises:
+    """A v3 deletion vector over a table with nested columns: the surviving
+    rows keep their structs, lists and maps intact."""
+    var table = nested_written_table(String("nest_mor"), 3)
+    var before = nested_cells(table)
+    # v3 row lineage: three appends of six rows, so `next-row-id` is 18 and a
+    # merge-on-read delete moves no row.
+    assert_equal(table.metadata.next_row_id, 18)
+    var removed = table.delete_where(
+        String('["=","addr.city","eu"]'), MODE_MERGE_ON_READ
+    )
+    assert_equal(removed, 4)
+    table.refresh()
+    assert_equal(table.metadata.next_row_id, 18)
+    var deletes = delete_files_of(table)
+    assert_true(len(deletes) > 0)
+    assert_true(deletes[0].is_deletion_vector())
+    var after = nested_cells(table)
+    assert_equal(len(after), 14)
+    for entry in after.items():
+        assert_equal(entry.value, before[entry.key], "row " + String(entry.key))
+    for gone in [Int64(0), Int64(5), Int64(10), Int64(15)]:
+        assert_false(gone in after, "id " + String(gone) + " is deleted")
+
+
+def test_nested_copy_on_write_delete_rewrites_nested_files() raises:
+    """A copy-on-write delete rewrites the data files, which means the writer
+    has to put the struct, list and map back together."""
+    var table = nested_written_table(String("nest_cow"), 2)
+    var before = nested_cells(table)
+    var removed = table.delete_where(String('["=","addr.city","eu"]'))
+    assert_equal(removed, 4)
+    table.refresh()
+    assert_equal(len(delete_files_of(table)), 0, "copy-on-write leaves none")
+    var after = nested_cells(table)
+    assert_equal(len(after), 14)
+    for entry in after.items():
+        assert_equal(entry.value, before[entry.key], "row " + String(entry.key))
+
+
+def test_nested_overwrite_and_partition_by_a_struct_leaf() raises:
+    """`identity(addr.city)` partitions by a nested leaf, and an overwrite
+    replaces the table with fresh nested rows."""
+    var table = nested_written_table(String("nest_part"), 2, String("ident"))
+    assert_equal(table.scan().to_table().num_rows(), 18)
+    # The partition tuple is the struct leaf's value, and pruning uses it.
+    var eu = table.scan().filter('["=","addr.city","eu"]')
+    assert_true(len(eu.plan_files()) < len(table.scan().plan_files()))
+    assert_equal(eu.to_table().num_rows(), 4)
+
+    var schema = Schema.parse(NESTED_WRITE_SCHEMA)
+    var fresh = List[RecordBatch]()
+    fresh.append(nested_write_batch(schema, 100, 3))
+    _ = table.overwrite(fresh)
+    table.refresh()
+    var cells = nested_cells(table)
+    assert_equal(len(cells), 3)
+    assert_equal(
+        cells[100],
+        '{"city":"eu","zip":1000}|[]|{"keys":["k"],"values":[100]}',
+    )
+
+
+def test_nested_bucket_partition_on_a_struct_leaf() raises:
+    """`bucket[4](addr.zip)` — the other transform the spec allows on a
+    nested source."""
+    var table = nested_written_table(String("nest_bucket"), 2, String("bucket"))
+    assert_equal(table.scan().to_table().num_rows(), 18)
+    var spec = table.metadata.spec_by_id(table.metadata.default_spec_id)
+    assert_equal(spec.fields[0].source_id, 11)
+    var paths = List[String]()
+    var tasks = table.scan().plan_files()
+    for k in range(len(tasks)):
+        var dir = tasks[k].data_file.file_path
+        var at = dir.rfind("/")
+        paths.append(substr(dir, 0, at))
+    var buckets = 0
+    for k in range(len(paths)):
+        var seen = False
+        for j in range(k):
+            if paths[j] == paths[k]:
+                seen = True
+        if not seen:
+            buckets += 1
+    assert_true(buckets > 1, "the rows land in more than one bucket")
 
 
 def test_create_table_writes_a_v2_metadata_file() raises:
