@@ -3743,14 +3743,54 @@ def test_rest_commit_retries_a_409() raises:
     )
 
 
-def test_rest_commit_state_unknown_on_5xx() raises:
+def test_rest_commit_recovers_from_5xx_with_idempotency_key() raises:
+    """Applied, then 500 — and the retry replays the success.
+
+    This is what the `Idempotency-Key` header is for, and why the REST spec
+    has asked for it since 1.11.0. The mock applies this table's commit,
+    records the answer under the key, and *then* returns 500. The HTTP client
+    repeats the request — it may, precisely because the key is on it — and the
+    server replays the recorded 200 instead of committing a second time.
+
+    So the assertion is not just that the append succeeds: it is that the
+    table ends up with **one** snapshot and six rows, not two snapshots and
+    twelve.
+    """
     if getenv("ICEBERG_TEST_REST", "") == "":
         print("  (skipped: no ICEBERG_TEST_REST)")
         return
     var catalog = rest_write_catalog()
     var schema = Schema.parse(WRITE_SCHEMA)
-    # This table's commit is applied and *then* answered with 500.
     var name = String("unknown_state_a")
+    _ = catalog.create_table(
+        String("wr"), name, schema, PartitionSpec.unpartitioned()
+    )
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 6))
+    var after = catalog.append(String("wr"), name, batches)
+    assert_equal(
+        len(after.metadata.snapshots), 1, "the replayed answer, not a re-commit"
+    )
+    var back = catalog.load_table(String("wr"), name)
+    assert_equal(len(back.metadata.snapshots), 1, "exactly one snapshot")
+    assert_equal(back.scan().to_table().num_rows(), 6, "no duplicated rows")
+
+
+def test_rest_commit_state_unknown_on_5xx() raises:
+    """A server that 5xxes and does *not* deduplicate on the key.
+
+    `always_5xx` applies the first commit and then answers 500 to it and to
+    every repeat, recording nothing. Every attempt fails the same way, and the
+    client is left in exactly the state the spec calls `CommitStateUnknown`:
+    the commit may or may not have landed — here it did — and the only honest
+    thing to do is say so and let the caller reload.
+    """
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var name = String("always_5xx_a")
     _ = catalog.create_table(
         String("wr"), name, schema, PartitionSpec.unpartitioned()
     )
@@ -3763,7 +3803,8 @@ def test_rest_commit_state_unknown_on_5xx() raises:
         raised = String(e)
     assert_true(
         raised.find("CommitStateUnknown") >= 0,
-        "a 5xx must not be retried; it is reported as unknown state: " + raised,
+        "a 5xx the server will not deduplicate is reported as unknown state: "
+        + raised,
     )
     # And it really is unknown: the server had applied it.
     assert_equal(

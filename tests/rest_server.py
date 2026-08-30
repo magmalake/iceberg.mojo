@@ -17,10 +17,19 @@ scratch warehouse ($ICEBERG_TEST_REST_WAREHOUSE, or a temp dir) that accepts
 applied to the stored metadata, and a new `<V>-<uuid>.metadata.json` is
 written, so a commit against this server is a real optimistic commit.
 
-Two tables are rigged so the client's error paths can be exercised for real:
+`Idempotency-Key` is honoured the way the REST spec has asked since 1.11.0:
+the first answer to a key is stored and *replayed* to any repeat of it, so a
+retry of a commit the server already applied gets the original success rather
+than a second attempt.
+
+Three tables are rigged so the client's paths can be exercised for real:
 `conflict_once` answers **409** to the first commit it sees (and accepts the
-retry), and `unknown_state` answers **500** *after* applying the commit, which
-is exactly the case the spec calls `CommitStateUnknown`.
+retry); `unknown_state` applies the commit and *then* answers **500** once —
+its key is recorded, so the retry replays the success and the commit lands
+exactly once; and `always_5xx` is a server that does **not** support the
+header: it applies the first commit, answers **500** to that and to every
+repeat, and so leaves the client with the case the spec calls
+`CommitStateUnknown`.
 
 The `metadata` in a LoadTableResult is the fixture's real current
 `*.metadata.json`, inlined, so the client parses genuine table metadata. Every
@@ -52,6 +61,11 @@ WAREHOUSE = os.environ.get("ICEBERG_TEST_REST_WAREHOUSE") or tempfile.mkdtemp(
 # {table -> (metadata_location, metadata)}, plus the rigged-failure bookkeeping.
 WRITTEN = {}
 SEEN_409 = set()
+SEEN_5XX = set()
+# {Idempotency-Key -> (status, response body)}. The whole point of the header:
+# the server remembers what it answered so a repeat of a request it already
+# acted on replays that answer instead of acting again.
+IDEMPOTENT = {}
 LOCK = threading.Lock()
 
 
@@ -262,10 +276,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self._error(400, "BadRequestException", str(e))
 
+        key = self.headers.get("Idempotency-Key", "")
         with LOCK:
+            if key and key in IDEMPOTENT:
+                code, obj = IDEMPOTENT[key]
+                return self._send(code, obj)
             if len(parts) == 3:
                 return self._create_table(req)
-            return self._commit_table(parts[3], req)
+            return self._commit_table(parts[3], req, key)
 
     def _create_table(self, req):
         name = req.get("name")
@@ -279,12 +297,20 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, {"metadata-location": loc, "metadata": doc,
                                 "config": {}})
 
-    def _commit_table(self, name, req):
+    def _commit_table(self, name, req, key=""):
         entry = WRITTEN.get(name)
         if entry is None:
             return self._error(
                 404, "NoSuchTableException", "no table " + name)
         loc, doc, version = entry
+        # `always_5xx` is a server without idempotency-key support: it applies
+        # the first commit, then answers 500 to that one and to every repeat,
+        # never recording the key. The client can only report that it does not
+        # know whether the commit landed.
+        broken = name.startswith("always_5xx")
+        if broken and name in SEEN_5XX:
+            return self._error(
+                500, "ServerErrorException", "still broken (rigged)")
         # `conflict_once` answers 409 the first time, so the client's reload
         # and retry is exercised against a server that really did refuse.
         if name.startswith("conflict_once") and name not in SEEN_409:
@@ -303,14 +329,21 @@ class Handler(BaseHTTPRequestHandler):
             {"timestamp-ms": doc["last-updated-ms"],
              "metadata-file": loc}]
         new_loc = _write_metadata(name, updated, version + 1)
-        # `unknown_state` applies the commit and *then* fails, which is the
-        # only way to test that the client reports CommitStateUnknown instead
-        # of retrying.
+        ok = {"metadata-location": new_loc, "metadata": updated}
+        if broken:
+            SEEN_5XX.add(name)
+            return self._error(
+                500, "ServerErrorException", "applied, then died (rigged)")
+        # The commit is applied and recorded under its key *before* the
+        # answer, so a retry of it is answered from the record. That is what
+        # makes `unknown_state` — applied, then 500 — recoverable: the retry
+        # replays this success instead of committing a second time.
+        if key:
+            IDEMPOTENT[key] = (200, ok)
         if name.startswith("unknown_state"):
             return self._error(
                 500, "ServerErrorException", "applied, then died (rigged)")
-        return self._send(200, {"metadata-location": new_loc,
-                                "metadata": updated})
+        return self._send(200, ok)
 
     def do_GET(self):
         path = unquote(urlparse(self.path).path)

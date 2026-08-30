@@ -96,8 +96,10 @@ what the bytes mean.
 
 `hashes.mojo` supplies the murmur3 that `bucket[N]` is *defined* in terms of;
 `roaring.mojo` decodes the deletion-vector bitmap and checks its CRC;
-`objectstore.mojo` turns a location into bytes and supplies the HTTP client an
-Iceberg REST catalog needs, because no Mojo HTTP package resolves from conda.
+`objectstore.mojo` (0.2.0: pooled connections, retries with backoff, S3
+multipart, range coalescing) turns a location into bytes and supplies the HTTP
+client an Iceberg REST catalog needs, because no Mojo HTTP package resolves
+from conda.
 The ZSTD and LZ4 codecs are needed because real Iceberg writers use them: of
 the 271 column chunks in this repo's own fixtures, **97 are ZSTD**.
 
@@ -130,9 +132,9 @@ self-checked — the expected values come from them, never from this code. See
 | **(n)** Tables **we write** — rows, snapshots, partition values, statistics | PyIceberg **and** DuckDB | ✅ **10 / 10 tables** (5 partition shapes × v2/v3), 18 rows each, cell-exact both ways |
 | **(o)** Row lineage on tables we write | **fastavro** + the v3 spec's rules | ✅ manifest-list `first_row_id`s tile `0..next-row-id` on all 5 shapes; data files inherit (null), as the spec requires. PyIceberg cannot check this — see below |
 | **(p)** PyIceberg **appends to a table we created**, and we read the result | PyIceberg | ✅ 2 tables, 18 + 6 = 24 rows, `_row_id` still intact |
-| **(q)** REST commit — requirements, 409 retry, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried, a rigged applied-then-500 reported, not retried |
+| **(q)** REST commit — requirements, 409 retry, `Idempotency-Key` replay, 5xx → `CommitStateUnknown` | the REST spec, against a mock that checks | ✅ v2 and v3 create + append; a rigged 409 retried; a rigged applied-then-500 recovered by the key, landing **one** snapshot; a server that will not deduplicate reported as unknown state |
 | **(r)** `s3://` write end to end | itself, read back | ✅ create, 2 appends, 12 rows, partition pruning; MinIO verifies every signature |
-| Tests | | **114 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| Tests | | **115 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
 | CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against tables we wrote |
 
 ### The one plan disagreement, and why it is not a bug
@@ -244,8 +246,14 @@ _ = tx.commit()
   on is no longer the newest, reloads and retries — the data files it already
   wrote stay valid. A REST catalog gets a `CommitTableRequest` with
   `assert-table-uuid` and `assert-ref-snapshot-id`, an `Idempotency-Key`, a
-  409 that reloads and retries, and a 5xx that is reported as
-  `CommitStateUnknown` rather than retried.
+  409 that reloads and retries. The key is what makes a 5xx survivable: it is
+  stable across repeats of one commit, so objectstore.mojo's client may retry
+  the `POST` and a server that honours the header (the REST spec has asked for
+  it since 1.11.0) replays its original answer rather than committing twice —
+  the mock proves this by applying a commit, answering 500, and then replaying
+  the success. Against a server that does *not* deduplicate, every attempt
+  fails alike and the commit is reported as `CommitStateUnknown`: it may or
+  may not have landed, and only a reload can say.
 - **`iceberg.batch`** turns Mojo values into an Arrow `RecordBatch`, for
   callers whose data is not already Arrow.
 
@@ -361,7 +369,6 @@ headers are proved rather than assumed.
 | Non-Parquet data files | ORC and Avro data files are rejected by name. Parquet is what every writer in reach produces. |
 | Brotli-compressed Parquet | No Brotli in Mojo. Everything else — uncompressed, Snappy, GZIP, ZSTD, LZ4 — works. |
 | Encryption | Neither Parquet modular encryption nor Iceberg's `encryption-keys` are applied. |
-| Multipart upload, retries, connection reuse | objectstore.mojo's gaps; each request is a fresh TLS handshake, and a data file is one `PUT`. |
 | A *safe* filesystem commit over an object store | There is no atomic create-if-absent on S3, so two writers can both believe they won. The spec says the same; use a REST catalog. |
 | `remote-signing` delegation | `vended-credentials` is implemented; remote signing is not. |
 | Theta sketches | Listed from a Puffin footer, not decoded. |
@@ -436,7 +443,7 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 114 tests; starts the REST mock and MinIO
+pixi run test              # 115 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg
