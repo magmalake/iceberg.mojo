@@ -1,5 +1,5 @@
 name = "iceberg-mojo"
-version = "0.3.0"
+version = "0.3.1"
 description = "Native pure-Mojo Apache Iceberg: metadata, manifests, scan planning, Arrow reads with nested columns, and writes — append, delete, overwrite and deletion vectors"
 tags = ["iceberg", "table-format", "data-lake", "metadata", "manifests", "arrow", "magmalake"]
 tins = ["hashes-mojo", "avro-mojo", "thrift-mojo", "snappy-mojo", "parquet-mojo", "roaring-mojo", "objectstore-mojo", "lz4-mojo", "zstd-mojo"]
