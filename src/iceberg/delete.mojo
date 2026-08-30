@@ -411,9 +411,11 @@ def write_position_deletes(
         var order = groups[g].copy()
         for i in range(1, len(order)):
             var j = i
-            while j > 0 and plans[order[j]].task.data_file.file_path < plans[
-                order[j - 1]
-            ].task.data_file.file_path:
+            while (
+                j > 0
+                and plans[order[j]].task.data_file.file_path
+                < plans[order[j - 1]].task.data_file.file_path
+            ):
                 order.swap_elements(j, j - 1)
                 j -= 1
         var paths = ColumnBuilder(
@@ -637,9 +639,7 @@ def prepare_delete_from(
     for k in range(len(plans)):
         if plans[k].whole_file or chosen == MODE_COPY_ON_WRITE:
             changes.removed.append(plans[k].task.data_file.file_path)
-    var operation = OP_DELETE if len(
-        changes.added_data
-    ) == 0 else OP_OVERWRITE
+    var operation = OP_DELETE if len(changes.added_data) == 0 else OP_OVERWRITE
     return prepare_commit(io, metadata, operation, changes^, extra^)
 
 
@@ -732,9 +732,7 @@ def prepare_dynamic_partition_overwrite(
             if keys[j] == key:
                 changes.removed.append(tasks[k].data_file.file_path)
                 for d in range(len(tasks[k].delete_files)):
-                    changes.removed.append(
-                        tasks[k].delete_files[d].file_path
-                    )
+                    changes.removed.append(tasks[k].delete_files[d].file_path)
                 break
     return prepare_commit(
         io, metadata, OP_OVERWRITE, changes^, Dict[String, String]()
@@ -771,9 +769,7 @@ def write_equality_deletes(
     if rows.num_rows == 0:
         raise Error("iceberg: an equality delete file needs at least one row")
     var data = write_parquet(columns, sub, options)
-    var name = (
-        "00000-0-equality-deletes-" + uuid4() + ".parquet"
-    )
+    var name = "00000-0-equality-deletes-" + uuid4() + ".parquet"
     var path = join_path(join_path(location, "data"), name)
     io.write_all(path, Span(data))
     var df = data_file_from_parquet(

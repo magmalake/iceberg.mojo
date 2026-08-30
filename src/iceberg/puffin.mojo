@@ -455,9 +455,7 @@ struct PuffinWriter(Movable):
             out += ',"offset":' + String(b.offset)
             out += ',"length":' + String(b.length)
             if b.compression_codec != "":
-                out += ',"compression-codec":' + json_quote(
-                    b.compression_codec
-                )
+                out += ',"compression-codec":' + json_quote(b.compression_codec)
             if len(b.property_keys) > 0:
                 out += ',"properties":{'
                 for j in range(len(b.property_keys)):

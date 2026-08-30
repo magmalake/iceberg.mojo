@@ -2482,16 +2482,10 @@ def test_puffin_writer_round_trips_through_the_reader() raises:
     assert_equal(pf.blobs[0].sequence_number, -1)
     assert_equal(pf.blobs[0].compression_codec, "")
     assert_equal(pf.blobs[0].cardinality(), 3)
-    assert_equal(
-        pf.blobs[0].referenced_data_file(), "file:///t/data/a.parquet"
-    )
+    assert_equal(pf.blobs[0].referenced_data_file(), "file:///t/data/a.parquet")
     # Blobs are laid end to end, so each offset is the previous one's end.
-    assert_equal(
-        pf.blobs[1].offset, pf.blobs[0].offset + pf.blobs[0].length
-    )
-    assert_equal(
-        pf.blobs[2].offset, pf.blobs[1].offset + pf.blobs[1].length
-    )
+    assert_equal(pf.blobs[1].offset, pf.blobs[0].offset + pf.blobs[0].length)
+    assert_equal(pf.blobs[2].offset, pf.blobs[1].offset + pf.blobs[1].length)
     assert_equal(pf.blobs[1].cardinality(), 1)
 
     # The vectors decode to exactly the positions that went in.
@@ -2516,9 +2510,7 @@ def test_puffin_writer_round_trips_through_the_reader() raises:
     assert_equal(len(pf.blobs[2].fields), 1)
     assert_equal(pf.blobs[2].fields[0], 1)
     assert_equal(pf.blobs[2].property("ndv"), "12")
-    var raw = read_blob_bytes(
-        io, path, pf.blobs[2].offset, pf.blobs[2].length
-    )
+    var raw = read_blob_bytes(io, path, pf.blobs[2].offset, pf.blobs[2].length)
     var plain = decompress_blob(raw^, pf.blobs[2].compression_codec)
     assert_equal(len(plain), 64)
     for k in range(64):
@@ -2541,7 +2533,9 @@ def test_puffin_writer_compresses_the_footer() raises:
         bm.add(UInt64(k))
         bm.add(UInt64(k + 100))
         _ = w.add_deletion_vector(
-            "file:///warehouse/db/t/data/00000-0-part-" + String(k) + ".parquet",
+            "file:///warehouse/db/t/data/00000-0-part-"
+            + String(k)
+            + ".parquet",
             bm,
         )
     var plain = w.finish(False)
@@ -3933,8 +3927,12 @@ def test_rest_delete_and_overwrite() raises:
     var schema = Schema.parse(WRITE_SCHEMA)
     var name = String("rest_delete_a")
     _ = catalog.create_table(
-        String("wr"), name, schema, PartitionSpec.unpartitioned(), 
-        Dict[String, String](), 3
+        String("wr"),
+        name,
+        schema,
+        PartitionSpec.unpartitioned(),
+        Dict[String, String](),
+        3,
     )
     var batches = List[RecordBatch]()
     batches.append(write_batch(schema, 0, 12))
@@ -4176,8 +4174,10 @@ def delete_files_of(table: Table) raises -> List[DataFile]:
         for j in range(len(tasks[k].delete_files)):
             # A single Puffin file holds one vector per data file, so the
             # identity of a delete *file entry* is path plus offset.
-            var path = tasks[k].delete_files[j].file_path + "@" + String(
-                tasks[k].delete_files[j].content_offset
+            var path = (
+                tasks[k].delete_files[j].file_path
+                + "@"
+                + String(tasks[k].delete_files[j].content_offset)
             )
             var dup = False
             for i in range(len(seen)):
@@ -4293,9 +4293,7 @@ def test_merge_on_read_delete_writes_position_deletes() raises:
     assert_equal(snap.operation(), "delete")
     assert_equal(snap.summary_int(String("added-delete-files"), -1), 1)
     assert_equal(snap.summary_int(String("added-position-deletes"), -1), 4)
-    assert_equal(
-        snap.summary_int(String("added-position-delete-files"), -1), 1
-    )
+    assert_equal(snap.summary_int(String("added-position-delete-files"), -1), 1)
     assert_equal(snap.summary_int(String("total-position-deletes"), -1), 4)
 
 
@@ -4390,13 +4388,17 @@ def test_delete_preserves_row_lineage() raises:
     """v3: a merge-on-read delete moves no row, so every surviving `_row_id`
     is the one the append assigned."""
     var table = delete_table("del_lineage", "unpartitioned", 3)
-    var before = table.scan().select([String("id"), String("_row_id")]).to_table()
+    var before = (
+        table.scan().select([String("id"), String("_row_id")]).to_table()
+    )
     var want = Dict[Int64, Int64]()
     for r in range(before.num_rows()):
         want[before.value(r, 0).i] = before.value(r, 1).i
     _ = table.delete_where(String('["=","region","eu"]'), MODE_MERGE_ON_READ)
     table.refresh()
-    var after = table.scan().select([String("id"), String("_row_id")]).to_table()
+    var after = (
+        table.scan().select([String("id"), String("_row_id")]).to_table()
+    )
     assert_equal(after.num_rows(), 14)
     for r in range(after.num_rows()):
         var id = after.value(r, 0).i
@@ -4468,9 +4470,7 @@ def test_dynamic_partition_overwrite_touches_only_its_partitions() raises:
     assert_true(has_id(ids, 900))
     assert_false(has_id(ids, 0))
     assert_true(has_id(ids, 1), "the `us` partition is untouched")
-    var eu = (
-        table.scan().filter('["=","region","eu"]').to_table().num_rows()
-    )
+    var eu = table.scan().filter('["=","region","eu"]').to_table().num_rows()
     assert_equal(eu, 1)
 
 
@@ -4530,9 +4530,7 @@ def test_equality_deletes_delete_by_value() raises:
     var snap = table.metadata.current_snapshot()
     assert_equal(snap.operation(), "delete")
     assert_equal(snap.summary_int(String("added-equality-deletes"), -1), 3)
-    assert_equal(
-        snap.summary_int(String("added-equality-delete-files"), -1), 1
-    )
+    assert_equal(snap.summary_int(String("added-equality-delete-files"), -1), 1)
     assert_equal(snap.summary_int(String("total-equality-deletes"), -1), 3)
     # Rows are not moved, so the data files still hold all eighteen.
     assert_equal(snap.summary_int(String("total-records"), -1), 18)
@@ -4586,9 +4584,7 @@ def test_expire_snapshots_removes_the_files_nothing_points_at() raises:
             if dry.deleted_files[j] == live[k]:
                 doomed = True
         assert_false(doomed, "a live data file is never a candidate")
-    assert_equal(
-        len(table.metadata.snapshots), 4, "a dry run commits nothing"
-    )
+    assert_equal(len(table.metadata.snapshots), 4, "a dry run commits nothing")
 
     var done = table.expire_snapshots(-1, 1, False)
     assert_equal(len(done.expired), 3)
@@ -4610,8 +4606,7 @@ def test_expire_snapshots_removes_the_files_nothing_points_at() raises:
 
 
 def test_expire_snapshots_keeps_what_it_is_told_to() raises:
-    """`keep_last` is a floor, and the current snapshot is never a candidate.
-    """
+    """`keep_last` is a floor, and the current snapshot is never a candidate."""
     var table = delete_table("expire_keep", "unpartitioned", 2)
     assert_equal(len(table.metadata.snapshots), 3)
     var kept = table.expire_snapshots(-1, 2, False)

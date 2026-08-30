@@ -300,9 +300,7 @@ def write_delete_tables(catalog: FilesystemCatalog, schema: Schema) raises:
     for vi in range(len(versions)):
         var v = versions[vi]
         var name = "dyn_ident_v" + String(v)
-        var dyn = seeded(
-            catalog, schema, name, String("ident"), v, String("")
-        )
+        var dyn = seeded(catalog, schema, name, String("ident"), v, String(""))
         var one = List[RecordBatch]()
         one.append(make_batch(schema, 100, 1))
         _ = dyn.dynamic_partition_overwrite(one)

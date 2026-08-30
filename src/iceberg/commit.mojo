@@ -337,7 +337,10 @@ def prepare_commit(
                 written_paths,
                 removed,
             )
-    if len(files.removed) > 0 and removed.data_files + removed.delete_files == 0:
+    if (
+        len(files.removed) > 0
+        and removed.data_files + removed.delete_files == 0
+    ):
         raise Error(
             "iceberg: none of the "
             + String(len(files.removed))
@@ -469,7 +472,14 @@ def prepare_commit(
     else:
         out.refs.append(
             SnapshotRef(
-                MAIN_BRANCH, snapshot_id, REF_BRANCH, 0, False, 0, False, 0,
+                MAIN_BRANCH,
+                snapshot_id,
+                REF_BRANCH,
+                0,
+                False,
+                0,
+                False,
+                0,
                 False,
             )
         )

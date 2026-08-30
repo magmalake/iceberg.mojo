@@ -630,8 +630,7 @@ struct RestCatalog(Copyable, Movable):
         filter_dsl: String = String('["true"]'),
         retries: Int = 4,
     ) raises -> Table:
-        """Delete what the filter matches and add `batches`, in one snapshot.
-        """
+        """Delete what the filter matches and add `batches`, in one snapshot."""
         return self.commit_change(
             namespace,
             table,
