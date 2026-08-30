@@ -19,7 +19,9 @@ jobs:
       # (`-I ../parquet.mojo/src`, …), so CI has to lay the siblings out next
       # to it. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
       # source dependencies, which is what installs their C shims into the
-      # environment; the checkouts here supply their Mojo sources.
+      # environment; the checkouts here supply their Mojo sources. threads.mojo
+      # has no shim at all — it calls the pthread symbols libc already
+      # exports — so a source checkout is all it needs.
       - uses: actions/checkout@v4
         with:
           path: iceberg.mojo
@@ -68,6 +70,11 @@ jobs:
         with:
           repository: magmalake/lz4.mojo
           path: lz4.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/threads.mojo
+          path: threads.mojo
 
       # MinIO is the only S3 server that actually verifies SigV4 signatures,
       # which is what makes the s3:// end-to-end test worth running. One static
@@ -180,6 +187,11 @@ jobs:
         with:
           repository: magmalake/lz4.mojo
           path: lz4.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/threads.mojo
+          path: threads.mojo
 
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:

@@ -2128,28 +2128,57 @@ def _load_bytes(
     if footer_start < 4 or footer_len <= 0:
         return io.read_all(data_file.file_path)
 
-    var buf = List[UInt8](length=size, fill=0)
-    buf[0] = 0x50
-    buf[1] = 0x41
-    buf[2] = 0x52
-    buf[3] = 0x31
     var footer = io.read_range(
         data_file.file_path, footer_start, footer_len + 8
     )
-    for k in range(len(footer)):
-        buf[footer_start + k] = footer[k]
 
-    # A footer-only reader is enough to say where each row group lives.
-    var probe = ParquetReader[AllCodecs](buf.copy())
+    # A footer-only reader is enough to say where each row group lives: a
+    # buffer of the right length with nothing in it but the magic and the
+    # footer parses exactly like the whole file.
+    var probe_bytes = List[UInt8](length=footer_start, fill=0)
+    probe_bytes[0] = 0x50
+    probe_bytes[1] = 0x41
+    probe_bytes[2] = 0x52
+    probe_bytes[3] = 0x31
+    probe_bytes.extend(Span(footer))
+    var probe = ParquetReader[AllCodecs](probe_bytes^)
+
+    var starts = List[Int]()
+    var lengths = List[Int]()
     for g in range(probe.num_row_groups()):
         var extent = _row_group_extent(probe, g)
-        var start = extent[0]
-        var length = extent[1]
-        if length <= 0 or start < 0 or start + length > size:
+        if extent[1] <= 0 or extent[0] < 4 or extent[0] + extent[1] > size:
             continue
-        var chunk = io.read_range(data_file.file_path, start, length)
-        for k in range(len(chunk)):
-            buf[start + k] = chunk[k]
+        # Insertion order, by offset: the buffer is filled front to back so
+        # every copy is one `extend` rather than a scatter.
+        var at = len(starts)
+        while at > 0 and starts[at - 1] > extent[0]:
+            at -= 1
+        starts.insert(at, extent[0])
+        lengths.insert(at, extent[1])
+
+    var buf = List[UInt8](capacity=size)
+    buf.append(0x50)
+    buf.append(0x41)
+    buf.append(0x52)
+    buf.append(0x31)
+    for k in range(len(starts)):
+        if starts[k] < len(buf):
+            # Overlapping extents: the earlier one already covers this.
+            continue
+        buf.resize(starts[k], 0)
+        buf.extend(
+            Span(io.read_range(data_file.file_path, starts[k], lengths[k]))
+        )
+    if len(buf) > footer_start:
+        raise Error(
+            "iceberg: '"
+            + data_file.file_path
+            + "' has a row group that runs into its footer"
+        )
+    buf.resize(footer_start, 0)
+    buf.extend(Span(footer))
+    buf.resize(size, 0)
     return buf^
 
 

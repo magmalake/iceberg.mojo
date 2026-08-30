@@ -58,6 +58,25 @@ echo
 echo "== PyIceberg, nested columns"
 "$PY" tools/bench_pyiceberg_nested.py "$NESTED_META" | grep -v '^{'
 
+# ── many files, many workers ───────────────────────────────────────────────
+PAR_WAREHOUSE="${ICEBERG_PARALLEL_BENCH_ROOT:-$ROOT/build/parallel-bench}"
+PAR_ROWS="${ICEBERG_PARALLEL_BENCH_ROWS:-2000000}"
+if [ ! -f "$PAR_WAREHOUSE/metadata_location.txt" ]; then
+    echo
+    echo "== building the multi-file bench table ($PAR_ROWS rows, 250k per append)"
+    "$PY" tools/make_bench_table.py "$PAR_WAREHOUSE" "$PAR_ROWS"
+fi
+PAR_META="$(cat "$PAR_WAREHOUSE/metadata_location.txt")"
+
+echo
+echo "== iceberg.mojo, 1/2/4/8 workers over eight data files"
+mojo build bench/bench_parallel.mojo $ICEBERG_INCLUDES -o build/iceberg-parallel-bench
+ICEBERG_PARALLEL_BENCH_ROOT="$PAR_WAREHOUSE" ./build/iceberg-parallel-bench
+
+echo
+echo "== PyIceberg, same table, one process"
+"$PY" tools/bench_pyiceberg_parallel.py "$PAR_META" | grep -v '^{'
+
 # ── the write side ─────────────────────────────────────────────────────────
 echo
 echo "== appending a million rows"

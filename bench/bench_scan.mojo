@@ -47,7 +47,10 @@ def _report(label: String, rows: Int, ns: Int) raises:
         _pad(label, 30),
         _pad(String(rows), 10),
         "rows",
-        _pad(String(Int(seconds * 1000)), 7),
+        _pad(
+            String(Int(seconds * 10000) // 10, ".", Int(seconds * 10000) % 10),
+            7,
+        ),
         "ms",
         _pad(String(per_second), 11),
         "rows/s",
@@ -61,24 +64,44 @@ def timed(
     columns: List[String],
     options: ScanOptions,
 ) raises -> Int:
-    var t0 = perf_counter_ns()
-    var table = Table.load(location, FileIO.local())
-    var scan = table.scan().filter(filter)
-    if len(columns) > 0:
-        scan = scan.select(columns.copy())
-    var batches = scan.to_batches(options)
-    var n = 0
-    for k in range(len(batches)):
-        n += batches[k].num_rows
-    _report(label + " (arrow)", n, perf_counter_ns() - t0)
+    """Best of three, warm — the same shape `tools/bench_pyiceberg.py` uses.
 
-    var t1 = perf_counter_ns()
-    var table2 = Table.load(location, FileIO.local())
-    var scan2 = table2.scan().filter(filter)
-    if len(columns) > 0:
-        scan2 = scan2.select(columns.copy())
-    var rows = scan2.to_table(options)
-    _report(label + " (to_table)", rows.num_rows(), perf_counter_ns() - t1)
+    A single cold run measures the page cache and the allocator warming up as
+    much as it measures the scan, and it measures them differently for the two
+    implementations. Both sides take the best of three so the comparison is of
+    the code.
+    """
+    var best = 0
+    var n = 0
+    for _ in range(3):
+        var t0 = perf_counter_ns()
+        var table = Table.load(location, FileIO.local())
+        var scan = table.scan().filter(filter)
+        if len(columns) > 0:
+            scan = scan.select(columns.copy())
+        var batches = scan.to_batches(options)
+        var ns = perf_counter_ns() - t0
+        n = 0
+        for k in range(len(batches)):
+            n += batches[k].num_rows
+        if best == 0 or ns < best:
+            best = ns
+    _report(label + " (arrow)", n, best)
+
+    var best2 = 0
+    var rows = 0
+    for _ in range(3):
+        var t1 = perf_counter_ns()
+        var table2 = Table.load(location, FileIO.local())
+        var scan2 = table2.scan().filter(filter)
+        if len(columns) > 0:
+            scan2 = scan2.select(columns.copy())
+        var result = scan2.to_table(options)
+        var ns = perf_counter_ns() - t1
+        rows = result.num_rows()
+        if best2 == 0 or ns < best2:
+            best2 = ns
+    _report(label + " (to_table)", rows, best2)
     return n
 
 
@@ -120,4 +143,31 @@ def main() raises:
         String('["true"]'),
         [],
         lazy,
+    )
+
+    print()
+    print("four workers (ScanOptions.num_workers = 4)")
+    var par = ScanOptions()
+    par.num_workers = 4
+    _ = timed(String("full scan"), String(meta), String('["true"]'), [], par)
+    _ = timed(
+        String("projection id,region"),
+        String(meta),
+        String('["true"]'),
+        [String("id"), String("region")],
+        par,
+    )
+    _ = timed(
+        String("filter region=eu"),
+        String(meta),
+        String('["=","region","eu"]'),
+        [],
+        par,
+    )
+    _ = timed(
+        String("filter id>900000"),
+        String(meta),
+        String('[">","id",900000]'),
+        [],
+        par,
     )

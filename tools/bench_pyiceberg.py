@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """PyIceberg's numbers for the same scans, so the README can be honest.
 
+Best of three, warm, which is what bench/bench_scan.mojo does: a single cold
+run measures the page cache and the interpreter warming up as much as it
+measures the scan. PyIceberg's `to_arrow()` hands each file to pyarrow, which
+uses its own thread pool — so this is one PyIceberg *process*, not one core.
+
 Usage: bench_pyiceberg.py <metadata.json>
 """
 import json
@@ -27,9 +32,16 @@ for name, expr, cols in cases:
         scan = table.scan(row_filter=expr)
     if cols:
         scan = scan.select(*cols)
-    t0 = time.perf_counter()
-    arrow = scan.to_arrow()
-    dt = time.perf_counter() - t0
+    dt = None
+    for _ in range(3):
+        scan = table.scan(row_filter=expr) if expr is not None else table.scan()
+        if cols:
+            scan = scan.select(*cols)
+        t0 = time.perf_counter()
+        arrow = scan.to_arrow()
+        one = time.perf_counter() - t0
+        if dt is None or one < dt:
+            dt = one
     out[name] = {
         "rows": arrow.num_rows,
         "seconds": round(dt, 4),
