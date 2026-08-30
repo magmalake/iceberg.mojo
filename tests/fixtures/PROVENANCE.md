@@ -14,6 +14,7 @@ changes every UUID, snapshot id and absolute path in here.
 | bridge front end | `iceberg-rs.mojo` (Mojo FFI over the Rust cdylib) |
 | PyIceberg | **0.11.1** (`pyiceberg.__version__`) |
 | PyArrow | 25.0.1 |
+| DuckDB | **1.5.5**, with its `iceberg` extension — the only oracle that reads equality deletes |
 | Python | 3.12.13 (venv at `../iceberg-rs.mojo/build/pyiceberg-venv`) |
 | Catalog | PyIceberg `SqlCatalog` over sqlite, shared by both writers |
 
@@ -25,8 +26,11 @@ sqlite catalog : /Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root
 namespace      : db
 ```
 
-All seven tables live in that one warehouse and one catalog, so the fixture set
-is a single coherent Iceberg warehouse rather than seven unrelated ones.
+All **nine** tables live in that one warehouse and one catalog, so the fixture
+set is a single coherent Iceberg warehouse rather than nine unrelated ones.
+Seven were made by the original run (see below); `eq_deletes_v2` and `dv_v3`
+were added later by `tools/make_delete_tables.py` into the same warehouse,
+which is why their UUIDs and paths differ in generation but not in kind.
 
 ### Absolute paths — Mojo tests must rewrite them
 
@@ -360,6 +364,126 @@ recorded fact rather than a surprise. The extra files the bridge keeps are
 `iceberg-rs-mojo-00000-07b7b9a8-…` (id 3) and
 `iceberg-rs-mojo-00001-be6d1933-…` (id 5).
 
+## Data files
+
+Since the reader reads data, `tests/fixtures/<table>/data/` now holds each
+table's Parquet too — verbatim copies, absolute paths and all, rewritten by the
+same prefix rebase the metadata needs. Their compression is what the writers
+chose: of 271 column chunks across 52 files, 168 are uncompressed, **97 are
+ZSTD** and 6 are Snappy — which is why the reader is built against
+`parquet.ext_full.AllCodecs` rather than the default codec set.
+
+## The two delete tables
+
+`tools/make_delete_tables.py` builds these, and neither is reachable from
+PyIceberg's public API.
+
+### `eq_deletes_v2` — equality deletes
+
+Six rows in two data files, then one commit adding two **equality delete
+files**:
+
+| delete file | `equality_ids` | rows | removes |
+|---|---|---|---|
+| `…-equality-deletes-id-…` | `[1]` (`id`) | `2`, `6` | ids 2 and 6 |
+| `…-equality-deletes-amount-…` | `[3]` (`amount`) | a single `NULL` | every row whose `amount` is null — ids 2 and 5 |
+
+Row 2 is matched by both, which is legal and must not be double-counted. Three
+rows survive: **1, 3, 4**.
+
+The NULL delete row is the spec's *"a null value in a delete column matches a
+row if the row's value is null"*, and it is the reason this table exists.
+
+**PyIceberg is not an oracle here at any level.** It has no equality-delete
+writer, and `TableScan.plan_files` raises outright:
+
+```
+ValueError: PyIceberg does not yet support equality deletes:
+https://github.com/apache/iceberg/issues/6568
+```
+
+**DuckDB 1.5.5 is**, and it returns exactly ids 1, 3, 4. That is what
+`oracle/rows_duckdb.json` records.
+
+### `dv_v3` — a format-version 3 table with deletion vectors
+
+Six rows in two data files, then a v3 snapshot adding one Puffin file holding
+two `deletion-vector-v1` blobs, one per data file, each removing one row.
+Four rows survive: **1, 2, 5, 6**.
+
+PyIceberg cannot write any of it — `TableMetadataV3.model_dump_json` raises
+`NotImplementedError: Writing V3 is not yet supported`
+([iceberg-python#1551](https://github.com/apache/iceberg-python/issues/1551)),
+and `write_manifest` / `write_manifest_list` refuse version 3 — but every v3
+Avro struct is present in `pyiceberg.manifest`, so the snapshot is assembled
+from them:
+
+* the Puffin file is written directly to the spec's framing: `PFA1`, a blob of
+  `[4-byte big-endian length][D1 D3 39 64][portable 64-bit Roaring][CRC-32]`,
+  then an uncompressed JSON footer;
+* a **v3 delete manifest** carries `referenced_data_file`, `content_offset` and
+  `content_size_in_bytes`, which the spec requires to match the footer exactly;
+* the two pre-upgrade **data manifests are rewritten as v3** with an assigned
+  `first_row_id` per file, because the spec requires the first snapshot after
+  an upgrade to assign row ids to existing files too;
+* the manifest list is v3 and assigns `first_row_id` to both data manifests
+  (0 and 3) and `null` to the delete manifest, and the metadata file is
+  hand-written with `format-version: 3` and `next-row-id: 6`.
+
+**Both PyIceberg and DuckDB read it back and agree on ids 1, 2, 5, 6.**
+`oracle/rows_pyiceberg_0.json` and `oracle/rows_duckdb.json` are those two
+readings, and `delete_tables_report.json` records what the generator did.
+
+#### A PyIceberg bug this uncovered
+
+`ManifestWriter.new_writer` builds the in-memory record schema from
+`DEFAULT_READ_VERSION` (2) while writing the file with the writer's own
+version:
+
+```python
+return AvroOutputFile[ManifestEntry](
+    file_schema=self._with_partition(self.version),
+    record_schema=self._with_partition(DEFAULT_READ_VERSION),   # <- 2
+    ...
+)
+```
+
+For a v3 manifest that silently writes `null` for every v3-only column —
+`first_row_id`, `referenced_data_file`, `content_offset`,
+`content_size_in_bytes`. The symptoms were a deletion vector that appeared to
+apply to every data file (ours) and `INTERNAL Error: Calling GetValue on a
+value that is NULL` (DuckDB's). `make_delete_tables.py` overrides `new_writer`.
+
+## Row-level oracles
+
+`tools/oracle_rows.py` writes, per table:
+
+* `oracle/rows_pyiceberg_<k>.json` — PyIceberg's `scan(row_filter).to_arrow()`
+  for each of the six filters. Eight tables; `eq_deletes_v2` has none, for the
+  reason above.
+* `oracle/rows_duckdb.json` — DuckDB's `iceberg_scan`, unfiltered (it takes no
+  filter DSL). All nine tables.
+
+Cells are encoded exactly and canonically so that "the same rows" is a byte
+comparison rather than a float-formatting argument:
+
+| type | encoding |
+|---|---|
+| `boolean` | `"true"` / `"false"` |
+| `int`, `long` | decimal |
+| `float`, `double` | big-endian IEEE-754 bits, lowercase hex |
+| `date` | days since 1970-01-01 |
+| `time` | microseconds since midnight |
+| `timestamp`, `timestamptz` | microseconds since epoch |
+| `timestamp_ns`, `timestamptz_ns` | nanoseconds since epoch |
+| `string` | the text |
+| `uuid` | canonical 8-4-4-4-12 lowercase |
+| `binary`, `fixed` | lowercase hex |
+| `decimal` | the exact decimal text |
+
+Rows are sorted, so ordering never matters.
+
 ## Size
 
-`du -sh tests/fixtures` → **1.2 MB** (budget: ~5 MB).
+`du -sh tests/fixtures` → **1.9 MB** (budget: ~5 MB), of which 212 KB is
+Parquet and Puffin.
