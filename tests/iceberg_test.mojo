@@ -5,6 +5,7 @@ values were produced by iceberg-rust 0.10.1 (through iceberg-rs.mojo) or by
 PyIceberg, never by this implementation. See `tests/fixtures/PROVENANCE.md`.
 """
 
+from std.memory import bitcast
 from std.os import getenv, makedirs
 from std.pathlib import Path
 from std.testing import (
@@ -43,6 +44,18 @@ from iceberg.puffin import (
     deleted_positions,
     read_deletion_vector,
 )
+from iceberg.read import (
+    META_FILE,
+    META_LAST_UPDATED,
+    META_PARTITION,
+    META_POS,
+    META_ROW_ID,
+    META_SPEC_ID,
+    NameMapping,
+    ScanOptions,
+    ScanResult,
+    arrow_type_of,
+)
 from iceberg.scan import TableScan, FileScanTask
 from iceberg.manifest import (
     ManifestFile,
@@ -76,9 +89,12 @@ from iceberg.types import (
     P_BINARY,
     P_BOOLEAN,
     P_DOUBLE,
+    P_FLOAT,
+    P_UNKNOWN,
 )
 from iceberg.values import (
     Datum,
+    decimal_text,
     compare,
     decimal_from_text,
     decimal_text,
@@ -2386,6 +2402,468 @@ def test_dv_table_is_v3() raises:
     assert_equal(m.format_version, 3)
     var snap = m.current_snapshot()
     assert_equal(snap.operation(), "delete")
+
+
+# ══ reading rows ════════════════════════════════════════════════════════════
+# The row oracles were produced by PyIceberg (all six filters, eight tables)
+# and by DuckDB's iceberg extension (unfiltered, eight tables); see
+# tools/oracle_rows.py for why neither covers all nine. Cells are compared in
+# the oracle's exact encoding — doubles as their IEEE-754 bits, timestamps as
+# integers — so a match is a byte match, not a formatting opinion.
+comptime HEXDIGITS = String("0123456789abcdef")
+
+
+def hex_of(bytes: List[UInt8]) -> String:
+    var out = String("")
+    for k in range(len(bytes)):
+        out += String(HEXDIGITS[byte=Int(bytes[k] >> 4)])
+        out += String(HEXDIGITS[byte=Int(bytes[k] & 0xF)])
+    return out^
+
+
+def oracle_cell(d: Datum) raises -> String:
+    """The encoding tools/oracle_rows.py writes, so the two can be compared."""
+    if not d.valid:
+        return String("\x00null")  # a sentinel that no real cell can produce
+    if d.kind == P_BOOLEAN:
+        return String("true") if d.i != 0 else String("false")
+    if d.kind == P_FLOAT:
+        var bits = UInt32(bitcast[DType.uint32](Float32(d.f)))
+        var b = List[UInt8]()
+        for k in range(4):
+            b.append(UInt8((bits >> UInt32(8 * (3 - k))) & 0xFF))
+        return hex_of(b)
+    if d.kind == P_DOUBLE:
+        var bits = UInt64(bitcast[DType.uint64](d.f))
+        var b = List[UInt8]()
+        for k in range(8):
+            b.append(UInt8((bits >> UInt64(8 * (7 - k))) & 0xFF))
+        return hex_of(b)
+    if d.kind == P_STRING:
+        return d.s
+    if d.kind == P_UUID:
+        return uuid_text(d.b)
+    if d.kind == P_BINARY or d.kind == P_FIXED:
+        return hex_of(d.b)
+    if d.kind == P_DECIMAL:
+        return decimal_text(d.b, d.scale)
+    return String(d.i)
+
+
+def encoded_rows(result: ScanResult) raises -> List[String]:
+    """Every row as one comparable string, sorted the way the oracle sorts."""
+    var rows = List[String]()
+    for r in range(result.num_rows()):
+        var line = String("")
+        for c in range(result.num_columns()):
+            if c > 0:
+                line += "\x01"
+            line += oracle_cell(result.value(r, c))
+        rows.append(line^)
+    _sort_strings(rows)
+    return rows^
+
+
+def oracle_rows(path: String) raises -> Tuple[List[String], List[String]]:
+    """`(columns, rows)` from one oracle file, in the same encoding."""
+    var doc = parse_json(read_file(path))
+    var cols = List[String]()
+    var ci = doc.get(doc.root, "columns")
+    for k in range(doc.size(ci)):
+        cols.append(doc.as_string(doc.at(ci, k)))
+    var rows = List[String]()
+    var ri = doc.get(doc.root, "rows")
+    for k in range(doc.size(ri)):
+        var row = doc.at(ri, k)
+        var line = String("")
+        for c in range(doc.size(row)):
+            if c > 0:
+                line += "\x01"
+            var cell = doc.at(row, c)
+            if doc.is_null(cell):
+                line += String("\x00null")
+            else:
+                line += doc.as_string(cell)
+        rows.append(line^)
+    _sort_strings(rows)
+    return (cols^, rows^)
+
+
+def _sort_strings(mut l: List[String]):
+    for i in range(1, len(l)):
+        var j = i
+        while j > 0 and l[j] < l[j - 1]:
+            l.swap_elements(j, j - 1)
+            j -= 1
+
+
+def _diff(mine: List[String], theirs: List[String]) -> String:
+    var out = String("")
+    var n = len(mine) if len(mine) < len(theirs) else len(theirs)
+    for k in range(n):
+        if mine[k] != theirs[k]:
+            out += "\n    mine:   " + mine[k]
+            out += "\n    oracle: " + theirs[k]
+            return out^
+    if len(mine) != len(theirs):
+        out += (
+            "\n    counts differ: "
+            + String(len(mine))
+            + " vs "
+            + String(len(theirs))
+        )
+    return out^
+
+
+def test_to_table_matches_pyiceberg_rows() raises:
+    """Gate (a): every table x every filter, row for row, against PyIceberg."""
+    var tables = all_fixture_table_names()
+    var cases = 0
+    var rows_compared = 0
+    var failures = String("")
+    for t in range(len(tables)):
+        var table = tables[t]
+        for k in range(6):
+            var path = (
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/rows_pyiceberg_"
+                + String(k)
+                + ".json"
+            )
+            if not _file_exists(path):
+                continue
+            var want = oracle_rows(path)
+            var dsl = read_file(
+                FIXTURES
+                + "/"
+                + table
+                + "/oracle/plan_"
+                + String(k)
+                + ".filter.txt"
+            ).strip()
+            var got = fixture_scan(table).filter(String(dsl)).to_table()
+            var mine = encoded_rows(got)
+            cases += 1
+            rows_compared += len(mine)
+            if len(mine) != len(want[1]) or _diff(mine, want[1]) != "":
+                failures += (
+                    "\n  "
+                    + table
+                    + " filter "
+                    + String(k)
+                    + " "
+                    + String(dsl)
+                    + _diff(mine, want[1])
+                )
+    print(
+        "    rows vs PyIceberg:",
+        cases,
+        "cases,",
+        rows_compared,
+        "rows",
+    )
+    assert_equal(failures, "", "row mismatches vs PyIceberg:" + failures)
+    assert_equal(cases, 48, "expected 8 tables x 6 filters")
+
+
+def test_to_table_matches_duckdb_rows() raises:
+    """Gate (a), second oracle: DuckDB's iceberg extension, unfiltered."""
+    var tables = all_fixture_table_names()
+    var cases = 0
+    var rows_compared = 0
+    var failures = String("")
+    for t in range(len(tables)):
+        var table = tables[t]
+        var path = FIXTURES + "/" + table + "/oracle/rows_duckdb.json"
+        if not _file_exists(path):
+            continue
+        var want = oracle_rows(path)
+        var got = fixture_scan(table).to_table()
+        var mine = encoded_rows(got)
+        cases += 1
+        rows_compared += len(mine)
+        if len(mine) != len(want[1]) or _diff(mine, want[1]) != "":
+            failures += "\n  " + table + _diff(mine, want[1])
+    print("    rows vs DuckDB:", cases, "tables,", rows_compared, "rows")
+    assert_equal(failures, "", "row mismatches vs DuckDB:" + failures)
+    assert_equal(cases, 9, "expected 9 tables with a DuckDB oracle")
+
+
+def _file_exists(path: String) -> Bool:
+    try:
+        with open(path, "r") as f:
+            _ = f.read_bytes(1)
+        return True
+    except:
+        return False
+
+
+def test_position_deletes_remove_rows() raises:
+    """Gate (b): the position-delete table, against the generator's report."""
+    var doc = parse_json(
+        read_file(FIXTURES + "/deletes_v2/oracle_delete_report.json")
+    )
+    var after = doc.get(doc.root, "rows_after_delete")
+    var want = List[Int64]()
+    for k in range(doc.size(after)):
+        want.append(doc.as_int(doc.at(after, k)))
+
+    var undeleted = fixture_scan("deletes_v2").to_table()
+    var ids = List[Int64]()
+    for r in range(undeleted.num_rows()):
+        ids.append(undeleted.value(r, 0).i)
+    _sort_int64(ids)
+    assert_equal(len(ids), len(want))
+    for k in range(len(want)):
+        assert_equal(ids[k], want[k])
+
+    # And the deleted rows really are gone: the data files hold more rows than
+    # the scan returns.
+    var tasks = fixture_scan("deletes_v2").plan_files()
+    var stored: Int64 = 0
+    var with_deletes = 0
+    for k in range(len(tasks)):
+        stored += tasks[k].data_file.record_count
+        if len(tasks[k].delete_files) > 0:
+            with_deletes += 1
+    assert_true(stored > Int64(len(ids)))
+    assert_true(with_deletes > 0)
+
+
+def test_equality_deletes_match_duckdb() raises:
+    """Gate (c): equality deletes, including `null` matching `null`.
+
+    PyIceberg 0.11.1 cannot read this table at all, so DuckDB is the only
+    oracle — and it is a real one: it returns ids 1, 3 and 4, which is what
+    the spec says survives two delete files, one on `id` and one whose single
+    `amount` value is NULL.
+    """
+    var want = oracle_rows(FIXTURES + "/eq_deletes_v2/oracle/rows_duckdb.json")
+    var got = fixture_scan("eq_deletes_v2").to_table()
+    var mine = encoded_rows(got)
+    assert_equal(len(mine), 3)
+    assert_equal(_diff(mine, want[1]), "")
+
+    # The delete files are what we think they are.
+    var tasks = fixture_scan("eq_deletes_v2").plan_files()
+    var eq_files = 0
+    var ids_seen = List[Int]()
+    for k in range(len(tasks)):
+        for j in range(len(tasks[k].delete_files)):
+            if not tasks[k].delete_files[j].is_equality_delete():
+                continue
+            eq_files += 1
+            for q in range(len(tasks[k].delete_files[j].equality_ids)):
+                ids_seen.append(tasks[k].delete_files[j].equality_ids[q])
+    assert_true(eq_files >= 2)
+    var has_id = False
+    var has_amount = False
+    for k in range(len(ids_seen)):
+        if ids_seen[k] == 1:
+            has_id = True
+        if ids_seen[k] == 3:
+            has_amount = True
+    assert_true(has_id)
+    assert_true(has_amount)
+
+
+def test_deletion_vector_removes_rows() raises:
+    """Gate (d): the v3 deletion-vector table, against PyIceberg and DuckDB."""
+    var pyi = oracle_rows(FIXTURES + "/dv_v3/oracle/rows_pyiceberg_0.json")
+    var duck = oracle_rows(FIXTURES + "/dv_v3/oracle/rows_duckdb.json")
+    var got = fixture_scan("dv_v3").to_table()
+    var mine = encoded_rows(got)
+    assert_equal(len(mine), 4)
+    assert_equal(_diff(mine, pyi[1]), "")
+    assert_equal(_diff(mine, duck[1]), "")
+    # Six rows were written; two vectors removed one each.
+    var tasks = fixture_scan("dv_v3").plan_files()
+    var stored: Int64 = 0
+    for k in range(len(tasks)):
+        stored += tasks[k].data_file.record_count
+    assert_equal(stored, 6)
+
+
+def test_schema_evolution_reads() raises:
+    """Gate (e): renamed, promoted and added columns."""
+    var r = fixture_scan("evolved").to_table()
+    assert_equal(r.num_columns(), 5)
+    assert_equal(r.name(0), "id")
+    assert_equal(r.name(1), "label")  # renamed from `name`
+    assert_equal(r.name(2), "cnt")  # promoted int -> long
+    assert_equal(r.name(4), "extra")  # added after the first snapshot
+    var promoted = False
+    var missing_extra = 0
+    for row in range(r.num_rows()):
+        # 5_000_000_000 does not fit in an int: reading it proves the
+        # promotion happened rather than a truncation.
+        if r.value(row, 2).i == 5000000000:
+            promoted = True
+        if not r.value(row, 4).valid:
+            missing_extra += 1
+    assert_true(promoted)
+    # The three rows written before `extra` existed read as null, not as an
+    # error and not as a default.
+    assert_true(missing_extra >= 3)
+
+    # Projection by the *new* name reaches the same column.
+    var one = (
+        fixture_scan("evolved")
+        .select([String("label"), String("cnt")])
+        .filter('["=","label","alpha"]')
+        .to_table()
+    )
+    assert_equal(one.num_columns(), 2)
+    assert_equal(one.num_rows(), 1)
+    assert_equal(one.value(0, 0).s, "alpha")
+    assert_equal(one.value(0, 1).i, 10)
+
+
+def test_identity_partition_projection() raises:
+    """A partition column is readable even though the file has it too."""
+    var r = (
+        fixture_scan("ident_part")
+        .select([String("region"), String("id")])
+        .filter('["=","region","apac"]')
+        .to_table()
+    )
+    assert_equal(r.num_columns(), 2)
+    assert_true(r.num_rows() > 0)
+    for row in range(r.num_rows()):
+        assert_equal(r.value(row, 0).s, "apac")
+
+
+def test_metadata_columns() raises:
+    var r = (
+        fixture_scan("unpartitioned")
+        .select(
+            [
+                String("id"),
+                META_FILE,
+                META_POS,
+                META_SPEC_ID,
+                META_PARTITION,
+                META_LAST_UPDATED,
+            ]
+        )
+        .to_table()
+    )
+    assert_equal(r.num_columns(), 6)
+    assert_equal(r.name(1), META_FILE)
+    for row in range(r.num_rows()):
+        assert_true(r.value(row, 1).s.endswith(".parquet"))
+        assert_true(r.value(row, 2).i >= 0)
+        assert_equal(r.value(row, 3).i, 0)
+        assert_equal(r.value(row, 4).s, "{}")
+        assert_true(r.value(row, 5).i > 0)
+
+
+def test_v3_row_lineage_columns() raises:
+    """`_row_id` comes from the data file's `first_row_id` plus the position.
+
+    The dv_v3 fixture assigns row ids on the first post-upgrade snapshot, so
+    every surviving row has one and they are distinct.
+    """
+    var r = (
+        fixture_scan("dv_v3")
+        .select([String("id"), META_ROW_ID, META_POS])
+        .to_table()
+    )
+    assert_equal(r.num_rows(), 4)
+    var seen = List[Int64]()
+    for row in range(r.num_rows()):
+        assert_true(r.value(row, 1).valid, "every row should have a _row_id")
+        var v = r.value(row, 1).i
+        for k in range(len(seen)):
+            assert_true(seen[k] != v, "_row_id values must be distinct")
+        seen.append(v)
+
+
+def test_scan_limit_and_batches() raises:
+    var opts = ScanOptions()
+    opts.limit = 2
+    var r = fixture_scan("unpartitioned").to_table(opts)
+    assert_equal(r.num_rows(), 2)
+
+    var batches = fixture_scan("unpartitioned").to_batches()
+    var total = 0
+    for k in range(len(batches)):
+        total += batches[k].num_rows
+        assert_equal(batches[k].num_columns(), 6)
+    assert_equal(total, 7)
+
+
+def test_to_batch_round_trips() raises:
+    """The Arrow batch carries the same values the result does."""
+    var r = fixture_scan("unpartitioned").to_table()
+    var batch = r.to_batch()
+    assert_equal(batch.num_rows, r.num_rows())
+    assert_equal(batch.num_columns(), r.num_columns())
+    var ids = batch.column_i64(0)
+    assert_equal(len(ids[0]), r.num_rows())
+    for row in range(r.num_rows()):
+        assert_equal(ids[0][row], r.value(row, 0).i)
+    var regions = batch.column_str(1)
+    for row in range(r.num_rows()):
+        assert_equal(regions[0][row], r.value(row, 1).s)
+    var amounts = batch.column_f64(2)
+    for row in range(r.num_rows()):
+        assert_equal(amounts[1][row], r.value(row, 2).valid)
+    var oks = batch.column_bool(4)
+    for row in range(r.num_rows()):
+        if r.value(row, 4).valid:
+            assert_equal(oks[0][row], r.value(row, 4).i != 0)
+
+
+def test_lazy_read_matches_eager() raises:
+    """Fetching only the footer and the surviving row groups reads the same
+    rows as downloading the file."""
+    var tables = all_fixture_table_names()
+    var opts = ScanOptions()
+    opts.lazy = True
+    var checked = 0
+    for t in range(len(tables)):
+        var eager = encoded_rows(fixture_scan(tables[t]).to_table())
+        var lazy = encoded_rows(fixture_scan(tables[t]).to_table(opts))
+        assert_equal(len(lazy), len(eager), "lazy row count for " + tables[t])
+        assert_equal(_diff(lazy, eager), "", "lazy rows for " + tables[t])
+        checked += 1
+    assert_equal(checked, 9)
+
+
+def test_name_mapping_parses() raises:
+    var m = NameMapping.parse(
+        '[{"field-id":1,"names":["id","identifier"]},'
+        '{"field-id":2,"names":["data"],"fields":['
+        '{"field-id":3,"names":["inner"]}]}]'
+    )
+    assert_equal(m.id_for("id"), 1)
+    assert_equal(m.id_for("identifier"), 1)
+    assert_equal(m.id_for("data"), 2)
+    assert_equal(m.id_for("data.inner"), 3)
+    assert_equal(m.id_for("nope"), -1)
+    assert_equal(m.name_for(2), "data")
+
+
+def test_result_output_formats() raises:
+    var r = (
+        fixture_scan("unpartitioned")
+        .select([String("id"), String("region")])
+        .filter('["=","id",1]')
+        .to_table()
+    )
+    assert_equal(r.to_csv(), "id,region\n1,eu\n")
+    assert_equal(r.to_json(), '[{"id":1,"region":"eu"}]')
+
+
+def _sort_int64(mut l: List[Int64]):
+    for i in range(1, len(l)):
+        var j = i
+        while j > 0 and l[j] < l[j - 1]:
+            l.swap_elements(j, j - 1)
+            j -= 1
 
 
 def main() raises:

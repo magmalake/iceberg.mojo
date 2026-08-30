@@ -223,9 +223,17 @@ struct Expr(Copyable, Movable):
         return self.add(ExprNode(op, -1, -1, name^, -1, 0, [], raw^))
 
     def bound(
-        mut self, op: UInt8, field_id: Int, prim: UInt8, var lits: List[Datum]
+        mut self,
+        op: UInt8,
+        field_id: Int,
+        prim: UInt8,
+        var lits: List[Datum],
+        var name: String = String(""),
     ) -> Int:
-        return self.add(ExprNode(op, -1, -1, "", field_id, prim, lits^, []))
+        """`name` is carried through binding purely so that `text()` stays
+        round-trippable: a residual is reported as DSL, and DSL names columns.
+        """
+        return self.add(ExprNode(op, -1, -1, name^, field_id, prim, lits^, []))
 
     def is_true(self, i: Int) -> Bool:
         return i >= 0 and self.nodes[i].op == OP_TRUE
@@ -254,7 +262,7 @@ struct Expr(Copyable, Movable):
                 + self.text(n.right)
                 + "]"
             )
-        var term = json_quote(n.name) if n.field_id < 0 else String(n.field_id)
+        var term = json_quote(n.name) if n.name != "" else String(n.field_id)
         var out = "[" + json_quote(op_name(n.op)) + "," + term
         if n.op == OP_IN or n.op == OP_NOT_IN:
             out += ",["
@@ -447,10 +455,10 @@ def _bind_node(
     if n.op == OP_NOT_IN and len(lits) == 0:
         return out.constant(True)
     if n.op == OP_IN and len(lits) == 1:
-        return out.bound(OP_EQ, af.id, tn.prim, lits^)
+        return out.bound(OP_EQ, af.id, tn.prim, lits^, af.name)
     if n.op == OP_NOT_IN and len(lits) == 1:
-        return out.bound(OP_NOT_EQ, af.id, tn.prim, lits^)
-    return out.bound(n.op, af.id, tn.prim, lits^)
+        return out.bound(OP_NOT_EQ, af.id, tn.prim, lits^, af.name)
+    return out.bound(n.op, af.id, tn.prim, lits^, af.name)
 
 
 def rewrite_not(e: Expr) raises -> Expr:
@@ -476,7 +484,7 @@ def _rewrite(e: Expr, i: Int, negated: Bool, mut out: Expr) raises -> Int:
         return out.connective(op, a, b)
     var op2 = negate_op(n.op) if negated else n.op
     if n.field_id >= 0:
-        return out.bound(op2, n.field_id, n.prim, n.lits.copy())
+        return out.bound(op2, n.field_id, n.prim, n.lits.copy(), n.name)
     return out.unbound(op2, n.name, n.raw_lits.copy())
 
 

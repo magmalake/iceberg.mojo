@@ -34,6 +34,17 @@ from .expressions import (
     rewrite_not,
 )
 from .io import FileIO, basename
+from parquet import RecordBatch
+
+from .read import (
+    NameMapping,
+    ScanColumn,
+    NAME_MAPPING_PROPERTY,
+    ScanOptions,
+    ScanResult,
+    is_metadata_column,
+    read_data_file,
+)
 from .json import json_quote
 from .manifest import (
     CONTENT_DATA,
@@ -66,6 +77,10 @@ struct FileScanTask(Copyable, Movable, Writable):
     var start: Int64
     var length: Int64
     var spec_id: Int
+    var data_sequence_number: Int64
+    """The data file's sequence number after inheritance — what the delete
+    scope rules compare against, and what `_last_updated_sequence_number`
+    reports for rows the file has not had rewritten."""
 
     def write_to(self, mut writer: Some[Writer]):
         writer.write(
@@ -160,6 +175,8 @@ struct TableScan(Copyable, Movable):
             return full^
         var ids = List[Int]()
         for k in range(len(self.selected)):
+            if is_metadata_column(self.selected[k]):
+                continue
             ids.append(full.find_by_name(self.selected[k]).id)
         return full.select(ids)
 
@@ -173,6 +190,8 @@ struct TableScan(Copyable, Movable):
                 out.append(cols[k].id)
             return out^
         for k in range(len(self.selected)):
+            if is_metadata_column(self.selected[k]):
+                continue
             out.append(full.find_by_name(self.selected[k]).id)
         return out^
 
@@ -309,9 +328,127 @@ struct TableScan(Copyable, Movable):
                         0,
                         e.data_file.file_size_in_bytes,
                         m.partition_spec_id,
+                        e.sequence_number,
                     )
                 )
         return tasks^
+
+    # ── reading ────────────────────────────────────────────────────────────
+    def _split_selection(self) raises -> Tuple[List[Int], List[String]]:
+        """The selected columns, split into schema field ids and the metadata
+        columns (`_file`, `_pos`, `_spec_id`, `_partition`, `_row_id`,
+        `_last_updated_sequence_number`), which have no field id."""
+        var snap = self.snapshot()
+        var full = self.metadata.schema_for_snapshot(snap)
+        var ids = List[Int]()
+        var meta = List[String]()
+        if len(self.selected) == 0:
+            var cols = full.columns()
+            for k in range(len(cols)):
+                ids.append(cols[k].id)
+            return (ids^, meta^)
+        for k in range(len(self.selected)):
+            if is_metadata_column(self.selected[k]):
+                meta.append(self.selected[k])
+                continue
+            ids.append(full.find_by_name(self.selected[k]).id)
+        return (ids^, meta^)
+
+    def name_mapping(self) raises -> NameMapping:
+        """`schema.name-mapping.default`, or an empty mapping."""
+        if NAME_MAPPING_PROPERTY in self.metadata.properties:
+            return NameMapping.parse(
+                self.metadata.properties[NAME_MAPPING_PROPERTY]
+            )
+        return NameMapping()
+
+    def to_table(
+        self, options: ScanOptions = ScanOptions()
+    ) raises -> ScanResult:
+        """Read every planned file and return the rows, projected and filtered.
+        """
+        var snap = self.snapshot()
+        var schema = self.metadata.schema_for_snapshot(snap)
+        var split = self._split_selection()
+        var ids = split[0].copy()
+        var meta_columns = split[1].copy()
+        var mapping = self.name_mapping()
+        var tasks = self.plan_files()
+        var out = ScanResult()
+        var left = options.limit
+        for k in range(len(tasks)):
+            ref t = tasks[k]
+            var spec = PartitionSpec.unpartitioned(t.spec_id)
+            if self.metadata.has_spec(t.spec_id):
+                spec = self.metadata.spec_by_id(t.spec_id)
+            var opts = options.copy()
+            opts.limit = left
+            var part = read_data_file(
+                self.io,
+                t.data_file,
+                t.delete_files,
+                t.data_sequence_number,
+                spec,
+                schema,
+                ids,
+                meta_columns,
+                mapping,
+                t.residual,
+                self.case_sensitive,
+                opts,
+            )
+            out.append(part)
+            if options.limit >= 0:
+                left = options.limit - out.num_rows()
+                if left <= 0:
+                    break
+        if len(out.columns) == 0:
+            # Nothing was read: still describe the shape of the result.
+            out = _empty_result(schema, ids, meta_columns)
+        return out^
+
+    def to_batches(
+        self, options: ScanOptions = ScanOptions()
+    ) raises -> List[RecordBatch]:
+        """The same rows, one Arrow `RecordBatch` per data file."""
+        var snap = self.snapshot()
+        var schema = self.metadata.schema_for_snapshot(snap)
+        var split = self._split_selection()
+        var ids = split[0].copy()
+        var meta_columns = split[1].copy()
+        var mapping = self.name_mapping()
+        var tasks = self.plan_files()
+        var out = List[RecordBatch]()
+        var left = options.limit
+        for k in range(len(tasks)):
+            ref t = tasks[k]
+            var spec = PartitionSpec.unpartitioned(t.spec_id)
+            if self.metadata.has_spec(t.spec_id):
+                spec = self.metadata.spec_by_id(t.spec_id)
+            var opts = options.copy()
+            opts.limit = left
+            var part = read_data_file(
+                self.io,
+                t.data_file,
+                t.delete_files,
+                t.data_sequence_number,
+                spec,
+                schema,
+                ids,
+                meta_columns,
+                mapping,
+                t.residual,
+                self.case_sensitive,
+                opts,
+            )
+            if part.num_rows() == 0:
+                continue
+            if options.limit >= 0:
+                left -= part.num_rows()
+            out.append(part.to_batch())
+            if options.limit >= 0 and left <= 0:
+                break
+        return out^
 
     # ── output ─────────────────────────────────────────────────────────────
     def plan_files_json(self) raises -> String:
@@ -348,6 +485,30 @@ struct TableScan(Copyable, Movable):
             out += "}"
         out += "]"
         return out^
+
+
+def _empty_result(
+    schema: Schema, ids: List[Int], meta_columns: List[String]
+) raises -> ScanResult:
+    """A result with the right columns and no rows."""
+    var cols = List[ScanColumn]()
+    for k in range(len(ids)):
+        var f = schema.find_field(ids[k])
+        ref t = schema.store.nodes[f.type]
+        cols.append(
+            ScanColumn(
+                f.name,
+                ids[k],
+                t.prim,
+                t.precision,
+                t.scale,
+                t.length,
+                List[Datum](),
+            )
+        )
+    for k in range(len(meta_columns)):
+        cols.append(ScanColumn(meta_columns[k], -1, 0, 0, 0, 0, List[Datum]()))
+    return ScanResult(cols^)
 
 
 def _deletes_for(
