@@ -68,6 +68,13 @@ from iceberg.append import (
     next_metadata_version,
     prepare_append,
 )
+from iceberg.delete import (
+    MODE_COPY_ON_WRITE,
+    MODE_MERGE_ON_READ,
+    PROP_DELETE_MODE,
+    delete_mode_of,
+    plan_row_deletes,
+)
 from iceberg.batch import ColumnBuilder, batch_of
 from iceberg.util import now_ms
 from iceberg.manifest_write import (
@@ -4080,6 +4087,374 @@ def test_rest_commit_rejects_a_stale_requirement() raises:
     )
     assert_equal(resp.status, 409, "a wrong table uuid is a conflict")
     assert_true(resp.text().find("assert-table-uuid") >= 0, resp.text())
+
+
+# ══ delete, overwrite, and the manifest maintenance they need ═══════════════
+# Every table below is written by this library, deleted from by this library,
+# and read back through the scan path. The *external* gate — PyIceberg 0.11.1
+# and DuckDB 1.5.5 reading the same tables — is tools/verify_written.py.
+def delete_table(
+    scenario: String,
+    shape: String,
+    format_version: Int,
+    mode: String = String(""),
+) raises -> Table:
+    """Three appends of six rows (ids 0..17), then whatever the test does."""
+    var table = build_written_table(scenario, shape, format_version)
+    if mode != "":
+        table.metadata.properties[PROP_DELETE_MODE] = mode
+    return table^
+
+
+def ids_of(table: Table) raises -> List[Int64]:
+    var rows = table.scan().select([String("id")]).to_table()
+    var out = List[Int64]()
+    for r in range(rows.num_rows()):
+        out.append(rows.value(r, 0).i)
+    return out^
+
+
+def has_id(ids: List[Int64], v: Int64) -> Bool:
+    for k in range(len(ids)):
+        if ids[k] == v:
+            return True
+    return False
+
+
+def delete_files_of(table: Table) raises -> List[DataFile]:
+    var out = List[DataFile]()
+    var tasks = table.scan().plan_files()
+    var seen = List[String]()
+    for k in range(len(tasks)):
+        for j in range(len(tasks[k].delete_files)):
+            # A single Puffin file holds one vector per data file, so the
+            # identity of a delete *file entry* is path plus offset.
+            var path = tasks[k].delete_files[j].file_path + "@" + String(
+                tasks[k].delete_files[j].content_offset
+            )
+            var dup = False
+            for i in range(len(seen)):
+                if seen[i] == path:
+                    dup = True
+                    break
+            if dup:
+                continue
+            seen.append(path^)
+            out.append(tasks[k].delete_files[j].copy())
+    return out^
+
+
+def test_delete_mode_defaults_to_copy_on_write() raises:
+    var props = Dict[String, String]()
+    assert_equal(delete_mode_of(props), MODE_COPY_ON_WRITE)
+    props[PROP_DELETE_MODE] = String("merge-on-read")
+    assert_equal(delete_mode_of(props), MODE_MERGE_ON_READ)
+    props[PROP_DELETE_MODE] = String("Copy-On-Write")
+    assert_equal(delete_mode_of(props), MODE_COPY_ON_WRITE)
+    props[PROP_DELETE_MODE] = String("whatever")
+    with assert_raises():
+        _ = delete_mode_of(props)
+
+
+def test_merge_on_read_delete_writes_deletion_vectors() raises:
+    """v3 merge-on-read: one Puffin vector per data file that lost a row.
+
+    Four `eu` rows (ids 0, 5, 10, 15) spread over the three files, so no file
+    is emptied and all three get a vector.
+    """
+    var table = delete_table("del_mor_v3", "unpartitioned", 3)
+    assert_equal(table.scan().to_table().num_rows(), 18)
+    var removed = table.delete_where(
+        String('["=","region","eu"]'), MODE_MERGE_ON_READ
+    )
+    assert_equal(removed, 4)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 14)
+    for v in [Int64(0), Int64(5), Int64(10), Int64(15)]:
+        assert_false(has_id(ids, v), "id " + String(v) + " is deleted")
+
+    # Three vectors, in one Puffin file, each pointing at its data file.
+    var deletes = delete_files_of(table)
+    assert_equal(len(deletes), 3)
+    var puffin = String("")
+    var total: Int64 = 0
+    for k in range(len(deletes)):
+        assert_true(deletes[k].is_deletion_vector())
+        assert_equal(deletes[k].file_format.lower(), "puffin")
+        assert_equal(deletes[k].content, 1)
+        assert_true(deletes[k].has_referenced_data_file)
+        assert_true(deletes[k].has_content_offset)
+        assert_true(deletes[k].has_content_size_in_bytes)
+        total += deletes[k].record_count
+        if puffin == "":
+            puffin = deletes[k].file_path
+        assert_equal(deletes[k].file_path, puffin, "one Puffin file per commit")
+    assert_equal(total, 4)
+
+    # The footer agrees with the manifest, byte for byte.
+    var pf = PuffinFile.open(table.io, puffin)
+    assert_equal(len(pf.blobs), 3)
+    for k in range(len(deletes)):
+        var found = False
+        for b in range(len(pf.blobs)):
+            if pf.blobs[b].offset != deletes[k].content_offset:
+                continue
+            found = True
+            assert_equal(pf.blobs[b].length, deletes[k].content_size_in_bytes)
+            assert_equal(
+                pf.blobs[b].referenced_data_file(),
+                deletes[k].referenced_data_file,
+            )
+            assert_equal(pf.blobs[b].cardinality(), deletes[k].record_count)
+            assert_equal(pf.blobs[b].compression_codec, "")
+            assert_equal(pf.blobs[b].snapshot_id, -1)
+            assert_equal(pf.blobs[b].sequence_number, -1)
+        assert_true(found, "every vector is in the footer")
+
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.operation(), "delete")
+    assert_equal(snap.summary_int(String("added-delete-files"), -1), 3)
+    assert_equal(snap.summary_int(String("added-dvs"), -1), 3)
+    assert_equal(snap.summary_int(String("added-position-deletes"), -1), 4)
+    assert_equal(snap.summary_int(String("total-delete-files"), -1), 3)
+    assert_equal(snap.summary_int(String("total-position-deletes"), -1), 4)
+    assert_equal(snap.summary_int(String("total-data-files"), -1), 3)
+    assert_equal(snap.summary_int(String("total-records"), -1), 18)
+
+
+def test_merge_on_read_delete_writes_position_deletes() raises:
+    """v2 merge-on-read: a Parquet file of (file_path, pos), sorted."""
+    var table = delete_table("del_mor_v2", "unpartitioned", 2)
+    var removed = table.delete_where(
+        String('["=","region","eu"]'), MODE_MERGE_ON_READ
+    )
+    assert_equal(removed, 4)
+    table.refresh()
+    assert_equal(len(ids_of(table)), 14)
+
+    var deletes = delete_files_of(table)
+    assert_equal(len(deletes), 1, "one file per partition, and there is one")
+    assert_equal(deletes[0].file_format.lower(), "parquet")
+    assert_equal(deletes[0].content, 1)
+    assert_equal(deletes[0].record_count, 4)
+    assert_false(deletes[0].has_referenced_data_file)
+    assert_false(deletes[0].has_sort_order_id)
+    assert_true(deletes[0].file_path.find("position-deletes") >= 0)
+
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.operation(), "delete")
+    assert_equal(snap.summary_int(String("added-delete-files"), -1), 1)
+    assert_equal(snap.summary_int(String("added-position-deletes"), -1), 4)
+    assert_equal(
+        snap.summary_int(String("added-position-delete-files"), -1), 1
+    )
+    assert_equal(snap.summary_int(String("total-position-deletes"), -1), 4)
+
+
+def test_a_second_delete_merges_the_deletion_vector() raises:
+    """The spec's rule: a new vector absorbs every prior position delete for
+    its data file, and the vector it replaces is marked DELETED."""
+    var table = delete_table("del_mor_twice", "unpartitioned", 3)
+    _ = table.delete_where(String('["=","id",0]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var first = delete_files_of(table)
+    assert_equal(len(first), 1)
+    assert_equal(first[0].record_count, 1)
+    assert_equal(len(ids_of(table)), 17)
+
+    _ = table.delete_where(String('["=","id",3]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var second = delete_files_of(table)
+    assert_equal(len(second), 1, "the old vector is gone, not applied twice")
+    assert_equal(second[0].record_count, 2, "the new vector absorbed the old")
+    assert_true(second[0].file_path != first[0].file_path)
+    var ids = ids_of(table)
+    assert_equal(len(ids), 16)
+    assert_false(has_id(ids, 0))
+    assert_false(has_id(ids, 3))
+    assert_true(has_id(ids, 1))
+
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.summary_int(String("removed-dvs"), -1), 1)
+    assert_equal(snap.summary_int(String("removed-delete-files"), -1), 1)
+    assert_equal(snap.summary_int(String("total-delete-files"), -1), 1)
+    assert_equal(snap.summary_int(String("total-position-deletes"), -1), 2)
+
+
+def test_copy_on_write_delete_rewrites_the_file() raises:
+    """The default mode: no delete file anywhere, the originals DELETED."""
+    var table = delete_table("del_cow_v2", "unpartitioned", 2)
+    var removed = table.delete_where(String('["=","region","eu"]'))
+    assert_equal(removed, 4)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 14)
+    assert_false(has_id(ids, 5))
+    assert_equal(len(delete_files_of(table)), 0, "copy-on-write leaves none")
+    assert_equal(len(table.scan().plan_files()), 3, "three rewritten files")
+
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.operation(), "overwrite")
+    assert_equal(snap.summary_int(String("added-data-files"), -1), 3)
+    assert_equal(snap.summary_int(String("added-records"), -1), 14)
+    assert_equal(snap.summary_int(String("deleted-data-files"), -1), 3)
+    assert_equal(snap.summary_int(String("deleted-records"), -1), 18)
+    assert_equal(snap.summary_int(String("total-data-files"), -1), 3)
+    assert_equal(snap.summary_int(String("total-records"), -1), 14)
+    assert_equal(snap.summary_int(String("total-delete-files"), -1), 0)
+
+
+def test_metadata_delete_removes_whole_files() raises:
+    """A filter the partitioning already answers: no data file is read and
+    none is rewritten — the matching files are simply marked DELETED."""
+    var table = delete_table("del_meta", "ident", 2)
+    var before = len(table.scan().plan_files())
+    var removed = table.delete_where(String('["=","region","eu"]'))
+    assert_equal(removed, 4)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 14)
+    assert_false(has_id(ids, 0))
+    var snap = table.metadata.current_snapshot()
+    assert_equal(
+        snap.operation(), "delete", "nothing was added, so it is a delete"
+    )
+    assert_equal(snap.summary_int(String("deleted-records"), -1), 4)
+    assert_equal(snap.summary_int(String("total-records"), -1), 14)
+    assert_true(len(table.scan().plan_files()) < before)
+
+
+def test_delete_everything_leaves_an_empty_table() raises:
+    """Every manifest ends up with nothing live, so none is written at all."""
+    var table = delete_table("del_all", "unpartitioned", 3)
+    var removed = table.delete_where(String('["true"]'), MODE_MERGE_ON_READ)
+    assert_equal(removed, 18)
+    table.refresh()
+    assert_equal(table.scan().to_table().num_rows(), 0)
+    assert_equal(len(table.scan().plan_files()), 0)
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.summary_int(String("total-records"), -1), 0)
+    assert_equal(snap.summary_int(String("total-data-files"), -1), 0)
+    assert_equal(snap.summary_int(String("total-delete-files"), -1), 0)
+
+
+def test_delete_preserves_row_lineage() raises:
+    """v3: a merge-on-read delete moves no row, so every surviving `_row_id`
+    is the one the append assigned."""
+    var table = delete_table("del_lineage", "unpartitioned", 3)
+    var before = table.scan().select([String("id"), String("_row_id")]).to_table()
+    var want = Dict[Int64, Int64]()
+    for r in range(before.num_rows()):
+        want[before.value(r, 0).i] = before.value(r, 1).i
+    _ = table.delete_where(String('["=","region","eu"]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var after = table.scan().select([String("id"), String("_row_id")]).to_table()
+    assert_equal(after.num_rows(), 14)
+    for r in range(after.num_rows()):
+        var id = after.value(r, 0).i
+        assert_equal(
+            after.value(r, 1).i, want[id], "_row_id of id " + String(id)
+        )
+    assert_equal(table.metadata.next_row_id, 18)
+
+
+def test_overwrite_replaces_the_whole_table() raises:
+    var table = delete_table("ovw_all", "unpartitioned", 2)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 100, 3))
+    var added = table.overwrite(batches)
+    assert_equal(added, 3)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 3)
+    assert_true(has_id(ids, 100))
+    assert_false(has_id(ids, 0))
+    var snap = table.metadata.current_snapshot()
+    assert_equal(snap.operation(), "overwrite")
+    assert_equal(snap.summary_int(String("added-data-files"), -1), 1)
+    assert_equal(snap.summary_int(String("deleted-data-files"), -1), 3)
+    assert_equal(snap.summary_int(String("total-records"), -1), 3)
+    assert_equal(snap.summary_int(String("total-data-files"), -1), 1)
+
+
+def test_overwrite_with_a_filter() raises:
+    """Only the matching rows go; the rest of each file is rewritten."""
+    var table = delete_table("ovw_filter", "unpartitioned", 3)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 200, 2))
+    var added = table.overwrite(batches, String('[">","id",11]'))
+    assert_equal(added, 2)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 14, "12 kept, 6 deleted, 2 added")
+    assert_true(has_id(ids, 11))
+    assert_false(has_id(ids, 12))
+    assert_true(has_id(ids, 200))
+    assert_equal(table.metadata.current_snapshot().operation(), "overwrite")
+
+
+def test_dynamic_partition_overwrite_touches_only_its_partitions() raises:
+    """The partitions the new rows land in are replaced; the others are not."""
+    var table = delete_table("ovw_dynamic", "ident", 2)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    # ids 0 and 5 are both `eu`; this replaces that partition with one row.
+    var region = ColumnBuilder.of(schema, 2)
+    var ids_b = ColumnBuilder.of(schema, 1)
+    var amount = ColumnBuilder.of(schema, 3)
+    var ts = ColumnBuilder.of(schema, 4)
+    var ok = ColumnBuilder.of(schema, 5)
+    ids_b.add(Datum.long_(Int64(900)))
+    region.add(Datum.string_(String("eu")))
+    amount.add(Datum.double_(1.0))
+    ts.add(Datum.integral(ts.kind, WRITE_DAY * WRITE_MICROS_PER_DAY))
+    ok.add(Datum.bool_(True))
+    var batches = List[RecordBatch]()
+    batches.append(batch_of([ids_b^, region^, amount^, ts^, ok^]))
+    var added = table.dynamic_partition_overwrite(batches)
+    assert_equal(added, 1)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 15, "18 - 4 eu rows + 1")
+    assert_true(has_id(ids, 900))
+    assert_false(has_id(ids, 0))
+    assert_true(has_id(ids, 1), "the `us` partition is untouched")
+    var eu = (
+        table.scan().filter('["=","region","eu"]').to_table().num_rows()
+    )
+    assert_equal(eu, 1)
+
+
+def test_rewritten_manifests_keep_their_sequence_numbers() raises:
+    """Inheritance is ADDED-only, so an EXISTING entry a rewrite carries has
+    to spell its numbers out or its rows get re-dated — which would silently
+    change which deletes apply to it."""
+    var table = delete_table("del_seq", "unpartitioned", 3)
+    var before = table.scan().plan_files()
+    var was = Dict[String, Int64]()
+    for k in range(len(before)):
+        was[before[k].data_file.file_path] = before[k].data_sequence_number
+    _ = table.delete_where(String('["=","id",7]'), MODE_MERGE_ON_READ)
+    table.refresh()
+    var after = table.scan().plan_files()
+    assert_equal(len(after), 3)
+    for k in range(len(after)):
+        assert_equal(
+            after[k].data_sequence_number,
+            was[after[k].data_file.file_path],
+            "sequence number of " + basename(after[k].data_file.file_path),
+        )
+
+
+def test_delete_that_matches_nothing_changes_nothing() raises:
+    var table = delete_table("del_none", "unpartitioned", 2)
+    var snapshots = len(table.metadata.snapshots)
+    assert_equal(table.delete_where(String('["=","id",9999]')), 0)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), snapshots)
+    assert_equal(table.scan().to_table().num_rows(), 18)
 
 
 def main() raises:

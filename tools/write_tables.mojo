@@ -1,9 +1,26 @@
 """Build the tables the write path is verified against.
 
-Ten tables — five partitioning shapes x format versions 2 and 3 — each created
-empty and then appended to three times, so each has three snapshots. Everything
-here goes through the public API: `FilesystemCatalog.create_table`,
-`Table.new_append()`, `commit()`.
+Ten **append** tables — five partitioning shapes x format versions 2 and 3 —
+each created empty and then appended to three times, so each has three
+snapshots.
+
+Then twenty-one **delete and overwrite** tables, in the `del` namespace, each
+built the same way and then modified once:
+
+* `mor_<shape>_v<n>` — a merge-on-read `DELETE WHERE region = 'eu'`, which is
+  a deletion vector per affected data file on v3 and a position delete file
+  per partition on v2;
+* `cow_<shape>_v<n>` — the same delete, copy-on-write, which rewrites the
+  affected data files and leaves no delete file at all;
+* `mor_twice_v3` — two merge-on-read deletes against the same data file, so
+  the second vector has to absorb the first;
+* `ovw_all_v2` — an unfiltered overwrite; `ovw_filter_v3` — a filtered one;
+* `dyn_ident_v<n>` — a dynamic partition overwrite, which must replace the
+  `eu` partition and leave the other four alone.
+
+Everything here goes through the public API: `FilesystemCatalog.create_table`,
+`Table.new_append()`, `commit()`, `delete_where()`, `overwrite()`,
+`dynamic_partition_overwrite()`.
 
 `tools/verify_written.py` then reads every one of them with PyIceberg 0.11.1
 and DuckDB 1.5.5 and compares rows, snapshots, partition values and statistics
@@ -161,3 +178,115 @@ def main() raises:
                 String(len(table.metadata.snapshots)) + " snapshots",
                 "next-row-id=" + String(table.metadata.next_row_id),
             )
+    write_delete_tables(catalog, schema)
+
+
+def seeded(
+    catalog: FilesystemCatalog,
+    schema: Schema,
+    name: String,
+    shape: String,
+    version: Int,
+    mode: String,
+) raises -> Table:
+    """A table with the standard three appends, and a delete mode set."""
+    var props = Dict[String, String]()
+    if mode != "":
+        props["write.delete.mode"] = mode
+    var table = catalog.create_table(
+        String("del"), name, schema, spec_for(shape), props^, version
+    )
+    for b in range(3):
+        var batches = List[RecordBatch]()
+        batches.append(make_batch(schema, b * 6, 6))
+        var tx = table.new_append()
+        tx.add_batches(batches)
+        _ = tx.commit()
+        table.refresh()
+    return table^
+
+
+def report(name: String, table: Table, note: String) raises:
+    var rows = table.scan().to_table().num_rows()
+    print(
+        "wrote del." + name,
+        "v" + String(table.metadata.format_version),
+        String(rows) + " rows",
+        String(len(table.metadata.snapshots)) + " snapshots",
+        note,
+    )
+
+
+def write_delete_tables(catalog: FilesystemCatalog, schema: Schema) raises:
+    var shapes: List[String] = [
+        String("unpartitioned"),
+        String("ident"),
+        String("bucket"),
+        String("day"),
+    ]
+    var versions: List[Int] = [2, 3]
+    for vi in range(len(versions)):
+        var v = versions[vi]
+        for si in range(len(shapes)):
+            var mor = "mor_" + shapes[si] + "_v" + String(v)
+            var t = seeded(
+                catalog, schema, mor, shapes[si], v, String("merge-on-read")
+            )
+            var n = t.delete_where(String('["=","region","eu"]'))
+            report(mor, t, "merge-on-read delete of " + String(n) + " rows")
+
+            var cow = "cow_" + shapes[si] + "_v" + String(v)
+            var c = seeded(catalog, schema, cow, shapes[si], v, String(""))
+            var m = c.delete_where(String('["=","region","eu"]'))
+            report(cow, c, "copy-on-write delete of " + String(m) + " rows")
+
+    # Two merge-on-read deletes against the same file: the second vector has
+    # to absorb the first, and the first must be marked DELETED.
+    var twice = seeded(
+        catalog,
+        schema,
+        String("mor_twice_v3"),
+        String("unpartitioned"),
+        3,
+        String("merge-on-read"),
+    )
+    _ = twice.delete_where(String('["=","id",0]'))
+    _ = twice.delete_where(String('["=","id",3]'))
+    report(String("mor_twice_v3"), twice, "two merged deletion vectors")
+
+    var all_ovw = seeded(
+        catalog,
+        schema,
+        String("ovw_all_v2"),
+        String("unpartitioned"),
+        2,
+        String(""),
+    )
+    var fresh = List[RecordBatch]()
+    fresh.append(make_batch(schema, 100, 3))
+    _ = all_ovw.overwrite(fresh)
+    report(String("ovw_all_v2"), all_ovw, "unfiltered overwrite")
+
+    var filtered = seeded(
+        catalog,
+        schema,
+        String("ovw_filter_v3"),
+        String("unpartitioned"),
+        3,
+        String(""),
+    )
+    var more = List[RecordBatch]()
+    more.append(make_batch(schema, 200, 2))
+    _ = filtered.overwrite(more, String('[">","id",11]'))
+    report(String("ovw_filter_v3"), filtered, "overwrite where id > 11")
+
+    for vi in range(len(versions)):
+        var v = versions[vi]
+        var name = "dyn_ident_v" + String(v)
+        var dyn = seeded(
+            catalog, schema, name, String("ident"), v, String("")
+        )
+        var one = List[RecordBatch]()
+        one.append(make_batch(schema, 100, 1))
+        _ = dyn.dynamic_partition_overwrite(one)
+        report(name, dyn, "dynamic overwrite of the eu partition")

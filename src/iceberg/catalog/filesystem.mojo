@@ -27,6 +27,18 @@ from ..append import (
     prepare_append,
     write_and_prepare_append,
 )
+from ..delete import (
+    MODE_COPY_ON_WRITE,
+    MODE_MERGE_ON_READ,
+    delete_mode_of,
+    deleted_row_count,
+    plan_row_deletes,
+    prepare_delete,
+    prepare_delete_from,
+    prepare_dynamic_partition_overwrite,
+    prepare_overwrite,
+)
+from ..read import ScanOptions
 from ..io import FileIO, basename, dirname, join_path, strip_scheme
 from ..json import substr
 from ..manifest import DataFile
@@ -290,6 +302,81 @@ struct Table(Copyable, Movable):
         var n = tx.commit()
         self.refresh()
         return n
+
+    def delete_where(
+        mut self, filter_dsl: String, mode: String = String("")
+    ) raises -> Int64:
+        """`DELETE FROM t WHERE <filter>`. Returns the rows removed.
+
+        The strategy comes from `write.delete.mode` unless `mode` overrides
+        it: `copy-on-write` (the default) rewrites the affected data files,
+        `merge-on-read` writes deletion vectors on v3 and position delete
+        files on v2.
+        """
+        var attempt = 0
+        while True:
+            var scan = self.scan()
+            var plans = plan_row_deletes(scan, filter_dsl, ScanOptions())
+            var rows = deleted_row_count(plans)
+            if rows == 0:
+                return 0
+            var result = prepare_delete_from(
+                self.io, self.metadata, plans, mode
+            )
+            try:
+                self.commit(result)
+                return rows
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
+
+    def overwrite(
+        mut self,
+        batches: List[RecordBatch],
+        filter_dsl: String = String('["true"]'),
+    ) raises -> Int64:
+        """Delete every row the filter matches and add `batches`, in one
+        `overwrite` snapshot. With no filter this replaces the whole table.
+        Returns the rows added."""
+        var rows: Int64 = 0
+        for k in range(len(batches)):
+            rows += Int64(batches[k].num_rows)
+        var attempt = 0
+        while True:
+            var result = prepare_overwrite(
+                self.io, self.metadata, batches, filter_dsl
+            )
+            try:
+                self.commit(result)
+                return rows
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
+
+    def dynamic_partition_overwrite(
+        mut self, batches: List[RecordBatch]
+    ) raises -> Int64:
+        """Replace exactly the partitions the new rows land in. Rows added."""
+        var rows: Int64 = 0
+        for k in range(len(batches)):
+            rows += Int64(batches[k].num_rows)
+        var attempt = 0
+        while True:
+            var result = prepare_dynamic_partition_overwrite(
+                self.io, self.metadata, batches
+            )
+            try:
+                self.commit(result)
+                return rows
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
 
     def commit(mut self, result: AppendResult) raises:
         """Persist a prepared commit as a new `<V>-<uuid>.metadata.json`.

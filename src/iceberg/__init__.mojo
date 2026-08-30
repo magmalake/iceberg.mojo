@@ -26,6 +26,21 @@ from iceberg.append import (
     write_and_prepare_append,
 )
 from iceberg.batch import ColumnBuilder, array_from_datums, batch_of
+from iceberg.commit import FileChanges, OP_DELETE, OP_OVERWRITE, prepare_commit
+from iceberg.delete import (
+    MODE_COPY_ON_WRITE,
+    MODE_MERGE_ON_READ,
+    PROP_DELETE_MODE,
+    RowDelete,
+    delete_mode_of,
+    plan_row_deletes,
+    prepare_delete,
+    prepare_delete_from,
+    prepare_dynamic_partition_overwrite,
+    prepare_overwrite,
+    write_deletion_vectors,
+    write_position_deletes,
+)
 from iceberg.expressions import (
     ColumnMetrics,
     Expr,
