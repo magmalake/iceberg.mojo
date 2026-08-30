@@ -15,12 +15,33 @@ header, a raw deflate stream and an eight-byte trailer, and avro.mojo already
 carries a deflate decoder, so no extra dependency is needed.
 """
 
-from avro.deflate import inflate
+from std.collections import Dict
 
+from avro.deflate import inflate
+from parquet import RecordBatch
+
+from ..append import (
+    AppendResult,
+    metadata_file_name,
+    next_metadata_version,
+    prepare_append,
+    write_and_prepare_append,
+)
 from ..io import FileIO, basename, dirname, join_path, strip_scheme
 from ..json import substr
-from ..metadata import TableMetadata
+from ..manifest import DataFile
+from ..metadata import (
+    INITIAL_SORT_ORDER_ID,
+    INITIAL_SPEC_ID,
+    MAIN_BRANCH,
+    SUPPORTED_FORMAT_VERSION,
+    TableMetadata,
+)
 from ..scan import TableScan
+from ..schema import Schema
+from ..transforms import PartitionSpec, SortOrder
+from ..util import now_ms, uuid4
+from ..write import WriteOptions, write_data_files
 
 
 comptime VERSION_HINT = String("version-hint.text")
@@ -249,6 +270,130 @@ struct Table(Copyable, Movable):
         self.metadata = read_metadata_file(self.io, path)
         self.metadata_location = path^
 
+    # ── writing ────────────────────────────────────────────────────────────
+    def new_append(self) -> AppendFiles:
+        """Start a fast-append transaction against this table."""
+        return AppendFiles(self.copy())
+
+    def append(mut self, batches: List[RecordBatch]) raises -> Int64:
+        """Write `batches` and commit them as one snapshot. Rows appended."""
+        var tx = self.new_append()
+        tx.add_batches(batches)
+        var n = tx.commit()
+        self.refresh()
+        return n
+
+    def commit(mut self, result: AppendResult) raises:
+        """Persist a prepared commit as a new `<V>-<uuid>.metadata.json`.
+
+        The new file is written with *create* semantics — it must not already
+        exist — which is what makes two writers racing on the same version
+        detectable. A local filesystem really provides that; an object store
+        does not, and the spec says so, so this is unsafe over `s3://` in
+        exactly the way every other filesystem-table writer is.
+        """
+        var dir = dirname(self.metadata_location)
+        var version = next_metadata_version(result.metadata)
+        var path = join_path(dir, metadata_file_name(version))
+        var doc = result.metadata.to_json()
+        self.io.write_new(path, doc.as_bytes())
+        # `version-hint.text` is advisory: a reader that cannot find the file
+        # it names falls back to listing, which is why it is written after.
+        try:
+            self.io.write_text(
+                join_path(dir, VERSION_HINT), String(version) + "\n"
+            )
+        except:
+            pass
+        self.metadata = result.metadata.copy()
+        self.metadata.metadata_file_location = path
+        self.metadata_location = path^
+
+
+struct AppendFiles(Movable):
+    """A fast-append transaction: collect batches or data files, then commit.
+
+    ```mojo
+    var tx = table.new_append()
+    tx.add(batch)
+    _ = tx.commit()
+    ```
+    """
+
+    var table: Table
+    var batches: List[RecordBatch]
+    var files: List[DataFile]
+    var retries: Int
+    """How many times to reload and retry when another writer got there first.
+    """
+
+    def __init__(out self, var table: Table):
+        self.table = table^
+        self.batches = []
+        self.files = []
+        self.retries = 4
+
+    def __init__(out self, *, deinit move: Self):
+        self.table = move.table^
+        self.batches = move.batches^
+        self.files = move.files^
+        self.retries = move.retries
+
+    def add(mut self, batch: RecordBatch):
+        self.batches.append(batch.copy())
+
+    def add_batches(mut self, batches: List[RecordBatch]):
+        for k in range(len(batches)):
+            self.batches.append(batches[k].copy())
+
+    def add_data_file(mut self, file: DataFile):
+        """Append a Parquet file that is already written and already in place.
+        """
+        self.files.append(file.copy())
+
+    def commit(mut self) raises -> Int64:
+        """Write the data files, then commit, reloading and retrying if
+        another writer committed in between. Returns the rows appended."""
+        var options = WriteOptions.from_properties(
+            self.table.metadata.properties
+        )
+        var written = self.files.copy()
+        if len(self.batches) > 0:
+            var more = write_data_files(
+                self.table.io,
+                self.table.metadata.location,
+                self.batches,
+                self.table.metadata.schema(),
+                self.table.metadata.spec(),
+                self.table.metadata.default_sort_order_id,
+                options,
+            )
+            for k in range(len(more)):
+                written.append(more[k].copy())
+        if len(written) == 0:
+            return 0
+        var rows: Int64 = 0
+        for k in range(len(written)):
+            rows += written[k].record_count
+        var attempt = 0
+        while True:
+            var result = prepare_append(
+                self.table.io,
+                self.table.metadata,
+                written.copy(),
+                Dict[String, String](),
+            )
+            try:
+                self.table.commit(result)
+                return rows
+            except e:
+                attempt += 1
+                if attempt > self.retries:
+                    raise e
+                # Somebody else took this version. Reload and try again — the
+                # data files are already written and stay valid.
+                self.table.refresh()
+
 
 struct FilesystemCatalog(Copyable, Movable):
     """Tables addressed by path under a warehouse root: `<warehouse>/<ns>/<tbl>`.
@@ -300,6 +445,45 @@ struct FilesystemCatalog(Copyable, Movable):
                 out.append(n^)
         return out^
 
+    def create_table(
+        self,
+        namespace: String,
+        name: String,
+        schema: Schema,
+        spec: PartitionSpec = PartitionSpec.unpartitioned(),
+        var properties: Dict[String, String] = Dict[String, String](),
+        format_version: Int = 2,
+    ) raises -> Table:
+        """Create an empty table: one `00000-<uuid>.metadata.json`, no snapshot.
+        """
+        var loc = self.table_location(namespace, name)
+        if self.table_exists(namespace, name):
+            raise Error("iceberg: table '" + loc + "' already exists")
+        var m = new_table_metadata(
+            loc, schema, spec, properties^, format_version
+        )
+        var dir = join_path(loc, METADATA_DIR)
+        var path = join_path(dir, metadata_file_name(0))
+        self.io.write_new(path, m.to_json().as_bytes())
+        try:
+            self.io.write_text(join_path(dir, VERSION_HINT), String("0\n"))
+        except:
+            pass
+        m.metadata_file_location = path
+        return Table(
+            m^,
+            path^,
+            self.io.copy(),
+            name if namespace == "" else namespace + "." + name,
+        )
+
+    def drop_table(self, namespace: String, name: String) raises:
+        """Remove every file of a table. Nothing else references them."""
+        var loc = self.table_location(namespace, name)
+        var files = self.io.list(loc)
+        for k in range(len(files)):
+            self.io.delete(files[k])
+
     def list_namespaces(self) raises -> List[String]:
         var out = List[String]()
         var names = self.io.list_names(self.warehouse)
@@ -312,3 +496,49 @@ struct FilesystemCatalog(Copyable, Movable):
                 continue
             out.append(n^)
         return out^
+
+
+def new_table_metadata(
+    location: String,
+    schema: Schema,
+    spec: PartitionSpec,
+    var properties: Dict[String, String],
+    format_version: Int,
+) raises -> TableMetadata:
+    """The metadata of a brand new table: schema, spec, sort order, no data."""
+    if format_version < 1 or format_version > SUPPORTED_FORMAT_VERSION:
+        raise Error(
+            "iceberg: format version "
+            + String(format_version)
+            + " cannot be written by this build"
+        )
+    var m = TableMetadata()
+    m.format_version = format_version
+    m.table_uuid = uuid4()
+    m.location = location
+    m.has_location = True
+    m.last_sequence_number = 0
+    m.last_updated_ms = now_ms()
+    m.last_column_id = schema.highest_field_id()
+    var s = schema.copy()
+    s.schema_id = 0
+    m.schemas.append(s^)
+    m.current_schema_id = 0
+    var sp = spec.copy()
+    sp.spec_id = INITIAL_SPEC_ID
+    var last_partition_id = 999
+    for k in range(len(sp.fields)):
+        if sp.fields[k].field_id > last_partition_id:
+            last_partition_id = sp.fields[k].field_id
+    m.partition_specs.append(sp^)
+    m.default_spec_id = INITIAL_SPEC_ID
+    m.last_partition_id = last_partition_id
+    m.sort_orders.append(SortOrder(INITIAL_SORT_ORDER_ID, []))
+    m.default_sort_order_id = INITIAL_SORT_ORDER_ID
+    m.properties = properties^
+    m.current_snapshot_id = -1
+    m.has_current_snapshot = False
+    if format_version >= 3:
+        m.next_row_id = 0
+        m.has_next_row_id = True
+    return m^

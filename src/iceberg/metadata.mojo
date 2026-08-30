@@ -66,8 +66,13 @@ struct Snapshot(Copyable, Movable, Writable):
             return "append"
 
     def summary_int(self, key: String, dflt: Int64) -> Int64:
+        var raw = String("")
         try:
-            return Int64(Int(self.summary[key]))
+            raw = self.summary[key]
+        except:
+            return dflt
+        try:
+            return Int64(Int(raw))
         except:
             return dflt
 

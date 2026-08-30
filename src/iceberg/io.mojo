@@ -31,6 +31,7 @@ from objectstore.fileio import (
     OutputFile,
     StorageCredential,
 )
+from objectstore.fileio import AnyOutputFile
 from objectstore.local import LocalInputFile, LocalOutputFile
 from objectstore.path import parse_uri
 
@@ -173,6 +174,31 @@ struct FileIO(Copyable, Movable):
             return self.resolver.new_input(self.absolute(location)).exists()
         except:
             return False
+
+    # ── writing ────────────────────────────────────────────────────────────
+    def new_output(self, location: String) raises -> AnyOutputFile:
+        return self.resolver.new_output(self.absolute(location))
+
+    def write_all(self, location: String, data: Span[UInt8, _]) raises:
+        """Overwrite `location` with `data`, creating parents as needed."""
+        self.resolver.new_output(self.absolute(location)).overwrite(data)
+
+    def write_new(self, location: String, data: Span[UInt8, _]) raises:
+        """Write `location`, failing if something is already there.
+
+        This is the primitive an optimistic commit needs: two writers racing on
+        the same metadata version must not both believe they won. Only a local
+        filesystem really provides it — S3 has no atomic create, which the spec
+        itself calls out — so `FilesystemCatalog` refuses to commit over an
+        object store without being told to.
+        """
+        self.resolver.new_output(self.absolute(location)).create(data)
+
+    def write_text(self, location: String, text: String) raises:
+        self.write_all(location, text.as_bytes())
+
+    def delete(self, location: String) raises:
+        self.resolver.delete(self.absolute(location))
 
     # ── listing ────────────────────────────────────────────────────────────
     def list(self, prefix: String) raises -> List[String]:

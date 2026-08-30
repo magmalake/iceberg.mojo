@@ -18,6 +18,13 @@ files themselves — over local files, S3, GCS, Azure or HTTP, from a filesystem
 layout or a live REST catalog.
 """
 
+from iceberg.append import (
+    AppendResult,
+    metadata_file_name,
+    next_metadata_version,
+    prepare_append,
+    write_and_prepare_append,
+)
 from iceberg.expressions import (
     ColumnMetrics,
     Expr,
@@ -50,6 +57,13 @@ from iceberg.manifest import (
     read_manifest_list,
     read_manifest_list_io,
 )
+from iceberg.manifest_write import (
+    WrittenManifest,
+    manifest_entry_schema_json,
+    manifest_list_schema_json,
+    write_manifest,
+    write_manifest_list,
+)
 from iceberg.metadata import (
     Snapshot,
     SnapshotRef,
@@ -74,6 +88,13 @@ from iceberg.read import (
 )
 from iceberg.scan import FileScanTask, TableScan
 from iceberg.schema import Schema
+from iceberg.write import (
+    WriteOptions,
+    partition_path,
+    truncate_lower,
+    truncate_upper,
+    write_data_files,
+)
 from iceberg.transforms import (
     PartitionField,
     PartitionSpec,
