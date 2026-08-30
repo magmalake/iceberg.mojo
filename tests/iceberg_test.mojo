@@ -42,9 +42,13 @@ from iceberg.puffin import (
     BLOB_DELETION_VECTOR_V1,
     BlobMetadata,
     PuffinFile,
+    PuffinWriter,
+    decompress_blob,
     deleted_positions,
+    read_blob_bytes,
     read_deletion_vector,
 )
+from roaring import Bitmap64
 from iceberg.read import (
     read_data_file,
     read_data_file_table,
@@ -2405,6 +2409,171 @@ def test_puffin_offsets_match_the_manifest() raises:
             assert_true(found)
             matched += 1
     assert_equal(matched, 2)
+
+
+def _dv_writer_dir() raises -> String:
+    var root = WRITE_ROOT + "/puffin"
+    var io = FileIO.local()
+    try:
+        var existing = io.list(root)
+        for k in range(len(existing)):
+            io.delete(existing[k])
+    except:
+        pass
+    makedirs(root, exist_ok=True)
+    return root^
+
+
+def test_puffin_writer_round_trips_through_the_reader() raises:
+    """Write a Puffin file, then read it back with the reader that has only
+    ever read other people's files.
+
+    Two deletion vectors and one opaque blob, so the footer exercises the
+    fields that differ: a DV carries `snapshot-id`/`sequence-number` of -1 and
+    no `compression-codec`, and the other blob carries real ones.
+    """
+    var dir = _dv_writer_dir()
+    var io = FileIO.local()
+    var a = Bitmap64()
+    a.add(UInt64(0))
+    a.add(UInt64(2))
+    a.add(UInt64(9))
+    var b = Bitmap64()
+    b.add(UInt64(1))
+
+    var w = PuffinWriter()
+    var i0 = w.add_deletion_vector(String("file:///t/data/a.parquet"), a)
+    var i1 = w.add_deletion_vector(String("file:///t/data/b.parquet"), b)
+    var payload = List[UInt8]()
+    for k in range(64):
+        payload.append(UInt8(k))
+    var i2 = w.add_blob(
+        String("apache-datasketches-theta-v1"),
+        [1],
+        Int64(77),
+        Int64(5),
+        Span(payload),
+        String("lz4"),
+        [String("ndv")],
+        [String("12")],
+    )
+    assert_equal(i0, 0)
+    assert_equal(i1, 1)
+    assert_equal(i2, 2)
+    var bytes = w.finish()
+    var path = dir + "/written.puffin"
+    io.write_all(path, Span(bytes))
+
+    var pf = PuffinFile.open(io, path)
+    assert_equal(len(pf.blobs), 3)
+    assert_false(pf.footer_compressed)
+    assert_equal(pf.created_by(), "iceberg.mojo")
+    # Blob 0: the first vector, right after the leading magic.
+    assert_equal(pf.blobs[0].type, BLOB_DELETION_VECTOR_V1)
+    assert_equal(pf.blobs[0].offset, 4)
+    assert_equal(pf.blobs[0].snapshot_id, -1)
+    assert_equal(pf.blobs[0].sequence_number, -1)
+    assert_equal(pf.blobs[0].compression_codec, "")
+    assert_equal(pf.blobs[0].cardinality(), 3)
+    assert_equal(
+        pf.blobs[0].referenced_data_file(), "file:///t/data/a.parquet"
+    )
+    # Blobs are laid end to end, so each offset is the previous one's end.
+    assert_equal(
+        pf.blobs[1].offset, pf.blobs[0].offset + pf.blobs[0].length
+    )
+    assert_equal(
+        pf.blobs[2].offset, pf.blobs[1].offset + pf.blobs[1].length
+    )
+    assert_equal(pf.blobs[1].cardinality(), 1)
+
+    # The vectors decode to exactly the positions that went in.
+    var got = deleted_positions(
+        io, path, pf.blobs[0].offset, pf.blobs[0].length
+    )
+    assert_equal(len(got), 3)
+    assert_equal(Int(got[0]), 0)
+    assert_equal(Int(got[1]), 2)
+    assert_equal(Int(got[2]), 9)
+    var got_b = deleted_positions(
+        io, path, pf.blobs[1].offset, pf.blobs[1].length
+    )
+    assert_equal(len(got_b), 1)
+    assert_equal(Int(got_b[0]), 1)
+
+    # And the compressed blob is really an LZ4 frame, with its own metadata.
+    assert_equal(pf.blobs[2].type, "apache-datasketches-theta-v1")
+    assert_equal(pf.blobs[2].compression_codec, "lz4")
+    assert_equal(pf.blobs[2].snapshot_id, 77)
+    assert_equal(pf.blobs[2].sequence_number, 5)
+    assert_equal(len(pf.blobs[2].fields), 1)
+    assert_equal(pf.blobs[2].fields[0], 1)
+    assert_equal(pf.blobs[2].property("ndv"), "12")
+    var raw = read_blob_bytes(
+        io, path, pf.blobs[2].offset, pf.blobs[2].length
+    )
+    var plain = decompress_blob(raw^, pf.blobs[2].compression_codec)
+    assert_equal(len(plain), 64)
+    for k in range(64):
+        assert_equal(Int(plain[k]), k)
+
+
+def test_puffin_writer_compresses_the_footer() raises:
+    """`Flags` bit 0, and an LZ4-framed footer payload — the only footer
+    compression the format defines.
+
+    Thirty vectors, because a footer is worth compressing only once it is
+    repetitive: at one blob the frame's own header costs more than the JSON
+    it saves, which is why this library leaves the footer plain by default.
+    """
+    var dir = _dv_writer_dir()
+    var io = FileIO.local()
+    var w = PuffinWriter()
+    for k in range(30):
+        var bm = Bitmap64()
+        bm.add(UInt64(k))
+        bm.add(UInt64(k + 100))
+        _ = w.add_deletion_vector(
+            "file:///warehouse/db/t/data/00000-0-part-" + String(k) + ".parquet",
+            bm,
+        )
+    var plain = w.finish(False)
+    var packed = w.finish(True)
+    assert_true(
+        len(packed) < len(plain),
+        "a repetitive footer compresses: "
+        + String(len(packed))
+        + " vs "
+        + String(len(plain)),
+    )
+    var path = dir + "/packed.puffin"
+    io.write_all(path, Span(packed))
+    var pf = PuffinFile.open(io, path)
+    assert_true(pf.footer_compressed)
+    assert_equal(len(pf.blobs), 30)
+    for k in range(30):
+        assert_equal(pf.blobs[k].cardinality(), 2)
+        var got = deleted_positions(
+            io, path, pf.blobs[k].offset, pf.blobs[k].length
+        )
+        assert_equal(len(got), 2)
+        assert_equal(Int(got[0]), k)
+        assert_equal(Int(got[1]), k + 100)
+
+
+def test_puffin_writer_refuses_an_unknown_codec() raises:
+    var w = PuffinWriter()
+    var payload = List[UInt8]()
+    payload.append(UInt8(1))
+    with assert_raises():
+        _ = w.add_blob(
+            String("apache-datasketches-theta-v1"),
+            List[Int](),
+            Int64(-1),
+            Int64(-1),
+            Span(payload),
+            String("zstd"),
+        )
 
 
 def test_deletion_vector_decodes() raises:

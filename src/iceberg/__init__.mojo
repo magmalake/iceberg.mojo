@@ -74,6 +74,7 @@ from iceberg.metadata import (
 from iceberg.puffin import (
     BlobMetadata,
     PuffinFile,
+    PuffinWriter,
     deleted_positions,
     read_deletion_vector,
 )

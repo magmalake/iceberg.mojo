@@ -20,6 +20,10 @@ Two ways in, and the difference matters:
   vector, and the spec requires them to match the footer exactly, so a scan
   reads the blob directly and never parses the footer at all.
 
+`PuffinWriter` is the other direction: blobs in, a complete file out, with
+the footer written as plain JSON or as a single LZ4 frame. It is what writes
+the deletion vectors a merge-on-read delete produces.
+
 Only `deletion-vector-v1` is decoded, by roaring.mojo, which verifies the
 blob's magic and CRC-32. `apache-datasketches-theta-v1` blobs are listed with
 their metadata (including the `ndv` property) but their sketches are not
@@ -27,11 +31,11 @@ decoded: that needs the DataSketches Theta format, which nothing in Mojo
 implements and which no reader needs.
 """
 
-from lz4 import decompress_frame
-from roaring import Bitmap64, decode_iceberg_dv
+from lz4 import compress_frame, decompress_frame
+from roaring import Bitmap64, decode_iceberg_dv, encode_iceberg_dv
 
 from .io import FileIO
-from .json import Json, parse_json, substr
+from .json import Json, json_quote, parse_json, substr
 
 
 comptime PUFFIN_MAGIC_0: UInt8 = 0x50
@@ -279,3 +283,222 @@ def deleted_positions(
     """The deleted row positions of one deletion vector, ascending."""
     var bitmap = read_deletion_vector(io, location, offset, length)
     return bitmap.to_list()
+
+
+# ── writing ─────────────────────────────────────────────────────────────────
+comptime PUFFIN_CREATED_BY = String("iceberg.mojo")
+"""The `created-by` file property, so a Puffin file says who made it."""
+
+
+def _put_le32(mut out: List[UInt8], v: Int):
+    """A little-endian 4-byte integer, the only integer the footer uses."""
+    var u = UInt32(UInt64(Int64(v)) & 0xFFFFFFFF)
+    out.append(UInt8(u & 0xFF))
+    out.append(UInt8((u >> 8) & 0xFF))
+    out.append(UInt8((u >> 16) & 0xFF))
+    out.append(UInt8((u >> 24) & 0xFF))
+
+
+def _put_magic(mut out: List[UInt8]):
+    out.append(PUFFIN_MAGIC_0)
+    out.append(PUFFIN_MAGIC_1)
+    out.append(PUFFIN_MAGIC_2)
+    out.append(PUFFIN_MAGIC_3)
+
+
+struct PuffinWriter(Movable):
+    """Builds a Puffin file blob by blob, footer last.
+
+    ```mojo
+    var w = PuffinWriter()
+    _ = w.add_deletion_vector(data_file_path, bitmap)
+    var bytes = w^.finish()
+    ```
+
+    The blobs go into the body as they arrive, each recording the `offset` and
+    `length` its `BlobMetadata` will claim; `finish` appends the footer, whose
+    payload is the `FileMetadata` JSON — optionally as a single LZ4 frame,
+    which is the only compression the format allows there.
+
+    A `deletion-vector-v1` blob is written the way the spec requires and no
+    other way: never compressed, `snapshot-id` and `sequence-number` both -1
+    (a DV is not owned by a snapshot; the manifest entry that references it
+    is), `fields` empty, and the two properties a reader needs —
+    `referenced-data-file` and `cardinality`.
+    """
+
+    var body: List[UInt8]
+    """Magic, then every blob written so far."""
+    var blobs: List[BlobMetadata]
+    var property_keys: List[String]
+    var property_values: List[String]
+
+    def __init__(out self, var created_by: String = PUFFIN_CREATED_BY):
+        self.body = List[UInt8]()
+        _put_magic(self.body)
+        self.blobs = List[BlobMetadata]()
+        self.property_keys = List[String]()
+        self.property_values = List[String]()
+        if created_by != "":
+            self.property_keys.append(String("created-by"))
+            self.property_values.append(created_by^)
+
+    def __init__(out self, *, deinit move: Self):
+        self.body = move.body^
+        self.blobs = move.blobs^
+        self.property_keys = move.property_keys^
+        self.property_values = move.property_values^
+
+    def set_property(mut self, var key: String, var value: String):
+        """Set a file-level property, replacing any previous value."""
+        for k in range(len(self.property_keys)):
+            if self.property_keys[k] == key:
+                self.property_values[k] = value^
+                return
+        self.property_keys.append(key^)
+        self.property_values.append(value^)
+
+    def add_blob(
+        mut self,
+        var type: String,
+        var fields: List[Int],
+        snapshot_id: Int64,
+        sequence_number: Int64,
+        data: Span[UInt8, _],
+        var compression_codec: String = String(""),
+        var property_keys: List[String] = List[String](),
+        var property_values: List[String] = List[String](),
+    ) raises -> Int:
+        """Append one blob; returns its index in `blobs`.
+
+        `compression_codec` is applied here: `lz4` means a single LZ4 frame,
+        which is the codec Puffin defines for blob payloads. Anything else is
+        refused rather than written under a name a reader would trust.
+        """
+        var payload: List[UInt8]
+        if compression_codec == "" or compression_codec == "none":
+            payload = List[UInt8]()
+            payload.extend(data)
+            compression_codec = String("")
+        elif compression_codec == "lz4":
+            payload = compress_frame(data)
+        else:
+            raise Error(
+                "iceberg: Puffin blob compression codec '"
+                + compression_codec
+                + "' is not one this build writes (lz4, or none)"
+            )
+        var offset = len(self.body)
+        self.body.extend(payload^)
+        var length = len(self.body) - offset
+        self.blobs.append(
+            BlobMetadata(
+                type^,
+                fields^,
+                snapshot_id,
+                sequence_number,
+                Int64(offset),
+                Int64(length),
+                compression_codec^,
+                property_keys^,
+                property_values^,
+            )
+        )
+        return len(self.blobs) - 1
+
+    def add_deletion_vector(
+        mut self, referenced_data_file: String, bitmap: Bitmap64
+    ) raises -> Int:
+        """One `deletion-vector-v1` blob for one data file.
+
+        The bitmap is framed by roaring.mojo — big-endian length, the
+        `D1 D3 39 64` magic, the portable serialisation and a CRC-32 over both
+        — which is byte-for-byte what a reader verifies.
+        """
+        var blob = encode_iceberg_dv(bitmap)
+        var keys = List[String]()
+        var values = List[String]()
+        keys.append(String("referenced-data-file"))
+        values.append(referenced_data_file)
+        keys.append(String("cardinality"))
+        values.append(String(bitmap.cardinality()))
+        return self.add_blob(
+            String(BLOB_DELETION_VECTOR_V1),
+            List[Int](),
+            -1,
+            -1,
+            Span(blob),
+            String(""),
+            keys^,
+            values^,
+        )
+
+    def blob(self, i: Int) -> BlobMetadata:
+        return self.blobs[i].copy()
+
+    def footer_json(self) -> String:
+        """The `FileMetadata` payload: every blob, then the file properties."""
+        var out = String('{"blobs":[')
+        for k in range(len(self.blobs)):
+            if k > 0:
+                out += ","
+            ref b = self.blobs[k]
+            out += '{"type":' + json_quote(b.type)
+            out += ',"fields":['
+            for j in range(len(b.fields)):
+                if j > 0:
+                    out += ","
+                out += String(b.fields[j])
+            out += "]"
+            out += ',"snapshot-id":' + String(b.snapshot_id)
+            out += ',"sequence-number":' + String(b.sequence_number)
+            out += ',"offset":' + String(b.offset)
+            out += ',"length":' + String(b.length)
+            if b.compression_codec != "":
+                out += ',"compression-codec":' + json_quote(
+                    b.compression_codec
+                )
+            if len(b.property_keys) > 0:
+                out += ',"properties":{'
+                for j in range(len(b.property_keys)):
+                    if j > 0:
+                        out += ","
+                    out += json_quote(b.property_keys[j]) + ":"
+                    out += json_quote(b.property_values[j])
+                out += "}"
+            out += "}"
+        out += "]"
+        if len(self.property_keys) > 0:
+            out += ',"properties":{'
+            for k in range(len(self.property_keys)):
+                if k > 0:
+                    out += ","
+                out += json_quote(self.property_keys[k]) + ":"
+                out += json_quote(self.property_values[k])
+            out += "}"
+        out += "}"
+        return out^
+
+    def finish(self, compress_footer: Bool = False) raises -> List[UInt8]:
+        """The complete file: body, then `Magic payload size flags Magic`.
+
+        `compress_footer` writes the payload as one LZ4 frame and sets bit 0
+        of the first flag byte, which is the only flag the format defines. LZ4
+        is also the only footer codec Puffin allows — there is no ZSTD footer
+        — so this is a `Bool` rather than a codec name.
+        """
+        var text = self.footer_json()
+        var payload: List[UInt8]
+        if compress_footer:
+            payload = compress_frame(text.as_bytes())
+        else:
+            payload = List[UInt8]()
+            payload.extend(text.as_bytes())
+        var size = len(payload)
+        var out = self.body.copy()
+        _put_magic(out)
+        out.extend(payload^)
+        _put_le32(out, size)
+        _put_le32(out, 1 if compress_footer else 0)
+        _put_magic(out)
+        return out^
