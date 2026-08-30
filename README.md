@@ -535,7 +535,7 @@ a double, a timestamp, a boolean), ZSTD — which is what PyIceberg writes.
 | full scan, 1 M rows × 6 columns | 163 ms | **35.6 ms** — 28.1 M rows/s | **12.0 ms** — 82.8 M rows/s | 7.9 ms — 126 M rows/s |
 | the same, `to_table` | 159 ms | **43.3 ms** — 23.1 M rows/s | **15.5 ms** — 64.5 M rows/s | — |
 | projection to 2 of 6 columns | 53 ms | **13.7 ms** — 72.7 M rows/s | **5.3 ms** — 187 M rows/s | 5.5 ms — 183 M rows/s |
-| `region = 'eu'` → 200 k rows | 165 ms | **49.9 ms** — 4.0 M rows/s | **16.5 ms** — 12.1 M rows/s | 9.7 ms — 20.6 M rows/s |
+| `region = 'eu'` → 200 k rows | 165 ms | **48.6 ms** — 4.1 M rows/s | **16.1 ms** — 12.4 M rows/s | 9.7 ms — 20.6 M rows/s |
 | `id > 900000` → 100 k rows | 39 ms | **11.7 ms** — 8.5 M rows/s | 12.1 ms | 5.6 ms — 17.7 M rows/s |
 | full scan, lazy IO | 169 ms | **35.5 ms** — 28.2 M rows/s | — | — |
 
@@ -595,7 +595,12 @@ UTF-8 column's predicate reads its own 32-bit offsets rather than calling
 `value_extent` per row. Together: `to_table` 51 → 43 ms, `filter id>900000`
 19 → 13 ms.
 
-**5. `lazy` IO filled its sparse buffer one byte at a time**, twice, and made a
+**5. The residual's own bool-per-row vector is the selection vector.** A batch
+used to allocate a second million-entry `List[Bool]`, fill it with `True`, and
+walk it to AND in what `_selection` had just computed. When there are no
+position deletes — the common case — the residual's answer *is* the answer.
+
+**6. `lazy` IO filled its sparse buffer one byte at a time**, twice, and made a
 whole extra copy of it for the probe reader. It now reads the row-group extents
 in offset order and fills the buffer front to back with `extend`: 47.1 → 35.5
 ms, which matters because `lazy` is what the `s3://` path uses.

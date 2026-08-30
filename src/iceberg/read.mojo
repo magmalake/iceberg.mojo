@@ -1845,16 +1845,15 @@ def read_data_file(
                             lp.path,
                         )
                     )
-            var keep = List[Bool](length=n, fill=True)
-            var all_kept = True
-            if has_position_deletes:
-                for r in range(n):
-                    var p_at = Int(base) + r
-                    if p_at < len(deleted) and deleted[p_at]:
-                        keep[r] = False
-                        all_kept = False
-            if not trivial:
-                var sel = _selection(
+            # The residual already produces one bool per row, so when nothing
+            # else has an opinion it *is* the selection vector — a batch of a
+            # million rows does not need a second million-entry list and a
+            # second pass to say the same thing.
+            var keep: List[Bool]
+            if trivial:
+                keep = List[Bool](length=n, fill=True)
+            else:
+                keep = _selection(
                     residual,
                     residual.root,
                     arrays,
@@ -1864,10 +1863,12 @@ def read_data_file(
                     leaf_arrays,
                     n,
                 )
+            var all_kept = True
+            if has_position_deletes:
                 for r in range(n):
-                    if keep[r] and not sel[r]:
+                    var p_at = Int(base) + r
+                    if p_at < len(deleted) and deleted[p_at]:
                         keep[r] = False
-                        all_kept = False
             for e in range(len(equality)):
                 ref eq = equality[e]
                 var slots = List[Int]()
@@ -1884,12 +1885,12 @@ def read_data_file(
                         append_key(key, a, r)
                     if eq.contains(key):
                         keep[r] = False
-                        all_kept = False
 
             var n_keep = 0
             for r in range(n):
                 if keep[r]:
                     n_keep += 1
+            all_kept = n_keep == n
             if options.limit >= 0 and kept_total + n_keep > options.limit:
                 var room = options.limit - kept_total
                 var seen = 0
