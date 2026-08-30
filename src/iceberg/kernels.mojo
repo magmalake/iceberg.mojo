@@ -622,47 +622,76 @@ def extract_datum(
 def filter_array(
     a: ArrayData, keep: List[Bool], n_keep: Int
 ) raises -> ArrayData:
-    """The rows of `a` for which `keep` is true, in order."""
+    """The rows of `a` for which `keep` is true, in order.
+
+    Kept rows are copied in **runs**, not one at a time: a filter over a
+    million rows is usually either a scattering of long runs (a range
+    predicate over a sorted column) or a dense sample (an equality predicate
+    over a low-cardinality one), and both come out of the same loop — find how
+    far the run of kept rows extends, then move that whole span with one
+    `extend`. A byte-at-a-time copy of a fixed-width column cost eight bounds
+    checks and eight capacity checks per value.
+    """
     var out = ArrayData(a.type.copy(), a.name.copy())
     out.nullable = a.nullable
     out.field_id = a.field_id
     out.length = n_keep
     var no_nulls = len(a.validity) == 0
     if is_binary_type(a.type):
+        out.offsets = List[Int32](capacity=n_keep + 1)
         out.offsets.append(0)
     elif is_large_binary_type(a.type):
+        out.large_offsets = List[Int64](capacity=n_keep + 1)
         out.large_offsets.append(0)
     var width = a.type.fixed_width()
     if width > 0 and a.type.id != AT_BOOL:
         out.values = List[UInt8](capacity=width * n_keep)
+    if not no_nulls:
+        out.validity = List[UInt8](length=(n_keep + 7) // 8, fill=0)
+    var n = len(keep)
     var j = 0
-    for i in range(len(keep)):
+    var i = 0
+    while i < n:
         if not keep[i]:
+            i += 1
             continue
-        var valid = True if no_nulls else bit_get(Span(a.validity), i)
-        bit_set(out.validity, j, valid)
-        if not valid:
-            out.null_count += 1
+        # `[i, end)` is a maximal run of kept rows.
+        var end = i + 1
+        while end < n and keep[end]:
+            end += 1
+        var count = end - i
+        if not no_nulls:
+            for r in range(i, end):
+                var valid = bit_get(Span(a.validity), r)
+                if valid:
+                    bit_set(out.validity, j + (r - i), True)
+                else:
+                    out.null_count += 1
         if is_var_width(a.type):
-            var extent = value_extent(a, i)
-            if valid:
-                for k in range(extent[0], extent[1]):
-                    out.values.append(a.values[k])
+            var lo = value_extent(a, i)[0]
+            var hi = value_extent(a, end - 1)[1]
+            var shift = len(out.values) - lo
+            out.values.extend(Span(a.values)[lo:hi])
             if is_binary_type(a.type):
-                out.offsets.append(Int32(len(out.values)))
+                for r in range(i + 1, end + 1):
+                    out.offsets.append(Int32(Int(a.offsets[r]) + shift))
             else:
-                out.large_offsets.append(Int64(len(out.values)))
+                for r in range(i + 1, end + 1):
+                    out.large_offsets.append(a.large_offsets[r] + Int64(shift))
         elif a.type.id == AT_BOOL:
-            while len(out.values) <= j // 8:
+            while len(out.values) < (j + count + 7) // 8:
                 out.values.append(0)
-            if valid and bit_get(Span(a.values), i):
-                out.values[j // 8] |= UInt8(1) << UInt8(j % 8)
-        else:
-            for k in range(width * i, width * i + width):
-                out.values.append(a.values[k])
-        j += 1
-    while len(out.validity) < (n_keep + 7) // 8:
-        out.validity.append(0)
+            for r in range(i, end):
+                if bit_get(Span(a.values), r):
+                    var at = j + (r - i)
+                    out.values[at // 8] |= UInt8(1) << UInt8(at % 8)
+        elif width > 0:
+            out.values.extend(Span(a.values)[width * i : width * end])
+        j += count
+        i = end
+    if out.null_count == 0:
+        # No kept row was null, so Arrow's "buffer absent" encoding says it.
+        out.validity.clear()
     if a.type.id == AT_BOOL:
         while len(out.values) < (n_keep + 7) // 8:
             out.values.append(0)
@@ -671,7 +700,13 @@ def filter_array(
 
 # ── concat ──────────────────────────────────────────────────────────────────
 def concat_into(mut dst: ArrayData, src: ArrayData) raises:
-    """Append every row of `src` to `dst`; both must have the same type."""
+    """Append every row of `src` to `dst`; both must have the same type.
+
+    The common case — neither side has a null — never touches a validity
+    bitmap: Arrow's "buffer absent" encoding already says every row is valid,
+    and materialising a million all-ones bits only to clear them again was
+    most of what concatenating a scan's batches cost.
+    """
     if src.length == 0:
         return
     if (
@@ -691,44 +726,63 @@ def concat_into(mut dst: ArrayData, src: ArrayData) raises:
         return
     var base = dst.length
     var src_no_nulls = len(src.validity) == 0
-    if len(dst.validity) == 0 and base > 0:
-        # `dst` had no nulls at all; materialise its bitmap before appending.
-        var whole = base // 8
-        for _ in range(whole):
-            dst.validity.append(0xFF)
-        if base % 8:
-            dst.validity.append((UInt8(1) << UInt8(base % 8)) - 1)
-    for i in range(src.length):
-        var valid = True if src_no_nulls else bit_get(Span(src.validity), i)
-        bit_set(dst.validity, base + i, valid)
-        if not valid:
-            dst.null_count += 1
+    var dst_no_nulls = len(dst.validity) == 0
+    if not (src_no_nulls and dst_no_nulls):
+        if dst_no_nulls and base > 0:
+            # `dst` had no nulls at all; materialise its bitmap before
+            # appending.
+            var whole = base // 8
+            for _ in range(whole):
+                dst.validity.append(0xFF)
+            if base % 8:
+                dst.validity.append((UInt8(1) << UInt8(base % 8)) - 1)
+        dst.validity.resize((base + src.length + 7) // 8, 0)
+        if src_no_nulls:
+            for i in range(src.length):
+                bit_set(dst.validity, base + i, True)
+        else:
+            for i in range(src.length):
+                var valid = bit_get(Span(src.validity), i)
+                bit_set(dst.validity, base + i, valid)
+                if not valid:
+                    dst.null_count += 1
     if is_var_width(src.type):
         var shift = len(dst.values)
         dst.values.extend(Span(src.values))
         if is_binary_type(src.type):
+            dst.offsets.reserve(len(dst.offsets) + len(src.offsets))
             for k in range(1, len(src.offsets)):
                 dst.offsets.append(Int32(Int(src.offsets[k]) + shift))
         else:
+            dst.large_offsets.reserve(
+                len(dst.large_offsets) + len(src.large_offsets)
+            )
             for k in range(1, len(src.large_offsets)):
                 dst.large_offsets.append(src.large_offsets[k] + Int64(shift))
     elif src.type.id == AT_BOOL:
-        for i in range(src.length):
-            var j = base + i
-            while len(dst.values) <= j // 8:
-                dst.values.append(0)
-            if bit_get(Span(src.values), i):
-                dst.values[j // 8] |= UInt8(1) << UInt8(j % 8)
-            else:
-                dst.values[j // 8] &= ~(UInt8(1) << UInt8(j % 8))
+        dst.values.resize((base + src.length + 7) // 8, 0)
+        if base % 8 == 0:
+            var whole = src.length // 8
+            for b in range(whole):
+                dst.values[base // 8 + b] = src.values[b]
+            for i in range(whole * 8, src.length):
+                var j = base + i
+                if bit_get(Span(src.values), i):
+                    dst.values[j // 8] |= UInt8(1) << UInt8(j % 8)
+        else:
+            for i in range(src.length):
+                var j = base + i
+                if bit_get(Span(src.values), i):
+                    dst.values[j // 8] |= UInt8(1) << UInt8(j % 8)
+                else:
+                    dst.values[j // 8] &= ~(UInt8(1) << UInt8(j % 8))
     else:
         dst.values.extend(Span(src.values))
     dst.length = base + src.length
-    while len(dst.validity) < (dst.length + 7) // 8:
-        dst.validity.append(0)
-    if src.type.id == AT_BOOL:
-        while len(dst.values) < (dst.length + 7) // 8:
-            dst.values.append(0)
+    if len(dst.validity) > 0:
+        dst.validity.resize((dst.length + 7) // 8, 0)
+        if dst.null_count == 0:
+            dst.validity.clear()
 
 
 # ── key encoding, for equality deletes ──────────────────────────────────────

@@ -58,17 +58,22 @@ def _row(name: StringSlice, ns: Int, total: Int) -> String:
     )
 
 
-def profile(meta: String, batch_size: Int, label: String) raises:
-    var options = ScanOptions()
-    options.batch_size = batch_size
-
+def profile(
+    meta: String,
+    label: String,
+    filter: String,
+    columns: List[String],
+    options: ScanOptions,
+) raises:
     var t_total = perf_counter_ns()
 
     var t0 = perf_counter_ns()
     var table = Table.load(meta, FileIO.local())
     var load_ns = perf_counter_ns() - t0
 
-    var scan = table.scan()
+    var scan = table.scan().filter(filter)
+    if len(columns) > 0:
+        scan = scan.select(columns.copy())
     var t1 = perf_counter_ns()
     var tasks = scan.plan_files()
     var plan_ns = perf_counter_ns() - t1
@@ -95,7 +100,7 @@ def profile(meta: String, batch_size: Int, label: String) raises:
         io_ns += perf_counter_ns() - t2
         var t3 = perf_counter_ns()
         var reader = ParquetReader[AllCodecs](bytes^)
-        reader.batch_size = batch_size
+        reader.batch_size = options.batch_size
         reader.verify_crc = False
         open_ns += perf_counter_ns() - t3
         var t4 = perf_counter_ns()
@@ -140,7 +145,7 @@ def profile(meta: String, batch_size: Int, label: String) raises:
     print(
         label,
         "— batch_size",
-        batch_size,
+        options.batch_size,
         "—",
         len(tasks),
         "file(s),",
@@ -164,6 +169,42 @@ def main() raises:
     var root = getenv("ICEBERG_BENCH_ROOT", "build/bench-warehouse")
     var meta = read_text(root + "/metadata_location.txt").strip()
     print("bench table:", meta)
-    profile(String(meta), 8192, String("full scan"))
-    profile(String(meta), 65536, String("full scan"))
-    profile(String(meta), 1 << 30, String("full scan"))
+
+    var eager = ScanOptions()
+    var lazy = ScanOptions()
+    lazy.lazy = True
+    var chopped = ScanOptions()
+    chopped.batch_size = 8192
+
+    profile(String(meta), String("full scan"), String('["true"]'), [], eager)
+    profile(
+        String(meta),
+        String("full scan, 8192-row batches"),
+        String('["true"]'),
+        [],
+        chopped,
+    )
+    profile(
+        String(meta),
+        String("projection id,region"),
+        String('["true"]'),
+        [String("id"), String("region")],
+        eager,
+    )
+    profile(
+        String(meta),
+        String("filter region=eu"),
+        String('["=","region","eu"]'),
+        [],
+        eager,
+    )
+    profile(
+        String(meta),
+        String("filter id>900000"),
+        String('[">","id",900000]'),
+        [],
+        eager,
+    )
+    profile(
+        String(meta), String("full scan, lazy io"), String('["true"]'), [], lazy
+    )
