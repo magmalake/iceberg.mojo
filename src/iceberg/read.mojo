@@ -1067,6 +1067,16 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     """How to read, as opposed to what."""
 
     var batch_size: Int
+    """Rows per output batch. The default is one batch per Parquet row group.
+
+    Chopping a row group into smaller batches costs and saves nothing: the
+    decoder materialises the whole row group either way (`ParquetReader._load`
+    decodes a column chunk in one go), so a small `batch_size` only multiplies
+    the per-batch Arrow assembly, the per-batch selection vector and the
+    per-batch concatenation. On the million-row bench table the 8192 this used
+    to default to cost 24 ms of pure re-assembly. Set it smaller only when a
+    consumer genuinely wants to see rows in smaller pieces.
+    """
     var limit: Int
     """Stop after this many rows; -1 for all of them."""
     var verify_crc: Bool
@@ -1077,7 +1087,7 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     whole file. Worth it over the network, pointless on a local disk."""
 
     def __init__(out self):
-        self.batch_size = 8192
+        self.batch_size = 1 << 20
         self.limit = -1
         self.verify_crc = False
         self.prune = True

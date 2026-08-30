@@ -41,6 +41,8 @@ check = { depends-on = ["test", "cli"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
 bench = { cmd = "bash bench/run_bench.sh" }
+# Per-stage profile of a full scan: where the milliseconds actually go.
+profile = { cmd = "mkdir -p build && mojo build bench/profile_scan.mojo $ICEBERG_INCLUDES -o build/iceberg-profile && ICEBERG_BENCH_ROOT=${ICEBERG_BENCH_ROOT:-build/bench-warehouse} ./build/iceberg-profile" }
 # The Arrow C Data Interface, from a nested scan into pyarrow. macOS wants
 # .dylib and Linux .so; the shared-library task reads $SHLIB_EXT.
 carrow-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_scan.mojo $ICEBERG_INCLUDES -o build/libibcarrow$SHLIB_EXT" }
