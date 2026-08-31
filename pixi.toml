@@ -85,13 +85,17 @@ backend = { name = "pixi-build-mojo", version = "0.*" }
 path = "src/iceberg"
 name = "iceberg"
 
+# hashes.mojo comes in by git, pinned to a commit, rather than by path: a
+# published package has to be self-contained, and pixi has no equivalent of
+# Cargo's path-plus-version fallback, so a `../hashes.mojo` here would only
+# ever resolve in this checkout.
 [package.host-dependencies]
 mojo-compiler = "==1.0.0"
-hashes-mojo = { path = "../hashes.mojo" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "5022d663ca5a3bae2df092fca4fceeb1b0cc393f" }
 
 [package.build-dependencies]
 mojo-compiler = "==1.0.0"
 
 [package.run-dependencies]
 mojo-compiler = ">=1.0.0,<2"
-hashes-mojo = { path = "../hashes.mojo" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "5022d663ca5a3bae2df092fca4fceeb1b0cc393f" }
