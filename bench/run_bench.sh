@@ -77,6 +77,17 @@ echo
 echo "== PyIceberg, same table, one process"
 "$PY" tools/bench_pyiceberg_parallel.py "$PAR_META" | grep -v '^{'
 
+# ── scan planning over many manifests ──────────────────────────────────────
+# Pure Avro: the manifest list plus every manifest, and no Parquet at all.
+# The table is built by this library's own writers — one commit per manifest —
+# under build/planning-bench, and is not checked in.
+PLAN_WAREHOUSE="${ICEBERG_PLANNING_BENCH_ROOT:-$ROOT/build/planning-bench}"
+
+echo
+echo "== iceberg.mojo, planning a scan over many manifests"
+mojo build bench/bench_planning.mojo $ICEBERG_INCLUDES -o build/iceberg-planning-bench
+ICEBERG_PLANNING_BENCH_ROOT="$PLAN_WAREHOUSE" ./build/iceberg-planning-bench
+
 # ── the write side ─────────────────────────────────────────────────────────
 echo
 echo "== appending a million rows"

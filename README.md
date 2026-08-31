@@ -437,7 +437,12 @@ compression the format defines. `add_deletion_vector` writes a
 - **Manifests** — manifest lists (fields 500–520) and manifests
   (`manifest_entry` plus `data_file` 100–145), with sequence-number,
   snapshot-id and `first_row_id` inheritance, and partition tuples typed by the
-  spec in the manifest's own Avro file metadata.
+  spec in the manifest's own Avro file metadata. Both are read through
+  avro.mojo's `RecordCursor`: the file's schema is compiled into a decode plan
+  once, and every field this library reads — including the partition columns
+  the manifest's own spec names — is a slot number resolved once per file. A
+  field a given format version does not have resolves to -1, which is how the
+  version differences stay expressible.
 - **Scan planning** — manifest pruning, data-file pruning by partition and by
   metrics, residuals, and delete-file association by the spec's scope rules.
 - **Catalogs** — a filesystem catalog (`version-hint.text` or highest-versioned
@@ -675,6 +680,34 @@ per commit. The 3 MB against 9 MB is a difference in dictionary encoding, not
 in content — PyIceberg reads all 1 000 000 rows back out of those four files
 and agrees on every column, including both null counts. (This was 917 ms
 before zstd.mojo 0.1.1: the writer paid the same per-page `dlopen`.)
+
+### Planning over many manifests
+
+Planning touches no Parquet at all: it reads the snapshot's manifest list and
+then every manifest the list does not let it skip, one `manifest_entry` per
+data file. That is pure Avro, and 0.4.2 moved both readers onto avro.mojo's
+schema-compiled `RecordCursor` — the schema of each manifest is compiled once
+into a decode plan, every field this library wants is a slot number resolved
+once per file, and a path or a bound is a span into the block buffer rather
+than a fresh `String`.
+
+`pixi run bench` builds a table with **500 manifests** (one commit each, by
+this library's own writers) and times `plan_files()` warm, best of five:
+
+| entries per manifest | 0.4.1 | **0.4.2** | |
+|---|---|---|---|
+| 4 — 2 000 file tasks | 59.6 ms | **50.8 ms** | 1.17× |
+| 20 — 10 000 file tasks | 142.5 ms | **68.7 ms** | 2.07× |
+
+The two rows say the same thing from two angles: the *per-entry* cost fell
+from 10.4 µs to 2.2 µs, 4.6×, and what is left is a fixed ~90 µs per manifest
+that decoding entries was never part of. Reading the file is about a third of
+it and parsing the manifest's own `avro.schema` most of the rest — 500
+manifests written by one writer carry 500 byte-identical copies of the same
+schema, and this parses each one. Caching parsed schemas across a scan is the
+obvious next move and is not done yet. (avro.mojo 0.2.0 already made that
+parse 2.1× faster, which is why the 0.4.1 column here is faster than the
+81.7 ms / 164.3 ms the same table measured before it.)
 
 ### What still falls back to `Datum`
 
