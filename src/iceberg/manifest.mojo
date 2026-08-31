@@ -370,9 +370,9 @@ def _manifest_file_from(c: RecordCursor, s: _ListSlots) raises -> ManifestFile:
             var has_nan = _present_at(c, s.contains_nan, k)
             summaries.append(
                 FieldSummary(
-                    c.get_bool(s.contains_null, k)
-                    if _present_at(c, s.contains_null, k)
-                    else True,
+                    c.get_bool(s.contains_null, k) if _present_at(
+                        c, s.contains_null, k
+                    ) else True,
                     c.get_bool(s.contains_nan, k) if has_nan else False,
                     has_nan,
                     lo^,
@@ -747,7 +747,12 @@ def _partition_from(
 
 
 def _datum_from_avro(
-    c: RecordCursor, slot: Int, prim: UInt8, precision: Int, scale: Int, length: Int
+    c: RecordCursor,
+    slot: Int,
+    prim: UInt8,
+    precision: Int,
+    scale: Int,
+    length: Int,
 ) raises -> Datum:
     """Convert a decoded Avro value to a typed Iceberg `Datum`.
 

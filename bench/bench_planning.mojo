@@ -115,8 +115,14 @@ def main() raises:
     except:
         have = False
     if not have:
-        print("== building the planning table (", appends, " appends x ", files,
-              " files)", sep="")
+        print(
+            "== building the planning table (",
+            appends,
+            " appends x ",
+            files,
+            " files)",
+            sep="",
+        )
         var t0 = perf_counter_ns()
         build_table(root, appends, files)
         io.write_all(String(root, "/built.txt"), String("ok").as_bytes())
@@ -126,7 +132,9 @@ def main() raises:
     var table = catalog.load_table(String("db"), String("planning"))
 
     var manifests = len(
-        read_manifest_list_io(io, table.metadata.current_snapshot().manifest_list)
+        read_manifest_list_io(
+            io, table.metadata.current_snapshot().manifest_list
+        )
     )
     var result = best_ms(table, reps)
     print(
