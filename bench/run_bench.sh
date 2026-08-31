@@ -79,8 +79,10 @@ echo "== PyIceberg, same table, one process"
 
 # ── scan planning over many manifests ──────────────────────────────────────
 # Pure Avro: the manifest list plus every manifest, and no Parquet at all.
-# The table is built by this library's own writers — one commit per manifest —
-# under build/planning-bench, and is not checked in.
+# Two tables, identical but for how many entries a manifest holds (4 and 20) —
+# that is what separates the per-entry cost from the fixed cost of opening a
+# manifest at all. Both are built by this library's own writers, one commit
+# per manifest, under build/planning-bench{,-20}, and neither is checked in.
 PLAN_WAREHOUSE="${ICEBERG_PLANNING_BENCH_ROOT:-$ROOT/build/planning-bench}"
 
 echo
