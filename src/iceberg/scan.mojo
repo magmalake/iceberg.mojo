@@ -59,8 +59,9 @@ from .manifest import (
     ManifestFile,
     MANIFEST_CONTENT_DELETES,
     STATUS_DELETED,
-    read_manifest_io,
-    read_manifest_list_io,
+    ManifestCache,
+    read_manifest_io_cached,
+    read_manifest_list_io_cached,
 )
 from .metadata import Snapshot, TableMetadata
 from .schema import Schema
@@ -434,6 +435,21 @@ struct TableScan(Copyable, Movable):
 
     # ── planning ───────────────────────────────────────────────────────────
     def plan_files(self) raises -> List[FileScanTask]:
+        """The scan's file tasks, planned with a cache of its own.
+
+        The cache lives exactly as long as the call: a snapshot's manifests
+        were written together and share their schemas, so this is where the
+        reuse is. A caller planning several snapshots — time travel, a diff
+        between two refs — should hold one cache across them and use
+        `plan_files_with`.
+        """
+        var cache = ManifestCache()
+        return self.plan_files_with(cache)
+
+    def plan_files_with(
+        self, mut cache: ManifestCache
+    ) raises -> List[FileScanTask]:
+        """`plan_files`, reusing (and adding to) a cache the caller owns."""
         if not self.has_any_snapshot():
             return List[FileScanTask]()
         var snap = self.snapshot()
@@ -448,10 +464,19 @@ struct TableScan(Copyable, Movable):
             if len(snap.manifests) == 0:
                 return List[FileScanTask]()
             return self._plan_from_manifests(
-                snap, snap.manifests.copy(), schema, row_filter, metrics_eval
+                snap,
+                snap.manifests.copy(),
+                schema,
+                row_filter,
+                metrics_eval,
+                cache,
             )
-        var manifests = read_manifest_list_io(self.io, snap.manifest_list)
-        return self._plan(snap, manifests, schema, row_filter, metrics_eval)
+        var manifests = read_manifest_list_io_cached(
+            self.io, snap.manifest_list, cache
+        )
+        return self._plan(
+            snap, manifests, schema, row_filter, metrics_eval, cache
+        )
 
     def _plan_from_manifests(
         self,
@@ -460,6 +485,7 @@ struct TableScan(Copyable, Movable):
         schema: Schema,
         row_filter: Expr,
         metrics_eval: InclusiveMetricsEvaluator,
+        mut cache: ManifestCache,
     ) raises -> List[FileScanTask]:
         """v1 tables that inline manifest paths carry no manifest-list summary,
         so every manifest is opened and nothing can be pruned at that level."""
@@ -492,7 +518,7 @@ struct TableScan(Copyable, Movable):
                 False,
             )
             mfs.append(mf^)
-        return self._plan(snap, mfs, schema, row_filter, metrics_eval)
+        return self._plan(snap, mfs, schema, row_filter, metrics_eval, cache)
 
     def _plan(
         self,
@@ -501,6 +527,7 @@ struct TableScan(Copyable, Movable):
         schema: Schema,
         row_filter: Expr,
         metrics_eval: InclusiveMetricsEvaluator,
+        mut cache: ManifestCache,
     ) raises -> List[FileScanTask]:
         # ── pass 1: every live delete file in the snapshot ─────────────────
         var deletes = List[_PendingDelete]()
@@ -508,7 +535,9 @@ struct TableScan(Copyable, Movable):
             ref mf = manifests[k]
             if not mf.is_delete_manifest():
                 continue
-            var m = read_manifest_io(self.io, mf.manifest_path, mf)
+            var m = read_manifest_io_cached(
+                self.io, mf.manifest_path, mf, cache
+            )
             for j in range(len(m.entries)):
                 ref e = m.entries[j]
                 if not e.is_live():
@@ -538,7 +567,9 @@ struct TableScan(Copyable, Movable):
                 var me = ManifestEvaluator(row_filter, spec, schema)
                 if not me.eval(mf.partitions):
                     continue
-            var m = read_manifest_io(self.io, mf.manifest_path, mf)
+            var m = read_manifest_io_cached(
+                self.io, mf.manifest_path, mf, cache
+            )
             # The manifest's own spec is authoritative for its tuples.
             var residuals = ResidualEvaluator(
                 row_filter, m.partition_spec, schema

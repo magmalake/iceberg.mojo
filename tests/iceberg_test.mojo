@@ -102,6 +102,7 @@ from iceberg.write import (
 from parquet import RecordBatch
 from parquet.arrow import AT_LIST, AT_MAP, AT_STRUCT
 from iceberg.manifest import (
+    ManifestCache,
     ManifestFile,
     ManifestEntry,
     DataFile,
@@ -5321,6 +5322,119 @@ def test_num_workers_zero_uses_every_core() raises:
         fixture_scan("bucket_part").to_table(opts).num_rows(),
         fixture_scan("bucket_part").to_table().num_rows(),
     )
+
+
+# ── the per-scan manifest cache ────────────────────────────────────────────
+
+
+def _plan_digest(tasks: List[FileScanTask]) raises -> String:
+    """Everything a planned task says, rendered so two plans can be compared
+    as one string — order included."""
+    var out = String()
+    for k in range(len(tasks)):
+        ref t = tasks[k]
+        out += String(
+            t.data_file.file_path,
+            "|",
+            t.data_file.content,
+            "|",
+            t.data_file.record_count,
+            "|",
+            t.data_file.file_size_in_bytes,
+            "|",
+            t.residual,
+            "|",
+            t.spec_id,
+            "|",
+            t.data_sequence_number,
+            "|",
+            t.data_file.first_row_id,
+            ":",
+            t.data_file.has_first_row_id,
+            "|parts=",
+        )
+        for j in range(len(t.data_file.partition)):
+            out += String(t.data_file.partition[j], ",")
+        out += "|metrics="
+        for j in range(len(t.data_file.metrics)):
+            ref m = t.data_file.metrics[j]
+            out += String(
+                m.field_id,
+                ":",
+                m.value_count,
+                ":",
+                m.null_value_count,
+                ":",
+                hex_of(m.lower_bound),
+                ":",
+                hex_of(m.upper_bound),
+                ",",
+            )
+        out += "|deletes="
+        for j in range(len(t.delete_files)):
+            out += t.delete_files[j].file_path + ","
+        out += "\n"
+    return out^
+
+
+def test_the_manifest_cache_is_transparent() raises:
+    """`evolved` has manifests written under different table schemas, so one
+    scan meets more than one manifest shape. Planning it with the cache and
+    without has to give the same answer, byte for byte."""
+    for name in fixture_table_names():
+        var scan = fixture_scan(name)
+        var warm = ManifestCache()
+        var cold = ManifestCache.disabled()
+        assert_equal(
+            _plan_digest(scan.plan_files_with(warm)),
+            _plan_digest(scan.plan_files_with(cold)),
+            String("cached plan differs for ", name),
+        )
+        # A disabled cache stores nothing and never claims a hit.
+        assert_equal(cold.hits, 0)
+        assert_equal(len(cold.shape_keys), 0)
+        assert_equal(len(cold.plans), 0)
+
+
+def test_schema_evolution_gives_a_scan_more_than_one_manifest_shape() raises:
+    var scan = fixture_scan("evolved")
+    var cache = ManifestCache()
+    var tasks = scan.plan_files_with(cache)
+    assert_true(len(tasks) > 0)
+    # Manifests written before and after the evolution carry different
+    # `schema` metadata, so they cannot share a shape.
+    assert_true(
+        len(cache.shapes) >= 2,
+        String("evolved cached only ", len(cache.shapes), " shape(s)"),
+    )
+    # ... and they are told apart by the bytes, not by the hash: force every
+    # key to hash the same and the plan must not change.
+    var collide = ManifestCache()
+    collide.collide_all_hashes()
+    assert_equal(
+        _plan_digest(tasks), _plan_digest(scan.plan_files_with(collide))
+    )
+    assert_equal(len(collide.shapes), len(cache.shapes))
+
+
+def test_one_cache_carries_across_snapshots() raises:
+    """Time travel plans several snapshots of one table; the manifests they
+    share are read through one cache."""
+    var m = load_fixture_metadata("evolved")
+    var scan = fixture_scan("evolved")
+    var cache = ManifestCache()
+    var planned = 0
+    for k in range(len(m.snapshots)):
+        var s = scan.use_snapshot(m.snapshots[k].snapshot_id)
+        planned += len(s.plan_files_with(cache))
+        # Each snapshot's plan is the same one a fresh cache produces.
+        var fresh = ManifestCache.disabled()
+        assert_equal(
+            _plan_digest(s.plan_files_with(cache)),
+            _plan_digest(s.plan_files_with(fresh)),
+        )
+    assert_true(planned > 0)
+    assert_true(cache.hits > 0, "no manifest was read twice")
 
 
 def main() raises:

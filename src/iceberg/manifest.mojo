@@ -33,12 +33,25 @@ file (`_ListSlots` / `_EntrySlots`) — the per-entry work is integer indexing
 and, for a path or a bound, a span into the block buffer. A field the
 manifest's schema does not have resolves to slot -1, which is how the
 version differences below stay expressible.
+
+**Once per file is still once too many.** A snapshot's five hundred
+manifests were written by one writer and carry five hundred byte-identical
+copies of the same `avro.schema`, the same Iceberg `schema` and the same
+`partition-spec`. `ManifestCache` keys everything those three determine —
+the compiled decode plan, the parsed schema and spec, the partition type and
+the resolved slot table — on the raw metadata bytes, before any of it is
+parsed. Byte equality is the cheap sufficient condition, and the hash over
+those bytes is only a filter: a hit is confirmed by comparing them. A scan
+owns one cache and drops it when it is done; there is no global state, and a
+plan handed out stays alive on its own because a cursor holds its own
+reference to it.
 """
 
 from std.collections import Dict
 
-from avro import RecordCursor
-from avro.cursor import DecodePlan
+from avro import PlanCache, RecordCursor
+from avro.cursor import DecodePlan, schema_hash
+from avro.datafile import DataFileReader
 from avro.schema import BOOLEAN, BYTES, DOUBLE, FIXED, FLOAT, INT, LONG, STRING
 
 from .expressions import ColumnMetrics, FieldSummary
@@ -343,11 +356,35 @@ def read_local(path: String) raises -> List[UInt8]:
         return f.read_bytes()
 
 
+def read_manifest_list_io_cached(
+    io: FileIO, location: String, mut cache: ManifestCache
+) raises -> List[ManifestFile]:
+    """Read a manifest list, reusing whatever `cache` already parsed.
+
+    One scan reads one list, so this pays for itself only across snapshots —
+    time travel, `expire_snapshots`, a diff between two refs.
+    """
+    return read_manifest_list_bytes_cached(io.read_all(location), cache)
+
+
 def read_manifest_list_bytes(
     var data: List[UInt8],
 ) raises -> List[ManifestFile]:
-    var c = RecordCursor.of_bytes(data^)
-    var s = _ListSlots(c.plan)
+    var cache = ManifestCache.disabled()
+    return read_manifest_list_bytes_cached(data^, cache)
+
+
+def read_manifest_list_bytes_cached(
+    var data: List[UInt8], mut cache: ManifestCache
+) raises -> List[ManifestFile]:
+    var c = RecordCursor.of_bytes_cached(data^, cache.plans)
+    var si = c.reader.metadata_index("avro.schema")
+    var key = List[UInt8]()
+    _append_keyed(key, Span(c.reader.metadata_vals[si]))
+    var at = cache.find_list(Span(key))
+    if at < 0:
+        at = cache.add_list(key^, _ListSlots(c.plan))
+    ref s = cache.lists[at]
     var out = List[ManifestFile]()
     while c.next():
         out.append(_manifest_file_from(c, s))
@@ -526,6 +563,241 @@ struct _EntrySlots(Copyable, Movable):
             )
 
 
+# ── the per-scan cache ──────────────────────────────────────────────────────
+
+
+struct _ManifestShape(Copyable, Movable):
+    """Everything a manifest's file metadata determines, parsed once.
+
+    Not the entries — those differ per file. This is the frame they are read
+    in: the manifest's own Iceberg schema and partition spec, the partition
+    type those two imply, and the slot numbers the decode plan gave every
+    field.
+    """
+
+    var schema: Schema
+    var spec: PartitionSpec
+    var part_type: Schema
+    var slots: _EntrySlots
+    var spec_id: Int
+    var format_version: Int
+    var content: Int
+
+    def __init__(
+        out self,
+        var schema: Schema,
+        var spec: PartitionSpec,
+        var part_type: Schema,
+        var slots: _EntrySlots,
+        spec_id: Int,
+        format_version: Int,
+        content: Int,
+    ):
+        self.schema = schema^
+        self.spec = spec^
+        self.part_type = part_type^
+        self.slots = slots^
+        self.spec_id = spec_id
+        self.format_version = format_version
+        self.content = content
+
+    def __init__(out self, *, copy: Self):
+        self.schema = copy.schema.copy()
+        self.spec = copy.spec.copy()
+        self.part_type = copy.part_type.copy()
+        self.slots = copy.slots.copy()
+        self.spec_id = copy.spec_id
+        self.format_version = copy.format_version
+        self.content = copy.content
+
+    def __init__(out self, *, deinit move: Self):
+        self.schema = move.schema^
+        self.spec = move.spec^
+        self.part_type = move.part_type^
+        self.slots = move.slots^
+        self.spec_id = move.spec_id
+        self.format_version = move.format_version
+        self.content = move.content
+
+
+struct ManifestCache(Movable):
+    """One scan's worth of parsed manifest metadata.
+
+    Three caches that share a lifetime, all keyed on raw bytes:
+
+    * `plans` — avro.mojo's own `PlanCache`, keyed on the file's
+      `avro.schema`, holding the compiled decode plan;
+    * `shapes` — keyed on every metadata entry a `_ManifestShape` is derived
+      from, so two manifests written under different specs cannot share one;
+    * `lists` — the manifest list's `_ListSlots`, keyed on its `avro.schema`.
+
+    `disabled()` turns all three off without changing the code path, which is
+    how the tests check that the cache is transparent.
+    """
+
+    var plans: PlanCache
+    var shape_hashes: List[UInt64]
+    var shape_keys: List[List[UInt8]]
+    var shapes: List[_ManifestShape]
+    var list_hashes: List[UInt64]
+    var list_keys: List[List[UInt8]]
+    var lists: List[_ListSlots]
+    var enabled: Bool
+    var collide: Bool
+    """A test seam: force every key to hash to zero, so the byte compare is
+    the only thing telling two manifest shapes apart."""
+    var hits: Int
+    var misses: Int
+
+    def __init__(out self):
+        self.plans = PlanCache()
+        self.shape_hashes = List[UInt64]()
+        self.shape_keys = List[List[UInt8]]()
+        self.shapes = List[_ManifestShape]()
+        self.list_hashes = List[UInt64]()
+        self.list_keys = List[List[UInt8]]()
+        self.lists = List[_ListSlots]()
+        self.enabled = True
+        self.collide = False
+        self.hits = 0
+        self.misses = 0
+
+    def __init__(out self, *, deinit move: Self):
+        self.plans = move.plans^
+        self.shape_hashes = move.shape_hashes^
+        self.shape_keys = move.shape_keys^
+        self.shapes = move.shapes^
+        self.list_hashes = move.list_hashes^
+        self.list_keys = move.list_keys^
+        self.lists = move.lists^
+        self.enabled = move.enabled
+        self.collide = move.collide
+        self.hits = move.hits
+        self.misses = move.misses
+
+    @staticmethod
+    def disabled() -> Self:
+        """Every lookup a miss, nothing stored — the escape hatch."""
+        var c = Self()
+        c.enabled = False
+        c.plans = PlanCache.disabled()
+        return c^
+
+    def collide_all_hashes(mut self):
+        """Force every key — plans, shapes and lists — to hash to zero. A
+        test seam: it leaves the byte compare as the only thing telling two
+        different schemas apart."""
+        self.plans.collide_hashes = True
+        self.collide = True
+
+    def hash_of(self, key: Span[UInt8, _]) -> UInt64:
+        return 0 if self.collide else schema_hash(key)
+
+    def find_shape(self, key: Span[UInt8, _]) -> Int:
+        if not self.enabled:
+            return -1
+        var h = self.hash_of(key)
+        for k in range(len(self.shape_hashes)):
+            if self.shape_hashes[k] != h:
+                continue
+            if _same_bytes(Span(self.shape_keys[k]), key):
+                return k
+        return -1
+
+    def add_shape(
+        mut self, var key: List[UInt8], var shape: _ManifestShape
+    ) -> Int:
+        """Store `shape` and return where it landed. A disabled cache keeps
+        only the newest one — the caller still reads it back by index, but
+        `find_shape` will never hand it out again."""
+        if not self.enabled:
+            self.shapes.clear()
+            self.shapes.append(shape^)
+            return 0
+        self.shape_hashes.append(self.hash_of(Span(key)))
+        self.shape_keys.append(key^)
+        self.shapes.append(shape^)
+        return len(self.shapes) - 1
+
+    def find_list(self, key: Span[UInt8, _]) -> Int:
+        if not self.enabled:
+            return -1
+        var h = self.hash_of(key)
+        for k in range(len(self.list_hashes)):
+            if self.list_hashes[k] != h:
+                continue
+            if _same_bytes(Span(self.list_keys[k]), key):
+                return k
+        return -1
+
+    def add_list(mut self, var key: List[UInt8], var slots: _ListSlots) -> Int:
+        if not self.enabled:
+            self.lists.clear()
+            self.lists.append(slots^)
+            return 0
+        self.list_hashes.append(self.hash_of(Span(key)))
+        self.list_keys.append(key^)
+        self.lists.append(slots^)
+        return len(self.lists) - 1
+
+
+def _same_bytes(a: Span[UInt8, _], b: Span[UInt8, _]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for k in range(len(a)):
+        if a[k] != b[k]:
+            return False
+    return True
+
+
+comptime _SHAPE_KEYS = String(
+    "schema,partition-spec,partition-spec-id,format-version,content"
+)
+
+
+def _append_len(mut key: List[UInt8], n: Int):
+    """Length-prefix a component so two of them cannot run together."""
+    for k in range(4):
+        key.append(UInt8((n >> (8 * k)) & 0xFF))
+    key.append(UInt8(1) if n < 0 else UInt8(0))
+
+
+def _append_keyed(mut key: List[UInt8], part: Span[UInt8, _]):
+    _append_len(key, len(part))
+    key.extend(part)
+
+
+def _shape_key(c: RecordCursor, spec_id_fallback: Int) raises -> List[UInt8]:
+    """Every metadata entry a `_ManifestShape` is derived from, verbatim.
+
+    The `avro.schema` is in the key only by proxy. `PlanCache` has already
+    compared those bytes for us and `plan_id` names the entry it matched, so
+    two manifests with the same non-negative `plan_id` provably carry the
+    same schema — and the key stays a few hundred bytes rather than the five
+    kilobytes an Iceberg manifest schema runs to. A cursor that compiled its
+    own plan has `plan_id == -1` and pays the full compare.
+
+    The fallback spec id goes in too: a manifest with no `partition-spec-id`
+    entry takes it from the manifest list, so two otherwise identical files
+    reached through different list entries are genuinely different shapes.
+    """
+    ref r = c.reader
+    var key = List[UInt8]()
+    _append_len(key, c.plan_id)
+    if c.plan_id < 0:
+        var si = r.metadata_index("avro.schema")
+        _append_keyed(key, Span(r.metadata_vals[si]))
+    var names = _SHAPE_KEYS.split(",")
+    for k in range(len(names)):
+        var i = r.metadata_index(names[k])
+        if i < 0:
+            _append_len(key, 0)
+        else:
+            _append_keyed(key, Span(r.metadata_vals[i]))
+    _append_keyed(key, String(spec_id_fallback).as_bytes())
+    return key^
+
+
 def read_manifest(mf: ManifestFile) raises -> Manifest:
     """Read a manifest, inheriting everything the manifest list supplies."""
     return read_manifest_at(mf.manifest_path, mf)
@@ -543,50 +815,61 @@ def read_manifest_io(
     return read_manifest_bytes(io.read_all(location), mf)
 
 
+def read_manifest_io_cached(
+    io: FileIO, location: String, mf: ManifestFile, mut cache: ManifestCache
+) raises -> Manifest:
+    """Read a manifest, reusing whatever `cache` already parsed."""
+    return read_manifest_bytes_cached(io.read_all(location), mf, cache)
+
+
 def read_manifest_bytes(
     var data: List[UInt8], mf: ManifestFile
 ) raises -> Manifest:
-    var c = RecordCursor.of_bytes(data^)
+    """Read a manifest with nothing cached — every schema parsed afresh."""
+    var cache = ManifestCache.disabled()
+    return read_manifest_bytes_cached(data^, mf, cache)
 
-    # The manifest's own Avro file metadata carries the schema and spec that
-    # its `partition` struct was typed with — not necessarily the table's
-    # current ones, which is exactly why they are stored here.
+
+def _manifest_shape(c: RecordCursor, mf: ManifestFile) raises -> _ManifestShape:
+    """Parse everything the manifest's file metadata determines.
+
+    The manifest's own Avro file metadata carries the schema and spec that
+    its `partition` struct was typed with — not necessarily the table's
+    current ones, which is exactly why they are stored there.
+    """
     var format_version = 1
-    if "format-version" in c.reader.metadata:
+    var i = c.reader.metadata_index("format-version")
+    if i >= 0:
         format_version = Int(
-            String(
-                from_utf8_lossy=Span(c.reader.metadata["format-version"])
-            ).strip()
+            String(from_utf8_lossy=Span(c.reader.metadata_vals[i])).strip()
         )
     var content = MANIFEST_CONTENT_DATA
-    if "content" in c.reader.metadata:
-        var t = String(
-            from_utf8_lossy=Span(c.reader.metadata["content"])
-        ).strip()
+    i = c.reader.metadata_index("content")
+    if i >= 0:
+        var t = String(from_utf8_lossy=Span(c.reader.metadata_vals[i])).strip()
         if t == "deletes" or t == "1":
             content = MANIFEST_CONTENT_DELETES
 
     var spec_id = mf.partition_spec_id
-    if "partition-spec-id" in c.reader.metadata:
+    i = c.reader.metadata_index("partition-spec-id")
+    if i >= 0:
         spec_id = Int(
-            String(
-                from_utf8_lossy=Span(c.reader.metadata["partition-spec-id"])
-            ).strip()
+            String(from_utf8_lossy=Span(c.reader.metadata_vals[i])).strip()
         )
 
     var empty_store = TypeStore()
     var empty_root = empty_store.struct_([])
     var schema = Schema(empty_store^, empty_root, 0)
-    if "schema" in c.reader.metadata:
+    i = c.reader.metadata_index("schema")
+    if i >= 0:
         schema = Schema.parse(
-            String(from_utf8_lossy=Span(c.reader.metadata["schema"]))
+            String(from_utf8_lossy=Span(c.reader.metadata_vals[i]))
         )
 
     var spec = PartitionSpec.unpartitioned(spec_id)
-    if "partition-spec" in c.reader.metadata:
-        var text = String(
-            from_utf8_lossy=Span(c.reader.metadata["partition-spec"])
-        )
+    i = c.reader.metadata_index("partition-spec")
+    if i >= 0:
+        var text = String(from_utf8_lossy=Span(c.reader.metadata_vals[i]))
         var doc = parse_json(text)
         if doc.kind(doc.root) == 5:  # a bare array of fields
             spec = PartitionSpec.from_fields_json(doc, doc.root, spec_id)
@@ -594,7 +877,31 @@ def read_manifest_bytes(
             spec = PartitionSpec.from_json(doc, doc.root, spec_id)
 
     var part_type = spec.partition_type(schema)
-    var s = _EntrySlots(c.plan, spec)
+    var slots = _EntrySlots(c.plan, spec)
+    return _ManifestShape(
+        schema^, spec^, part_type^, slots^, spec_id, format_version, content
+    )
+
+
+def read_manifest_bytes_cached(
+    var data: List[UInt8], mf: ManifestFile, mut cache: ManifestCache
+) raises -> Manifest:
+    var c = RecordCursor.of_bytes_cached(data^, cache.plans)
+
+    var key = _shape_key(c, mf.partition_spec_id)
+    var at = cache.find_shape(Span(key))
+    if at >= 0:
+        cache.hits += 1
+    else:
+        cache.misses += 1
+        at = cache.add_shape(key^, _manifest_shape(c, mf))
+    ref sh = cache.shapes[at]
+    var format_version = sh.format_version
+    var spec_id = sh.spec_id
+    var content = sh.content
+    ref spec = sh.spec
+    ref part_type = sh.part_type
+    ref s = sh.slots
 
     var entries = List[ManifestEntry]()
     # first_row_id inheritance accumulates over the whole manifest.
@@ -640,7 +947,14 @@ def read_manifest_bytes(
                 status, snapshot_id, has_snapshot_id, seq, file_seq, df^
             )
         )
-    return Manifest(entries^, spec^, spec_id, schema^, format_version, content)
+    return Manifest(
+        entries^,
+        spec.copy(),
+        spec_id,
+        sh.schema.copy(),
+        format_version,
+        content,
+    )
 
 
 def _data_file_from(

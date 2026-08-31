@@ -444,7 +444,10 @@ compression the format defines. `add_deletion_vector` writes a
   field a given format version does not have resolves to -1, which is how the
   version differences stay expressible.
 - **Scan planning** — manifest pruning, data-file pruning by partition and by
-  metrics, residuals, and delete-file association by the spec's scope rules.
+  metrics, residuals, and delete-file association by the spec's scope rules. A
+  scan carries a `ManifestCache`, so the schema and spec its manifests share —
+  byte-identical across all of them, in the usual case — are parsed once
+  rather than once per file.
 - **Catalogs** — a filesystem catalog (`version-hint.text` or highest-versioned
   `*.metadata.json`, ties broken by `last-updated-ms`), gzipped metadata, and a
   **REST catalog** over HTTPS.
@@ -685,32 +688,59 @@ before zstd.mojo 0.1.1: the writer paid the same per-page `dlopen`.)
 
 Planning touches no Parquet at all: it reads the snapshot's manifest list and
 then every manifest the list does not let it skip, one `manifest_entry` per
-data file. That is pure Avro, and 0.4.2 moved both readers onto avro.mojo's
-schema-compiled `RecordCursor` — the schema of each manifest is compiled once
-into a decode plan, every field this library wants is a slot number resolved
-once per file, and a path or a bound is a span into the block buffer rather
-than a fresh `String`.
+data file. That is pure Avro. 0.4.2 moved both readers onto avro.mojo's
+schema-compiled `RecordCursor`, which cut the *per-entry* cost 4.3× and left
+a fixed ~114 µs per manifest that decoding entries was never part of. 0.4.3
+goes after that fixed cost.
 
-`pixi run bench` builds a table with **500 manifests** (one commit each, by
-this library's own writers) and times `plan_files()` warm, best of five:
+`pixi run bench` builds two tables of **500 manifests** each (one commit per
+manifest, by this library's own writers), differing only in how many entries
+a manifest holds, and times `plan_files()` warm, best of five. Two entry
+counts is what separates the two costs — `t = manifests × (fixed + entries ×
+per_entry)`, so the slope is the per-entry cost and the intercept is what
+opening a manifest costs on its own:
 
-| entries per manifest | 0.4.1 | **0.4.2** | |
+| | 0.4.2 | **0.4.3** | |
 |---|---|---|---|
-| 4 — 2 000 file tasks | 59.5 ms | **55.4 ms** | 1.07× |
-| 20 — 10 000 file tasks | 141.2 ms | **74.2 ms** | 1.90× |
+| 4 entries each — 2 000 file tasks | 62.3 ms | **21.4 ms** | 2.9× |
+| 20 entries each — 10 000 file tasks | 84.0 ms | **43.4 ms** | 1.9× |
+| per entry | 2.71 µs | 2.74 µs | — |
+| **fixed, per manifest** | **113.7 µs** | **31.9 µs** | **3.6×** |
 
-Both columns use avro.mojo 0.2.0, so the only difference is which reader
-`manifest.mojo` calls. The two rows say the same thing from two angles: the
-*per-entry* cost fell from 10.2 µs to 2.35 µs, **4.3×**, and what is left is
-a fixed ~90 µs per manifest that decoding entries was never part of. Reading
-the file is about a third of it and parsing the manifest's own `avro.schema`
-most of the rest — 500 manifests written by one writer carry 500
-byte-identical copies of the same schema, and this parses every one. Caching
-parsed schemas across a scan is the obvious next move and is not done here.
+(Measured back to back in one session on an M4; the 0.4.2 column is the same
+binary the 55.4 / 74.2 ms above were taken from, on a slightly busier
+machine.)
 
-(avro.mojo 0.2.0 also made that schema parse 2.1× faster and its `inflate`
-8×, which is why both columns are quicker than the 81.7 ms / 164.3 ms the
-same table measured against 0.1.0.)
+Nothing about decoding an entry changed — the per-entry column is flat, as it
+should be. What changed is that a scan now carries a `ManifestCache`. Five
+hundred manifests written by one writer carry five hundred byte-identical
+copies of the same 5 KB `avro.schema`, the same Iceberg `schema` and the same
+`partition-spec`, and 0.4.2 parsed every copy of all three. The cache is keyed
+on those bytes *before* they are parsed — byte equality is the cheap
+sufficient condition — and holds everything they determine: avro.mojo's
+compiled decode plan, the parsed schema and spec, the partition type, and the
+`_EntrySlots` slot table. The hash over the key is only a filter; a hit is
+confirmed by comparing the bytes, so a collision is slow and never wrong.
+
+**What is left.** Of the 31.9 µs a manifest still costs before its first
+entry:
+
+| | µs/manifest |
+|---|---|
+| `open` + `read` + `close` of the file | 11.5 |
+| the manifest list's own entry for it | ~3 |
+| OCF header (the metadata map) | ~2 |
+| the cursor's slot buffers, one set per file | ~3 |
+| shape lookup, `DataFile` assembly, evaluators | the rest |
+
+The file read is now **36% of the fixed cost and 27% of the whole plan**, and
+it is a floor: 500 files of about 4 KB, one `open`/`read`/`close` each, at
+~11 µs apiece on this machine — a raw `open()` + `read_bytes()` with no
+`FileIO` around it measures the same. There is no range-coalescing to be had
+across separate files and caching their *contents* would be a different
+promise, so this library does not. The next measurable item is the cursor's
+slot buffers: one `List` per slot is allocated per file, and a cursor
+recycled across files with the same plan would save about 3 µs of the 32.
 
 ### What still falls back to `Datum`
 
@@ -735,7 +765,7 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 154 tests; starts the REST mock and MinIO
+pixi run test              # 157 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg
@@ -773,7 +803,7 @@ needs. The same precompiled-package problem rules out EmberJson, which is why
 | `iceberg.transforms` | `Transform`, `PartitionSpec`, `SortOrder`, `bucket_of` |
 | `iceberg.expressions` | `parse_filter`, `bind`, projections, the two evaluators |
 | `iceberg.metadata` | `TableMetadata`, `Snapshot`, `SnapshotRef`, snapshot selection |
-| `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile` |
+| `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile`, `ManifestCache` |
 | `iceberg.puffin` | `PuffinFile`, `PuffinWriter`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.nested` | the same kernels for a struct/list/map tree: `cast_column`, `filter_tree`, `concat_tree`, `cell_json`, `flatten_leaf` |
@@ -785,7 +815,7 @@ needs. The same precompiled-package problem rules out EmberJson, which is why
 | `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
 | `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
 | `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
-| `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `to_table`, `to_batches` |
+| `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `plan_files_with`, `to_table`, `to_batches` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
 | `iceberg.catalog.rest` | `RestCatalog`, `RestCatalogConfig`, `LoadTableResult` |
