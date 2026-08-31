@@ -696,18 +696,21 @@ this library's own writers) and times `plan_files()` warm, best of five:
 
 | entries per manifest | 0.4.1 | **0.4.2** | |
 |---|---|---|---|
-| 4 — 2 000 file tasks | 59.6 ms | **50.8 ms** | 1.17× |
-| 20 — 10 000 file tasks | 142.5 ms | **68.7 ms** | 2.07× |
+| 4 — 2 000 file tasks | 59.5 ms | **55.4 ms** | 1.07× |
+| 20 — 10 000 file tasks | 141.2 ms | **74.2 ms** | 1.90× |
 
-The two rows say the same thing from two angles: the *per-entry* cost fell
-from 10.4 µs to 2.2 µs, 4.6×, and what is left is a fixed ~90 µs per manifest
-that decoding entries was never part of. Reading the file is about a third of
-it and parsing the manifest's own `avro.schema` most of the rest — 500
-manifests written by one writer carry 500 byte-identical copies of the same
-schema, and this parses each one. Caching parsed schemas across a scan is the
-obvious next move and is not done yet. (avro.mojo 0.2.0 already made that
-parse 2.1× faster, which is why the 0.4.1 column here is faster than the
-81.7 ms / 164.3 ms the same table measured before it.)
+Both columns use avro.mojo 0.2.0, so the only difference is which reader
+`manifest.mojo` calls. The two rows say the same thing from two angles: the
+*per-entry* cost fell from 10.2 µs to 2.35 µs, **4.3×**, and what is left is
+a fixed ~90 µs per manifest that decoding entries was never part of. Reading
+the file is about a third of it and parsing the manifest's own `avro.schema`
+most of the rest — 500 manifests written by one writer carry 500
+byte-identical copies of the same schema, and this parses every one. Caching
+parsed schemas across a scan is the obvious next move and is not done here.
+
+(avro.mojo 0.2.0 also made that schema parse 2.1× faster and its `inflate`
+8×, which is why both columns are quicker than the 81.7 ms / 164.3 ms the
+same table measured against 0.1.0.)
 
 ### What still falls back to `Datum`
 
