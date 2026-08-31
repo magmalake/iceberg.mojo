@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.4.3"
+version = "0.4.4"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -76,7 +76,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.4.3"
+version = "0.4.4"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -84,6 +84,9 @@ backend = { name = "pixi-build-mojo", version = "0.*" }
 [package.build.config.pkg]
 path = "src/iceberg"
 name = "iceberg"
+# Sibling tins arrive as .mojopkg in the host prefix; pixi-build-mojo does not
+# add them to the import path on its own.
+extra-args = ["-I", "$PREFIX/lib/mojo"]
 
 # hashes.mojo comes in by git, pinned to a commit, rather than by path: a
 # published package has to be self-contained, and pixi has no equivalent of
@@ -91,11 +94,25 @@ name = "iceberg"
 # ever resolve in this checkout.
 [package.host-dependencies]
 mojo-compiler = "==1.0.0"
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0df43fc9037b98c280f74b14a80c319bae4f2934" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "5022d663ca5a3bae2df092fca4fceeb1b0cc393f" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "3142f9e41c496473021ebc9681cec11231d1723b" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "2d3e8554eff03da5313fe074543f887e0b3088c0" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "fc83e9f031d6f107d25166347a617471c1ce99fb" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "f455f0ae3c2cbe862e1db14e13d219dc682e1896" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "acb22d480f8081677acd3fe93fd7b82524982d01" }
 
 [package.build-dependencies]
 mojo-compiler = "==1.0.0"
 
 [package.run-dependencies]
 mojo-compiler = ">=1.0.0,<2"
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0df43fc9037b98c280f74b14a80c319bae4f2934" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "5022d663ca5a3bae2df092fca4fceeb1b0cc393f" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "3142f9e41c496473021ebc9681cec11231d1723b" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "2d3e8554eff03da5313fe074543f887e0b3088c0" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "fc83e9f031d6f107d25166347a617471c1ce99fb" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "f455f0ae3c2cbe862e1db14e13d219dc682e1896" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "acb22d480f8081677acd3fe93fd7b82524982d01" }
