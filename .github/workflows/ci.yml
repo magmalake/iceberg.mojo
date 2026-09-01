@@ -104,7 +104,7 @@ jobs:
           # Pinned: pixi.lock is written by this version, and a newer pixi
           # rehashes the git source dependencies and then declares the lock
           # out of date.
-          pixi-version: v0.78.0
+          pixi-version: v0.71.1
           manifest-path: iceberg.mojo/pixi.toml
           environments: ${{ matrix.env }}
 
@@ -205,7 +205,7 @@ jobs:
 
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:
-          pixi-version: v0.78.0
+          pixi-version: v0.71.1
           manifest-path: iceberg.mojo/pixi.toml
           environments: stable
 
