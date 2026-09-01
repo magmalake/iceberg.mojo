@@ -449,8 +449,9 @@ compression the format defines. `add_deletion_vector` writes a
   byte-identical across all of them, in the usual case — are parsed once
   rather than once per file.
 - **Catalogs** — a filesystem catalog (`version-hint.text` or highest-versioned
-  `*.metadata.json`, ties broken by `last-updated-ms`), gzipped metadata, and a
-  **REST catalog** over HTTPS.
+  `*.metadata.json`, ties broken by `last-updated-ms`), gzipped metadata, a
+  **REST catalog** over HTTPS, and a **SQL catalog** over sqlite.mojo for
+  local development and PyIceberg test parity.
 
 ## Storage and catalogs
 
@@ -508,6 +509,48 @@ per-prefix STS credential is used for exactly the objects it was issued for.
 `tests/rest_server.py` is a mock catalog the test runner starts; it demands
 `Authorization: Bearer` and echoes the delegation header back, so the client's
 headers are proved rather than assumed.
+
+### SQL catalog
+
+`RestCatalog` and `FilesystemCatalog` are what real deployments use — a SQL
+catalog is **not needed to connect to production Iceberg**. `SqlCatalog`
+exists for a narrower reason: **local development and test parity with
+PyIceberg**, whose quickstart default is exactly this — a SQLite-backed
+`SqlCatalog` — and which is what iceberg-rs.mojo's own fixtures already use as
+an oracle. Point it at the same sqlite file PyIceberg would use and either
+side can read what the other wrote: same two tables (`iceberg_tables`,
+`iceberg_namespace_properties`), same column names, same guarded-update
+concurrency scheme.
+
+```mojo
+from iceberg.catalog.sql import SqlCatalog
+
+var catalog = SqlCatalog.local("default", "sqlite:///catalog.db", "warehouse")
+catalog.create_namespace("db", {"owner": "marius"})
+
+var t = catalog.create_table("db", "orders", schema, spec)
+_ = catalog.append("db", "orders", [batch])
+_ = catalog.delete_where("db", "orders", '["<","id",100]')
+_ = catalog.rename_table("db", "orders", "db", "orders_v2")
+```
+
+Namespaces are dot-joined strings (`"db.sub"`), matching PyIceberg's own
+`SqlCatalog` convention; nested namespaces are a `LIKE`-prefix match over that
+string, escaped the same way PyIceberg escapes `%`, `_` and the escape
+character itself. The commit path (`append`, `delete_where`, `overwrite`,
+`dynamic_partition_overwrite`) writes a fresh metadata JSON file through the
+same `prepare_append` / `prepare_delete` / `prepare_overwrite` machinery the
+REST catalog uses, then swaps the catalog row's `metadata_location` with a
+guarded `UPDATE ... WHERE metadata_location = <the value this attempt read>`
+— PyIceberg's own optimistic-concurrency guard. Zero rows affected means a
+concurrent commit already moved the pointer; this reloads and retries, the
+same shape as the REST catalog's 409 handling, and raises once retries run
+out rather than clobbering the row a successful commit just wrote.
+
+`iceberg-mojo cat --sql sqlite:///catalog.db --table db.orders --warehouse W`
+reads a table through it from the CLI. `tools/verify_sql_catalog.py` is the
+parity check: writing through `SqlCatalog` and reading the same sqlite file
+back with PyIceberg's, and the other way round, rows compared cell-exact.
 
 ## Deliberately out of scope
 
@@ -765,12 +808,13 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 157 tests; starts the REST mock and MinIO
+pixi run test              # 164 tests; starts the REST mock and MinIO
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg
 pixi run profile           # per-stage profile of a scan: where the time goes
 pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
+pixi run verify-sql-catalog # SqlCatalog vs PyIceberg's, both directions
 ```
 
 Consume it with:
@@ -779,7 +823,8 @@ Consume it with:
 -I ../iceberg.mojo/src -I ../hashes.mojo/src -I ../avro.mojo/src \
 -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src \
 -I ../roaring.mojo/src -I ../objectstore.mojo/src \
--I ../zstd.mojo/src -I ../lz4.mojo/src -I ../threads.mojo/src
+-I ../zstd.mojo/src -I ../lz4.mojo/src -I ../threads.mojo/src \
+-I ../sqlite.mojo
 ```
 
 Sibling tins are consumed by **source path**, not as pixi packages:
@@ -787,10 +832,15 @@ pixi-build-mojo emits a precompiled artifact built with `mojo-compiler` 1.0.0,
 and the nightly compiler refuses to load it. Source paths satisfy both
 environments. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
 source dependencies, which is what installs their C shims into the
-environment; a consumer needs the same. threads.mojo has no shim at all — it
-calls the pthread symbols libc already exports — so a source checkout is all it
-needs. The same precompiled-package problem rules out EmberJson, which is why
-`iceberg.json` is a small in-repo parser.
+environment; a consumer needs the same. sqlite.mojo (the SQL catalog's
+backing store) is the same shape — a git dependency purely so pixi installs
+`libsqlite`, with the Mojo source itself still coming from the path checkout
+— except its package directory is `sqlite/` at its repo root, not `src/`, so
+the include path is `-I ../sqlite.mojo`, not `-I ../sqlite.mojo/src`.
+threads.mojo has no shim at all — it calls the pthread symbols libc already
+exports — so a source checkout is all it needs. The same precompiled-package
+problem rules out EmberJson, which is why `iceberg.json` is a small in-repo
+parser.
 
 ## API
 
@@ -819,6 +869,7 @@ needs. The same precompiled-package problem rules out EmberJson, which is why
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
 | `iceberg.catalog.rest` | `RestCatalog`, `RestCatalogConfig`, `LoadTableResult` |
+| `iceberg.catalog.sql` | `SqlCatalog`, `NamespacePropertiesUpdateSummary` — local dev / PyIceberg parity, not production connectivity |
 
 ```mojo
 from iceberg.catalog.filesystem import Table
@@ -967,7 +1018,10 @@ iceberg-mojo cat       <table> [options]
 ```
 
 `<table>` is a `metadata.json`, a table directory, a `file://` or `s3://` URI,
-or — with `--rest URL --table NS.NAME` — a table in a REST catalog.
+or — with `--rest URL --table NS.NAME` — a table in a REST catalog, or —
+with `--sql URI --table NS.NAME` — a table in a SQL catalog (local dev / test
+parity with PyIceberg, not a production catalog; see [SQL
+catalog](#sql-catalog)).
 
 | Option | |
 |---|---|
@@ -979,6 +1033,7 @@ or — with `--rest URL --table NS.NAME` — a table in a REST catalog.
 | `--rebase FROM=TO` | rewrite location prefixes |
 | `--property K=V` | a storage property, e.g. `s3.endpoint` |
 | `--rest URL`, `--table NS.NAME`, `--token T`, `--warehouse W`, `--no-vend` | REST catalog |
+| `--sql URI`, `--table NS.NAME`, `--warehouse W` | SQL catalog, e.g. `--sql sqlite:///catalog.db` |
 
 ```sh
 iceberg-mojo cat tests/fixtures/dv_v3 \

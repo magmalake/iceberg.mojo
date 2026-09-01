@@ -76,6 +76,11 @@ jobs:
           repository: magmalake/threads.mojo
           path: threads.mojo
 
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/sqlite.mojo
+          path: sqlite.mojo
+
       # MinIO is the only S3 server that actually verifies SigV4 signatures,
       # which is what makes the s3:// end-to-end test worth running. One static
       # binary, so no service container; tests/run_tests.sh skips the S3 tests
@@ -193,6 +198,11 @@ jobs:
           repository: magmalake/threads.mojo
           path: threads.mojo
 
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/sqlite.mojo
+          path: sqlite.mojo
+
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:
           pixi-version: v0.71.1
@@ -208,3 +218,10 @@ jobs:
       - name: Write tables and verify them elsewhere
         working-directory: iceberg.mojo
         run: pixi run -e stable verify-writes
+
+      # The SQL catalog's own parity gate: writes through our SqlCatalog and
+      # reads them back with PyIceberg's, then the other way round, over the
+      # same sqlite file both times. See tools/verify_sql_catalog.py.
+      - name: Verify the SQL catalog against PyIceberg's
+        working-directory: iceberg.mojo
+        run: pixi run -e stable verify-sql-catalog

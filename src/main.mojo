@@ -32,6 +32,7 @@ from std.sys import argv
 
 from iceberg.catalog.filesystem import Table, find_latest_metadata
 from iceberg.catalog.rest import RestCatalog, RestCatalogConfig
+from iceberg.catalog.sql import SqlCatalog
 from iceberg.io import FileIO
 from iceberg.json import substr
 from iceberg.metadata import TableMetadata
@@ -67,9 +68,13 @@ comptime USAGE = String(
     "  --rebase FROM=TO  rewrite location prefixes before opening files\n"
     "  --property K=V    a storage property, e.g. s3.endpoint or s3.region\n"
     "  --rest URL        load the table from a REST catalog at URL\n"
+    "  --sql URI         load the table from a SQL catalog, e.g.\n"
+    "                    sqlite:///catalog.db (local dev / PyIceberg parity,\n"
+    "                    not a production catalog — see catalog/sql.mojo)\n"
     "  --table NS.NAME   the table to load from that catalog\n"
     "  --token T         bearer token for the REST catalog\n"
-    "  --warehouse W     warehouse to ask the REST catalog for\n"
+    "  --warehouse W     warehouse root for --sql, or to ask the REST\n"
+    "                    catalog for\n"
     "  --no-vend         do not ask the catalog to vend credentials\n"
 )
 
@@ -117,6 +122,7 @@ def main() raises:
     var token = String("")
     var warehouse = String("")
     var vend = True
+    var sql_uri = String("")
 
     var k = first_option
     while k < len(args):
@@ -166,6 +172,9 @@ def main() raises:
         elif a == "--rest" and k + 1 < len(args):
             rest_uri = String(args[k + 1])
             k += 2
+        elif a == "--sql" and k + 1 < len(args):
+            sql_uri = String(args[k + 1])
+            k += 2
         elif a == "--table" and k + 1 < len(args):
             rest_table = String(args[k + 1])
             k += 2
@@ -182,7 +191,7 @@ def main() raises:
             raise Error("unknown option '" + a + "'")
 
     var table = _open(
-        location, rest_uri, rest_table, token, warehouse, vend, io^
+        location, rest_uri, rest_table, token, warehouse, vend, sql_uri, io^
     )
     ref m = table.metadata
 
@@ -281,9 +290,11 @@ def _open(
     token: String,
     warehouse: String,
     vend: Bool,
+    sql_uri: String,
     var io: FileIO,
 ) raises -> Table:
-    """A table from a REST catalog when one was named, from a path otherwise."""
+    """A table from a REST or SQL catalog when one was named, from a path
+    otherwise."""
     if rest_uri != "":
         if rest_table == "":
             raise Error("--rest needs --table NS.NAME")
@@ -302,6 +313,22 @@ def _open(
             substr(rest_table, 0, dot),
             substr(rest_table, dot + 1, rest_table.byte_length()),
         )
+    if sql_uri != "":
+        if rest_table == "":
+            raise Error("--sql needs --table NS.NAME")
+        var dot = rest_table.rfind(".")
+        if dot < 0:
+            raise Error("--table wants a dotted NAMESPACE.NAME")
+        var catalog = SqlCatalog(
+            "default", sql_uri, warehouse, io^, create_tables=False
+        )
+        return catalog.load_table(
+            substr(rest_table, 0, dot),
+            substr(rest_table, dot + 1, rest_table.byte_length()),
+        )
     if location == "":
-        raise Error("no table given: pass a path, or --rest URL --table NS.T")
+        raise Error(
+            "no table given: pass a path, --rest URL --table NS.T, or --sql"
+            " URI --table NS.T"
+        )
     return Table.load(location, io^)

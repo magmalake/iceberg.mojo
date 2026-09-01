@@ -39,6 +39,11 @@ from iceberg.catalog.rest import (
     ACCESS_DELEGATION_HEADER,
     VENDED_CREDENTIALS,
 )
+from iceberg.catalog.sql import (
+    NamespacePropertiesUpdateSummary,
+    SqlCatalog,
+    sqlite_path_from_uri,
+)
 from iceberg.puffin import (
     BLOB_DELETION_VECTOR_V1,
     BlobMetadata,
@@ -3585,6 +3590,245 @@ def write_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
         else:
             ok.add(Datum.bool_(i % 2 == 0))
     return batch_of([ids^, region^, amount^, ts^, ok^])
+
+
+def fresh_sql_catalog(scenario: String) raises -> SqlCatalog:
+    """A SQL catalog of this test's own: a fresh sqlite file and warehouse."""
+    var root = WRITE_ROOT + "/sql-" + scenario
+    var io = FileIO.local()
+    try:
+        var existing = io.list(root)
+        for k in range(len(existing)):
+            io.delete(existing[k])
+    except:
+        pass
+    makedirs(root, exist_ok=True)
+    var db_path = root + "/catalog.db"
+    try:
+        io.delete(db_path)
+    except:
+        pass
+    return SqlCatalog.local("default", "sqlite:///" + db_path, root + "/warehouse")
+
+
+def test_sqlite_path_from_uri() raises:
+    assert_equal(sqlite_path_from_uri("sqlite:///rel/catalog.db"), "rel/catalog.db")
+    assert_equal(sqlite_path_from_uri("sqlite:////abs/catalog.db"), "/abs/catalog.db")
+    assert_equal(sqlite_path_from_uri(":memory:"), ":memory:")
+    assert_equal(sqlite_path_from_uri("/already/a/path.db"), "/already/a/path.db")
+
+
+def test_sql_catalog_namespaces_and_properties() raises:
+    var cat = fresh_sql_catalog("namespaces")
+    assert_false(cat.namespace_exists("db"))
+    cat.create_namespace("db")
+    assert_true(cat.namespace_exists("db"))
+    with assert_raises():
+        cat.create_namespace("db")
+
+    cat.create_namespace("db.sub", {"owner": "marius"})
+    assert_true(cat.namespace_exists("db.sub"))
+    # "db.sub" must not be confused with a namespace merely prefixed by "db",
+    # e.g. "db_other" — the point of escaping "_" in the LIKE pattern.
+    cat.create_namespace("db_other")
+    assert_false(cat.namespace_exists("db.sub.nope"))
+
+    var top = cat.list_namespaces()
+    _sort_strings(top)
+    assert_equal(len(top), 2, "db and db_other at the top level")
+    assert_equal(top[0], "db")
+    assert_equal(top[1], "db_other")
+
+    var children = cat.list_namespaces("db")
+    assert_equal(len(children), 1)
+    assert_equal(children[0], "db.sub")
+
+    var props = cat.load_namespace_properties("db.sub")
+    assert_equal(props["owner"], "marius")
+
+    var summary = cat.update_namespace_properties(
+        "db.sub", List[String](), {"owner": "someone-else", "team": "lake"}
+    )
+    assert_equal(len(summary.updated), 2)
+    props = cat.load_namespace_properties("db.sub")
+    assert_equal(props["owner"], "someone-else")
+    assert_equal(props["team"], "lake")
+
+    var removed_summary = cat.update_namespace_properties(
+        "db.sub", ["team", "nonexistent"]
+    )
+    assert_equal(len(removed_summary.removed), 1)
+    assert_equal(len(removed_summary.missing), 1)
+    assert_false("team" in cat.load_namespace_properties("db.sub"))
+
+    # `drop_namespace` only refuses a namespace with *direct* tables — the
+    # same "not empty" check PyIceberg's `SqlCatalog` makes, which does not
+    # look at child namespaces at all. A table living directly in "db"
+    # exercises that; "db.sub" having no table of its own does not block it.
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table("db", "t", schema)
+    with assert_raises():
+        cat.drop_namespace("db")  # "db" itself has a direct table
+    cat.drop_table("db", "t")
+    cat.drop_namespace("db.sub")
+    cat.drop_namespace("db")
+    assert_false(cat.namespace_exists("db"))
+
+
+def test_sql_catalog_tables_crud() raises:
+    var cat = fresh_sql_catalog("tables")
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    assert_false(cat.table_exists("db", "orders"))
+
+    var created = cat.create_table("db", "orders", schema)
+    assert_equal(created.metadata.format_version, 2)
+    assert_false(created.metadata.has_current_snapshot)
+    assert_true(cat.table_exists("db", "orders"))
+
+    with assert_raises():
+        _ = cat.create_table("db", "orders", schema)
+    with assert_raises():
+        _ = cat.create_table("nonexistent-ns", "t", schema)
+
+    var names = cat.list_tables("db")
+    assert_equal(len(names), 1)
+    assert_equal(names[0], "orders")
+
+    var loaded = cat.load_table("db", "orders")
+    assert_equal(loaded.metadata.table_uuid, created.metadata.table_uuid)
+
+    var renamed = cat.rename_table("db", "orders", "db", "orders2")
+    assert_equal(renamed.metadata.table_uuid, created.metadata.table_uuid)
+    assert_false(cat.table_exists("db", "orders"))
+    assert_true(cat.table_exists("db", "orders2"))
+    with assert_raises():
+        _ = cat.rename_table("db", "nonexistent", "db", "orders3")
+
+    cat.drop_table("db", "orders2")
+    assert_false(cat.table_exists("db", "orders2"))
+    with assert_raises():
+        cat.drop_table("db", "orders2")
+
+
+def test_sql_catalog_append_delete_overwrite() raises:
+    var cat = fresh_sql_catalog("commit")
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table(
+        "db", "t", schema, PartitionSpec.unpartitioned(), Dict[String, String](), 3
+    )
+
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 12))
+    var after_append = cat.append("db", "t", batches)
+    assert_equal(len(after_append.metadata.snapshots), 1)
+    assert_equal(
+        cat.load_table("db", "t").scan().to_table().num_rows(), 12
+    )
+
+    var after_delete = cat.delete_where(
+        "db", "t", String('["=","region","eu"]'), MODE_MERGE_ON_READ
+    )
+    assert_equal(after_delete.metadata.current_snapshot().operation(), "delete")
+    var back = cat.load_table("db", "t")
+    assert_equal(back.scan().to_table().num_rows(), 9)
+    var deletes = delete_files_of(back)
+    assert_equal(len(deletes), 1)
+    assert_true(deletes[0].is_deletion_vector())
+
+    var fresh = List[RecordBatch]()
+    fresh.append(write_batch(schema, 50, 2))
+    var after_overwrite = cat.overwrite("db", "t", fresh)
+    assert_equal(
+        after_overwrite.metadata.current_snapshot().operation(), "overwrite"
+    )
+    var final = cat.load_table("db", "t")
+    assert_equal(final.scan().to_table().num_rows(), 2)
+    assert_equal(len(delete_files_of(final)), 0)
+
+
+def test_sql_catalog_dynamic_partition_overwrite() raises:
+    var cat = fresh_sql_catalog("dynamic")
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    _ = cat.create_table("db", "t", schema, spec)
+    var first = List[RecordBatch]()
+    first.append(write_batch(schema, 0, 10))
+    _ = cat.append("db", "t", first)
+    assert_equal(cat.load_table("db", "t").scan().to_table().num_rows(), 10)
+
+    # id 0 -> region "eu" (i % 5 == 0) and nothing else, so only the "eu"
+    # partition is touched.
+    var only_eu = List[RecordBatch]()
+    only_eu.append(write_batch(schema, 0, 1))
+    var after = cat.dynamic_partition_overwrite("db", "t", only_eu)
+    assert_equal(after.metadata.current_snapshot().operation(), "overwrite")
+    # The other four partitions' eight original rows survive untouched; "eu"'s
+    # original two rows are replaced by the one new row: 8 + 1 = 9.
+    assert_equal(cat.load_table("db", "t").scan().to_table().num_rows(), 9)
+
+
+def test_sql_catalog_guarded_commit_rejects_a_stale_pointer() raises:
+    """The atomic swap PyIceberg's `SqlCatalog` performs: an `UPDATE ... WHERE
+    metadata_location = <the value this attempt read>` that a concurrent
+    writer's completed commit makes affect zero rows.
+
+    This simulates exactly that race — one writer reads the table, a second
+    (this test, standing in for it) commits first and moves the pointer, then
+    the first writer's guarded swap is attempted against the now-stale
+    location it originally read. It must fail without touching the row a
+    successful commit just wrote.
+    """
+    var cat = fresh_sql_catalog("conflict")
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table("db", "t", schema)
+    var stale = cat.load_table("db", "t")  # metadata_location == v0
+
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, 0, 6))
+    var after = cat.append("db", "t", batches)  # v0 -> v1, the real commit
+
+    # The stale reader's swap must be refused: v0 no longer matches the row.
+    var swapped = cat._guarded_swap(
+        "db", "t", stale.metadata_location, "bogus-location-must-not-land"
+    )
+    assert_false(swapped, "a guarded swap against a stale pointer must fail")
+
+    # And the real commit's pointer must be exactly what it was, untouched.
+    var still = cat.load_table("db", "t")
+    assert_equal(still.metadata_location, after.metadata_location)
+    assert_equal(still.scan().to_table().num_rows(), 6)
+
+
+def test_sql_catalog_retries_past_its_own_stale_read() raises:
+    """`commit_append` reloads and retries on a lost race rather than
+    surfacing it — the same shape as the REST catalog's 409 handling, just
+    against the guarded `UPDATE` instead of a status code."""
+    var cat = fresh_sql_catalog("retry")
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table("db", "t", schema)
+
+    var b1 = List[RecordBatch]()
+    b1.append(write_batch(schema, 0, 3))
+    _ = cat.append("db", "t", b1)
+    var b2 = List[RecordBatch]()
+    b2.append(write_batch(schema, 3, 3))
+    _ = cat.append("db", "t", b2)
+
+    var final = cat.load_table("db", "t")
+    assert_equal(len(final.metadata.snapshots), 2)
+    assert_equal(final.scan().to_table().num_rows(), 6)
 
 
 def fresh_catalog(scenario: String) raises -> FilesystemCatalog:
