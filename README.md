@@ -808,14 +808,12 @@ A predicate on a *constant* column — an identity partition value, an
 ## Install
 
 ```sh
-pixi run test              # 164 tests; starts the REST mock and MinIO
-pixi run -e stable test
-pixi run cli               # builds build/iceberg-mojo
-pixi run bench             # scans and appends, against PyIceberg
-pixi run profile           # per-stage profile of a scan: where the time goes
-pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
-pixi run verify-sql-catalog # SqlCatalog vs PyIceberg's, both directions
+pixi shelf add iceberg-mojo
 ```
+
+That resolves the tin from [mojoshelf](https://mojoshelf.org) and adds it — along with the tins it depends on — as **pixi git source dependencies**. magmalake tins are not published to a conda channel, so `pixi add iceberg-mojo` will not find them.
+
+`iceberg-mojo` sits at the top of the stack, so this pulls every tin beneath it — that is expected, not a misconfiguration.
 
 Consume it with:
 
@@ -841,6 +839,18 @@ threads.mojo has no shim at all — it calls the pthread symbols libc already
 exports — so a source checkout is all it needs. The same precompiled-package
 problem rules out EmberJson, which is why `iceberg.json` is a small in-repo
 parser.
+
+### Working on this repo instead
+
+```sh
+pixi run test              # 164 tests; starts the REST mock and MinIO
+pixi run -e stable test
+pixi run cli               # builds build/iceberg-mojo
+pixi run bench             # scans and appends, against PyIceberg
+pixi run profile           # per-stage profile of a scan: where the time goes
+pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
+pixi run verify-sql-catalog # SqlCatalog vs PyIceberg's, both directions
+```
 
 ## API
 
