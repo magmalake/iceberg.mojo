@@ -3608,14 +3608,22 @@ def fresh_sql_catalog(scenario: String) raises -> SqlCatalog:
         io.delete(db_path)
     except:
         pass
-    return SqlCatalog.local("default", "sqlite:///" + db_path, root + "/warehouse")
+    return SqlCatalog.local(
+        "default", "sqlite:///" + db_path, root + "/warehouse"
+    )
 
 
 def test_sqlite_path_from_uri() raises:
-    assert_equal(sqlite_path_from_uri("sqlite:///rel/catalog.db"), "rel/catalog.db")
-    assert_equal(sqlite_path_from_uri("sqlite:////abs/catalog.db"), "/abs/catalog.db")
+    assert_equal(
+        sqlite_path_from_uri("sqlite:///rel/catalog.db"), "rel/catalog.db"
+    )
+    assert_equal(
+        sqlite_path_from_uri("sqlite:////abs/catalog.db"), "/abs/catalog.db"
+    )
     assert_equal(sqlite_path_from_uri(":memory:"), ":memory:")
-    assert_equal(sqlite_path_from_uri("/already/a/path.db"), "/already/a/path.db")
+    assert_equal(
+        sqlite_path_from_uri("/already/a/path.db"), "/already/a/path.db"
+    )
 
 
 def test_sql_catalog_namespaces_and_properties() raises:
@@ -3716,16 +3724,19 @@ def test_sql_catalog_append_delete_overwrite() raises:
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     _ = cat.create_table(
-        "db", "t", schema, PartitionSpec.unpartitioned(), Dict[String, String](), 3
+        "db",
+        "t",
+        schema,
+        PartitionSpec.unpartitioned(),
+        Dict[String, String](),
+        3,
     )
 
     var batches = List[RecordBatch]()
     batches.append(write_batch(schema, 0, 12))
     var after_append = cat.append("db", "t", batches)
     assert_equal(len(after_append.metadata.snapshots), 1)
-    assert_equal(
-        cat.load_table("db", "t").scan().to_table().num_rows(), 12
-    )
+    assert_equal(cat.load_table("db", "t").scan().to_table().num_rows(), 12)
 
     var after_delete = cat.delete_where(
         "db", "t", String('["=","region","eu"]'), MODE_MERGE_ON_READ

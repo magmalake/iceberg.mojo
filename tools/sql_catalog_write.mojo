@@ -60,7 +60,12 @@ def main() raises:
 
     var schema = Schema.parse(SCHEMA_JSON)
     var created = cat.create_table(
-        "db", "rt", schema, PartitionSpec.unpartitioned(), Dict[String, String](), 2
+        "db",
+        "rt",
+        schema,
+        PartitionSpec.unpartitioned(),
+        Dict[String, String](),
+        2,
     )
     print("NAMESPACE db")
     print("TABLE db.rt")

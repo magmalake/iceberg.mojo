@@ -192,7 +192,9 @@ struct SqlCatalog(Movable):
             self.db.execute(_CREATE_NAMESPACE_PROPERTIES_SQL)
 
     @staticmethod
-    def local(var name: String, uri: String, var warehouse: String) raises -> Self:
+    def local(
+        var name: String, uri: String, var warehouse: String
+    ) raises -> Self:
         return Self(name^, uri, warehouse^, FileIO.local())
 
     def create_tables(mut self) raises:
@@ -353,7 +355,9 @@ struct SqlCatalog(Movable):
         _sort_strings(out)
         return out^
 
-    def load_namespace_properties(self, namespace: String) raises -> Dict[String, String]:
+    def load_namespace_properties(
+        self, namespace: String
+    ) raises -> Dict[String, String]:
         if not self.namespace_exists(namespace):
             raise Error("iceberg: namespace does not exist: " + namespace)
         var stmt = self.db.prepare(
@@ -436,10 +440,14 @@ struct SqlCatalog(Movable):
         stmt.bind_text(3, name)
         var row = stmt.step()
         if not row:
-            raise Error("iceberg: table does not exist: " + namespace + "." + name)
+            raise Error(
+                "iceberg: table does not exist: " + namespace + "." + name
+            )
         var loc = row.value().text_val(0)
         if loc == "":
-            raise Error("iceberg: table does not exist: " + namespace + "." + name)
+            raise Error(
+                "iceberg: table does not exist: " + namespace + "." + name
+            )
         var m = read_metadata_file(self.io, loc)
         return Table(m^, loc, self.io.copy(), namespace + "." + name)
 
@@ -482,9 +490,15 @@ struct SqlCatalog(Movable):
         if not self.namespace_exists(namespace):
             raise Error("iceberg: namespace does not exist: " + namespace)
         if self.table_exists(namespace, name):
-            raise Error("iceberg: table already exists: " + namespace + "." + name)
-        var loc = location if location != "" else self.table_location(namespace, name)
-        var m = new_table_metadata(loc, schema, spec, properties^, format_version)
+            raise Error(
+                "iceberg: table already exists: " + namespace + "." + name
+            )
+        var loc = location if location != "" else self.table_location(
+            namespace, name
+        )
+        var m = new_table_metadata(
+            loc, schema, spec, properties^, format_version
+        )
         var path = join_path(join_path(loc, "metadata"), metadata_file_name(0))
         self.io.write_new(path, m.to_json().as_bytes())
         m.metadata_file_location = path
@@ -505,7 +519,9 @@ struct SqlCatalog(Movable):
                 self.io.delete(path)
             except:
                 pass
-            raise Error("iceberg: table already exists: " + namespace + "." + name)
+            raise Error(
+                "iceberg: table already exists: " + namespace + "." + name
+            )
 
         return Table(m^, path^, self.io.copy(), namespace + "." + name)
 
@@ -522,7 +538,9 @@ struct SqlCatalog(Movable):
         stmt.bind_text(3, name)
         _ = stmt.step()
         if self._changes() < 1:
-            raise Error("iceberg: table does not exist: " + namespace + "." + name)
+            raise Error(
+                "iceberg: table does not exist: " + namespace + "." + name
+            )
 
     def rename_table(
         mut self,
@@ -674,11 +692,17 @@ struct SqlCatalog(Movable):
         while True:
             var result: AppendResult
             if kind == COMMIT_DELETE:
-                result = prepare_delete(loaded.io, loaded.metadata, filter_dsl, mode)
+                result = prepare_delete(
+                    loaded.io, loaded.metadata, filter_dsl, mode
+                )
             elif kind == COMMIT_OVERWRITE:
-                result = prepare_overwrite(loaded.io, loaded.metadata, batches, filter_dsl)
+                result = prepare_overwrite(
+                    loaded.io, loaded.metadata, batches, filter_dsl
+                )
             else:
-                result = prepare_dynamic_partition_overwrite(loaded.io, loaded.metadata, batches)
+                result = prepare_dynamic_partition_overwrite(
+                    loaded.io, loaded.metadata, batches
+                )
             var version = next_metadata_version(result.metadata)
             var new_path = join_path(
                 dirname(loaded.metadata_location), metadata_file_name(version)
@@ -717,7 +741,13 @@ struct SqlCatalog(Movable):
     ) raises -> Table:
         """`DELETE FROM t WHERE <filter>`, committed through the catalog."""
         return self.commit_change(
-            namespace, name, COMMIT_DELETE, filter_dsl, List[RecordBatch](), mode, retries
+            namespace,
+            name,
+            COMMIT_DELETE,
+            filter_dsl,
+            List[RecordBatch](),
+            mode,
+            retries,
         )
 
     def overwrite(
@@ -730,7 +760,13 @@ struct SqlCatalog(Movable):
     ) raises -> Table:
         """Delete what the filter matches and add `batches`, in one snapshot."""
         return self.commit_change(
-            namespace, name, COMMIT_OVERWRITE, filter_dsl, batches, String(""), retries
+            namespace,
+            name,
+            COMMIT_OVERWRITE,
+            filter_dsl,
+            batches,
+            String(""),
+            retries,
         )
 
     def dynamic_partition_overwrite(

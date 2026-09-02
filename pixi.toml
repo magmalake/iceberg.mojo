@@ -64,7 +64,11 @@ verify-writes = { cmd = "bash tools/verify_writes.sh" }
 # `SqlCatalog` over the same sqlite file. See tools/verify_sql_catalog.py.
 verify-sql-catalog = { cmd = "bash tools/verify_sql_catalog.sh" }
 fmt = { cmd = "mojo format src tests bench tools" }
-format-check = { cmd = "mojo format --check src tests bench tools" }
+# `mojo format` has no check mode in 1.0.0 — it rejects `--check`, and there is
+# none among the hidden options either — so the check is: format, then assert the
+# tree did not move. It rewrites the files as a side effect, which is what CI
+# wants and is harmless locally; run it with your own work committed or stashed.
+format-check = { cmd = "mojo format src tests bench tools && git diff --exit-code -- src tests bench tools" }
 
 [target.osx-arm64.activation.env]
 SHLIB_EXT = ".dylib"
