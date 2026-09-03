@@ -7,13 +7,18 @@ on:
 
 jobs:
   test:
-    name: ${{ matrix.env == 'default' && 'nightly' || matrix.env }} / ${{ matrix.os }}
+    # Stable only. Every FFI sibling below is a pixi git source dependency,
+    # and its source build drops a `.mojoc` compiled with 1.0.0 into the
+    # environment; a nightly compiler refuses to load it. The `default`
+    # (nightly) environment stays in pixi.toml for local use with a matching
+    # compiler.
+    name: ${{ matrix.env }} / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        env: [default, stable]
+        env: [stable]
     steps:
       # This repo consumes sibling magmalake tins by source path
       # (`-I ../parquet.mojo/src`, …), so CI has to lay the siblings out next
