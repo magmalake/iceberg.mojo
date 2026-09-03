@@ -177,7 +177,7 @@ self-checked — the expected values come from them, never from this code. See
 | **(x″)** Delete and overwrite on a nested table | itself, cell by cell, before and after | ✅ a v3 **deletion vector** and a **copy-on-write rewrite** over struct + list + map columns leave every surviving row byte-identical; `overwrite`, `identity(addr.city)` and `bucket[4](addr.zip)` all round-trip |
 | **(y)** A nested scan over the **Arrow C Data Interface** | `pyarrow.Array._import_from_c` | ✅ **20 columns** across 4 tables imported into pyarrow and equal to PyIceberg's own read — structs, lists and maps with their children |
 | **(x)** `expire_snapshots` | itself, file by file | ✅ a dry run that touches nothing and never names a live file; an expiry that removes exactly what a copy-on-write delete orphaned; `keep_last` and an age cut; a superseded Puffin file removed while the live one stays |
-| Tests | | **150 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly) |
+| Tests | | **166 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly); the SQL-catalog tests run twice, on sqlite and on PostgreSQL |
 | CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **36 tables** we wrote and importing a nested scan into pyarrow |
 
 ### The one plan disagreement, and why it is not a bug
@@ -450,8 +450,9 @@ compression the format defines. `add_deletion_vector` writes a
   rather than once per file.
 - **Catalogs** — a filesystem catalog (`version-hint.text` or highest-versioned
   `*.metadata.json`, ties broken by `last-updated-ms`), gzipped metadata, a
-  **REST catalog** over HTTPS, and a **SQL catalog** over sqlite.mojo for
-  local development and PyIceberg test parity.
+  **REST catalog** over HTTPS, and a **SQL catalog** over sqlite.mojo (local
+  development and PyIceberg test parity) or postgres.mojo (the same catalog,
+  shared by several writers).
 
 ## Storage and catalogs
 
@@ -512,14 +513,24 @@ headers are proved rather than assumed.
 
 ### SQL catalog
 
-`RestCatalog` and `FilesystemCatalog` are what real deployments use — a SQL
-catalog is **not needed to connect to production Iceberg**. `SqlCatalog`
-exists for a narrower reason: **local development and test parity with
-PyIceberg**, whose quickstart default is exactly this — a SQLite-backed
-`SqlCatalog` — and which is what iceberg-rs.mojo's own fixtures already use as
-an oracle. Point it at the same sqlite file PyIceberg would use and either
-side can read what the other wrote: same two tables (`iceberg_tables`,
-`iceberg_namespace_properties`), same column names, same guarded-update
+`SqlCatalog` runs on **sqlite.mojo or postgres.mojo**, chosen by the URI and
+nothing else — every method below is the same either way. What that buys is
+two different things.
+
+Over **sqlite** a SQL catalog is **not a production catalog**: it is local
+development and test parity with PyIceberg, whose quickstart default is
+exactly this — a SQLite-backed `SqlCatalog` — and which is what
+iceberg-rs.mojo's own fixtures already use as an oracle.
+
+Over **PostgreSQL** the same catalog is deployable. `iceberg_tables` and
+`iceberg_namespace_properties` are the tables PyIceberg's `SqlCatalog` and the
+Java `JdbcCatalog` both use, the guarded `UPDATE` is a real transaction
+against a real server, and several writers may share it — which is the one
+thing the sqlite file cannot do. It is still not `RestCatalog`: there is no
+credential vending and no server-side validation beyond the primary key.
+
+Either way, point it at the database PyIceberg would use and each side reads
+what the other wrote: same two tables, same column names, same guarded-update
 concurrency scheme.
 
 ```mojo
@@ -532,7 +543,18 @@ var t = catalog.create_table("db", "orders", schema, spec)
 _ = catalog.append("db", "orders", [batch])
 _ = catalog.delete_where("db", "orders", '["<","id",100]')
 _ = catalog.rename_table("db", "orders", "db", "orders_v2")
+
+# the same catalog, shared:
+var shared = SqlCatalog.local(
+    "default", "postgresql://iceberg@db.internal/catalog?connect_timeout=5",
+    "s3://warehouse",
+)
 ```
+
+The URI is libpq's, so every conninfo option works — `sslmode=require`,
+`connect_timeout`, `options=-csearch_path%3Dmyschema` — and it is the same
+string SQLAlchemy takes, which is how PyIceberg is pointed at the same rows
+(`postgresql+psycopg://…`).
 
 Namespaces are dot-joined strings (`"db.sub"`), matching PyIceberg's own
 `SqlCatalog` convention; nested namespaces are a `LIKE`-prefix match over that
@@ -548,9 +570,15 @@ same shape as the REST catalog's 409 handling, and raises once retries run
 out rather than clobbering the row a successful commit just wrote.
 
 `iceberg-mojo cat --sql sqlite:///catalog.db --table db.orders --warehouse W`
-reads a table through it from the CLI. `tools/verify_sql_catalog.py` is the
-parity check: writing through `SqlCatalog` and reading the same sqlite file
-back with PyIceberg's, and the other way round, rows compared cell-exact.
+reads a table through it from the CLI, and `--sql postgresql://user@host/db`
+is the same command against a server. `tools/verify_sql_catalog.py` and
+`tools/verify_pg_catalog.py` are the parity checks, one per backend: writing
+through `SqlCatalog` and reading the same database back with PyIceberg's, and
+the other way round — including a catalog PyIceberg created from nothing over
+Postgres, which this reader opens unchanged — rows compared cell-exact. The
+suite's own SQL-catalog tests run twice, once per backend, whenever
+`$POSTGRES_TEST_DSN` names a server (`tests/run_tests.sh` starts a throwaway
+one from the conda `postgresql` package; no Docker).
 
 ## Deliberately out of scope
 
@@ -823,20 +851,21 @@ Consume it with:
 -I ../iceberg.mojo/src -I ../hashes.mojo/src -I ../avro.mojo/src \
 -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src \
 -I ../roaring.mojo/src -I ../objectstore.mojo/src \
--I ../zstd.mojo/src -I ../lz4.mojo/src -I ../threads.mojo/src \
--I ../sqlite.mojo
+-I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src \
+-I ../threads.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src
 ```
 
 Sibling tins are consumed by **source path**, not as pixi packages:
 pixi-build-mojo emits a precompiled artifact built with `mojo-compiler` 1.0.0,
 and the nightly compiler refuses to load it. Source paths satisfy both
-environments. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
-source dependencies, which is what installs their C shims into the
-environment; a consumer needs the same. sqlite.mojo (the SQL catalog's
-backing store) is the same shape — a git dependency purely so pixi installs
-`libsqlite`, with the Mojo source itself still coming from the path checkout
-— except its package directory is `sqlite/` at its repo root, not `src/`, so
-the include path is `-I ../sqlite.mojo`, not `-I ../sqlite.mojo/src`.
+environments. The four FFI tins (objectstore, zstd, lz4, brotli) are *also*
+pixi git source dependencies, which is what installs their C shims into the
+environment; a consumer needs the same. sqlite.mojo and postgres.mojo (the SQL
+catalog's two backing stores) are the same shape — a git dependency purely so
+pixi installs `libsqlite` / `libpq`, with the Mojo source itself still coming
+from the path checkout — except sqlite.mojo's package directory is `sqlite/`
+at its repo root, not `src/`, so the include path is `-I ../sqlite.mojo`, not
+`-I ../sqlite.mojo/src`.
 threads.mojo has no shim at all — it calls the pthread symbols libc already
 exports — so a source checkout is all it needs. The same precompiled-package
 problem rules out EmberJson, which is why `iceberg.json` is a small in-repo
@@ -845,13 +874,15 @@ parser.
 ### Working on this repo instead
 
 ```sh
-pixi run test              # 164 tests; starts the REST mock and MinIO
+pixi run test              # 166 tests; starts the REST mock, MinIO and
+                           # a throwaway PostgreSQL server
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
 pixi run bench             # scans and appends, against PyIceberg
 pixi run profile           # per-stage profile of a scan: where the time goes
 pixi run verify-writes     # writes 10 tables; PyIceberg and DuckDB read them
 pixi run verify-sql-catalog # SqlCatalog vs PyIceberg's, both directions
+pixi run verify-pg-catalog  # the same, over PostgreSQL
 ```
 
 ## API

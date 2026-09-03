@@ -17,11 +17,12 @@ jobs:
     steps:
       # This repo consumes sibling magmalake tins by source path
       # (`-I ../parquet.mojo/src`, …), so CI has to lay the siblings out next
-      # to it. The three FFI tins (objectstore, zstd, lz4) are *also* pixi git
-      # source dependencies, which is what installs their C shims into the
-      # environment; the checkouts here supply their Mojo sources. threads.mojo
-      # has no shim at all — it calls the pthread symbols libc already
-      # exports — so a source checkout is all it needs.
+      # to it. The four FFI tins (objectstore, zstd, lz4, brotli) are *also*
+      # pixi git source dependencies, which is what installs their C shims into
+      # the environment; the checkouts here supply their Mojo sources.
+      # sqlite.mojo and postgres.mojo are the same shape, for libsqlite and
+      # libpq. threads.mojo has no shim at all — it calls the pthread symbols
+      # libc already exports — so a source checkout is all it needs.
       - uses: actions/checkout@v4
         with:
           path: iceberg.mojo
@@ -81,6 +82,16 @@ jobs:
           repository: magmalake/sqlite.mojo
           path: sqlite.mojo
 
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/postgres.mojo
+          path: postgres.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/brotli.mojo
+          path: brotli.mojo
+
       # MinIO is the only S3 server that actually verifies SigV4 signatures,
       # which is what makes the s3:// end-to-end test worth running. One static
       # binary, so no service container; tests/run_tests.sh skips the S3 tests
@@ -108,6 +119,12 @@ jobs:
           manifest-path: iceberg.mojo/pixi.toml
           environments: ${{ matrix.env }}
 
+      # `check` = tests + a CLI build. tests/run_tests.sh starts the REST
+      # mock, MinIO and a throwaway PostgreSQL cluster (from the conda
+      # `postgresql` package, so no Docker and no service container — GitHub's
+      # macOS runners have neither) and exports $POSTGRES_TEST_DSN, which is
+      # what makes the SQL-catalog tests run on Postgres as well as sqlite.
+      # Both the ubuntu and the macos legs get it.
       - name: Unit tests and CLI build
         working-directory: iceberg.mojo
         run: pixi run -e ${{ matrix.env }} check
@@ -203,6 +220,16 @@ jobs:
           repository: magmalake/sqlite.mojo
           path: sqlite.mojo
 
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/postgres.mojo
+          path: postgres.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/brotli.mojo
+          path: brotli.mojo
+
       - uses: prefix-dev/setup-pixi@v0.9.0
         with:
           pixi-version: v0.71.1
@@ -225,3 +252,11 @@ jobs:
       - name: Verify the SQL catalog against PyIceberg's
         working-directory: iceberg.mojo
         run: pixi run -e stable verify-sql-catalog
+
+      # The same gate over PostgreSQL, against
+      # `SqlCatalog("postgresql+psycopg://…")` — including a catalog PyIceberg
+      # creates from nothing, which we then read unchanged. The server comes
+      # from scripts/with-pg-server.sh, not a service container.
+      - name: Verify the SQL catalog against PyIceberg's, over PostgreSQL
+        working-directory: iceberg.mojo
+        run: pixi run -e stable verify-pg-catalog

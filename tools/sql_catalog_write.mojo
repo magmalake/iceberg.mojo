@@ -1,13 +1,18 @@
 """Write a table through `SqlCatalog`, for cross-implementation parity checks.
 
-`tools/verify_sql_catalog.sh` drives this, then reads the same sqlite file
-back with PyIceberg's `SqlCatalog` (and, separately, has PyIceberg write into
-a fresh catalog for this repo's own `SqlCatalog` — and `iceberg-mojo cat
---sql` — to read back). This tool prints one `KEY value` line per fact the
-shell script or `tools/verify_sql_catalog.py` needs to check, so nothing has
-to be re-derived from stdout parsing beyond splitting on the first space.
+`tools/verify_sql_catalog.sh` drives this, then reads the same database back
+with PyIceberg's `SqlCatalog` (and, separately, has PyIceberg write into a
+fresh catalog for this repo's own `SqlCatalog` — and `iceberg-mojo cat --sql`
+— to read back). `tools/verify_pg_catalog.sh` drives the same two directions
+over PostgreSQL. This tool prints one `KEY value` line per fact the shell
+script or the Python checker needs, so nothing has to be re-derived from
+stdout parsing beyond splitting on the first space.
 
-    sql-catalog-write <sqlite-db-path> <warehouse-dir>
+    sql-catalog-write <sqlite-db-path | catalog-uri> <warehouse-dir>
+
+A bare path is taken as a sqlite file (`sqlite:///` is prepended); anything
+holding `://` — `postgresql://user@host/db` — is passed through as the
+catalog URI unchanged.
 """
 
 from std.sys import argv
@@ -50,12 +55,20 @@ def make_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
 def main() raises:
     var args = argv()
     if len(args) < 3:
-        print("usage: sql-catalog-write <sqlite-db-path> <warehouse-dir>")
+        print(
+            "usage: sql-catalog-write <sqlite-db-path|catalog-uri>"
+            " <warehouse-dir>"
+        )
         return
-    var db_path = String(args[1])
+    var target = String(args[1])
     var warehouse = String(args[2])
+    var uri = target if target.find("://") >= 0 else "sqlite:///" + target
 
-    var cat = SqlCatalog.local("default", "sqlite:///" + db_path, warehouse)
+    var cat = SqlCatalog.local("default", uri, warehouse)
+    # A shared server keeps whatever the last run left; this tool owns the
+    # catalog it is pointed at, so start from nothing either way.
+    cat.destroy_tables()
+    cat.create_tables()
     cat.create_namespace("db", {"owner": "marius"})
 
     var schema = Schema.parse(SCHEMA_JSON)

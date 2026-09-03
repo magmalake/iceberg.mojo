@@ -2,11 +2,13 @@
 
 `filesystem` needs nothing but a path. `rest` is a documented stub — see its
 module docstring for exactly what is and is not implemented and why. `sql` is
-a JDBC-style catalog over sqlite.mojo, for local development and PyIceberg
-test parity — see its module docstring for why it exists and what it is not
-for.
+a JDBC-style catalog over sqlite.mojo or postgres.mojo — sqlite for local
+development and PyIceberg test parity, PostgreSQL for a catalog several
+writers can share — with `_sqldriver` holding the small part that differs
+between the two.
 """
 
+from ._sqldriver import SqlDriver, is_postgres_uri, is_unique_violation
 from .filesystem import (
     FilesystemCatalog,
     Table,

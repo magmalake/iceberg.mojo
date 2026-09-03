@@ -3,11 +3,17 @@
 # Builds the test binary, brings up the servers the tests need, runs them, and
 # tears everything down.
 #
-# Two servers:
+# Three servers:
 #   * tests/rest_server.py — a mock Iceberg REST catalog serving `/v1/config`
 #     and `loadTable` out of the checked-in fixtures, and `createTable` /
 #     `commitTable` into a scratch warehouse under $WORK. Always available;
 #     python is a workspace dependency.
+#   * a throwaway PostgreSQL cluster, started by scripts/pg-server.sh out of
+#     the conda `postgresql` package (no Docker, no service container). It
+#     exports $POSTGRES_TEST_DSN, which is what makes the SQL-catalog tests
+#     run a second time against Postgres as well as sqlite. If the cluster
+#     cannot start, those tests print a skip line and everything else still
+#     runs — a missing server must never take the whole suite with it.
 #   * an S3 server for the end-to-end read over `s3://`. MinIO is strongly
 #     preferred because it actually *verifies* SigV4 signatures. Found in this
 #     order: $MINIO_BINARY, build/minio, `minio` on PATH, then `moto_server`.
@@ -27,6 +33,7 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         [ -n "$pid" ] && kill "$pid" 2>/dev/null
     done
+    sh scripts/pg-server.sh stop "$WORK/postgres" >/dev/null 2>&1
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -35,6 +42,18 @@ mkdir -p build
 
 echo "== building tests"
 mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test || exit 1
+
+# ── PostgreSQL ─────────────────────────────────────────────────────────────
+# The SQL catalog's second backend. One cluster for the whole run; each test
+# drops the two catalog tables before it starts, which is what keeps them
+# independent of each other on a shared server.
+if sh scripts/pg-server.sh start "$WORK/postgres" > "$WORK/pg-start.log" 2>&1; then
+    export POSTGRES_TEST_DSN="$(cat "$WORK/postgres/dsn")"
+    echo "== postgres at $POSTGRES_TEST_DSN"
+else
+    echo "== no PostgreSQL server; the SQL-catalog tests will run on sqlite only"
+    head -20 "$WORK/pg-start.log" 2>/dev/null
+fi
 
 # ── S3 server ──────────────────────────────────────────────────────────────
 S3_PORT=$(python -c "

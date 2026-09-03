@@ -1,13 +1,21 @@
-"""A JDBC-style SQL catalog, backed by sqlite.mojo — the schema and semantics
-PyIceberg's `SqlCatalog` uses.
+"""A JDBC-style SQL catalog, over sqlite.mojo or postgres.mojo — the schema
+and semantics PyIceberg's `SqlCatalog` uses.
 
-This is **not** how production Iceberg deployments connect: real catalogs are
-`RestCatalog` or a metastore. What a SQL catalog buys is local development and
-test parity with PyIceberg, whose quickstart default is exactly this —
-a SQLite-backed `SqlCatalog` — and which is what iceberg-rs.mojo's own
-fixtures already use as an oracle. A database this catalog creates opens
-cleanly in PyIceberg's `SqlCatalog` and vice versa: same two tables, same
-column names, same optimistic-concurrency guard.
+Which backend answers is the URI's business and nothing else's:
+`sqlite:///catalog.db` opens a file, `postgresql://user@host/db` opens a
+server, and every method below is the same either way. See `_sqldriver` for
+what that costs (placeholder rewriting, and one predicate over SQLSTATEs).
+
+Over **sqlite** this is a development catalog: local, single-process, and test
+parity with PyIceberg, whose quickstart default is exactly this — a
+SQLite-backed `SqlCatalog` — and which is what iceberg-rs.mojo's own fixtures
+already use as an oracle. Over **PostgreSQL** the same catalog is deployable:
+`iceberg_tables` and `iceberg_namespace_properties` are the tables PyIceberg's
+`SqlCatalog` and the Java `JdbcCatalog` both use, the guarded `UPDATE` is a
+real transaction against a real server, and many writers may share it. A
+database this catalog creates opens cleanly in PyIceberg's `SqlCatalog` and
+vice versa, on either engine: same two tables, same column names, same
+optimistic-concurrency guard.
 
     iceberg_tables (
         catalog_name, table_namespace, table_name,   -- primary key
@@ -43,8 +51,13 @@ file only adds the row that names the current metadata file.
 from std.collections import Dict
 
 from parquet import RecordBatch
-from sqlite import Database
 
+from ._sqldriver import (
+    SqlDriver,
+    is_postgres_uri,
+    is_unique_violation,
+    sqlite_path_from_uri,
+)
 from ..append import (
     AppendResult,
     metadata_file_name,
@@ -57,7 +70,6 @@ from ..delete import (
     prepare_overwrite,
 )
 from ..io import FileIO, dirname, join_path
-from ..json import substr
 from ..manifest import DataFile
 from ..schema import Schema
 from ..transforms import PartitionSpec
@@ -87,20 +99,23 @@ comptime _CREATE_NAMESPACE_PROPERTIES_SQL = String(
 )
 
 
-def sqlite_path_from_uri(uri: String) -> String:
-    """`sqlite:///rel.db` -> `rel.db`; `sqlite:////abs.db` -> `/abs.db`.
+def _cell(row: List[Optional[String]], col: Int) -> String:
+    """One cell of a `SqlDriver.query` row as text.
 
-    Matches the two forms SQLAlchemy's sqlite dialect accepts (three slashes
-    for a path relative to the process, four for an absolute one) so the same
-    `uri` property string works for both PyIceberg's `SqlCatalog` and this
-    one, and the same catalog file is what "PyIceberg reads what we write"
-    parity needs. Anything without the `sqlite:///` prefix — including the
-    literal `:memory:` — is passed straight through to `sqlite3_open`.
+    SQL NULL reads as `""`, which is what both engines' text accessors have
+    always rendered it as here and what `load_table` already tested for: a
+    row whose `metadata_location` is NULL is a table that does not exist.
+
+    Args:
+        row: The row.
+        col: The 0-based column index.
+
+    Returns:
+        The cell's text, or `""` for SQL NULL or a missing column.
     """
-    comptime PREFIX = String("sqlite:///")
-    if uri.startswith(PREFIX):
-        return substr(uri, PREFIX.byte_length(), uri.byte_length())
-    return uri
+    if col < len(row) and row[col]:
+        return row[col].value()
+    return String("")
 
 
 def _escape_like(namespace: String) -> String:
@@ -159,8 +174,8 @@ struct NamespacePropertiesUpdateSummary(Copyable, Movable):
 
 struct SqlCatalog(Movable):
     """A JDBC/SQL catalog: tables and namespaces live as rows in a SQLite
-    database, table data and metadata JSON live under `warehouse` — the same
-    split PyIceberg's `SqlCatalog` makes.
+    file or a PostgreSQL database, table data and metadata JSON live under
+    `warehouse` — the same split PyIceberg's `SqlCatalog` makes.
 
     ```mojo
     var cat = SqlCatalog.local("default", "sqlite:///catalog.db", "warehouse")
@@ -168,12 +183,21 @@ struct SqlCatalog(Movable):
     var t = cat.create_table("db", "orders", schema)
     _ = cat.append("db", "orders", batches)
     ```
+
+    The URI is the only thing that changes between the two backends:
+
+    ```mojo
+    var shared = SqlCatalog.local(
+        "default", "postgresql://iceberg@db.internal/catalog?connect_timeout=5",
+        "s3://warehouse",
+    )
+    ```
     """
 
     var name: String
     var warehouse: String
     var io: FileIO
-    var db: Database
+    var driver: SqlDriver
 
     def __init__(
         out self,
@@ -186,10 +210,10 @@ struct SqlCatalog(Movable):
         self.name = name^
         self.warehouse = warehouse^
         self.io = io^
-        self.db = Database(sqlite_path_from_uri(uri))
+        self.driver = SqlDriver(uri)
         if create_tables:
-            self.db.execute(_CREATE_TABLES_SQL)
-            self.db.execute(_CREATE_NAMESPACE_PROPERTIES_SQL)
+            _ = self.driver.execute(_CREATE_TABLES_SQL)
+            _ = self.driver.execute(_CREATE_NAMESPACE_PROPERTIES_SQL)
 
     @staticmethod
     def local(
@@ -201,53 +225,60 @@ struct SqlCatalog(Movable):
         """`CREATE TABLE IF NOT EXISTS` for both catalog tables. Idempotent;
         opening a database another SQL catalog (ours or PyIceberg's) already
         initialized is a no-op."""
-        self.db.execute(_CREATE_TABLES_SQL)
-        self.db.execute(_CREATE_NAMESPACE_PROPERTIES_SQL)
+        _ = self.driver.execute(_CREATE_TABLES_SQL)
+        _ = self.driver.execute(_CREATE_NAMESPACE_PROPERTIES_SQL)
 
     def destroy_tables(mut self) raises:
         """Drop both catalog tables. Mirrors PyIceberg's `destroy_tables`."""
-        self.db.execute("DROP TABLE IF EXISTS iceberg_tables")
-        self.db.execute("DROP TABLE IF EXISTS iceberg_namespace_properties")
+        _ = self.driver.execute("DROP TABLE IF EXISTS iceberg_tables")
+        _ = self.driver.execute(
+            "DROP TABLE IF EXISTS iceberg_namespace_properties"
+        )
+
+    def _rollback_quietly(mut self):
+        """Undo the open transaction block, swallowing any failure.
+
+        The old `with self.db.transaction():` guard rolled back from its
+        destructor when the block raised; this is that, made explicit, and it
+        matters more on PostgreSQL than it did on SQLite — a failed statement
+        there leaves the block refusing everything but a rollback, so the
+        connection stays unusable until one is issued. The original error is
+        what the caller gets to see, so a failure here is dropped.
+        """
+        try:
+            self.driver.rollback()
+        except:
+            pass
 
     def table_location(self, namespace: String, name: String) -> String:
         if namespace == "":
             return join_path(self.warehouse, name)
         return join_path(join_path(self.warehouse, namespace), name)
 
-    def _changes(self) raises -> Int:
-        """`SELECT changes()` — rows affected by the last INSERT/UPDATE/DELETE
-        on this connection. sqlite.mojo has no `sqlite3_changes` binding, but
-        SQLite exposes the same counter as an ordinary SQL scalar function, so
-        no FFI addition is needed."""
-        var stmt = self.db.prepare("SELECT changes()")
-        var row = stmt.step()
-        if row:
-            return row.value().int_val(0)
-        return 0
-
     # ── namespaces ───────────────────────────────────────────────────────────
 
     def namespace_exists(self, namespace: String) raises -> Bool:
         var pattern = _escape_like(namespace) + ".%"
-        var t = self.db.prepare(
-            "SELECT 1 FROM iceberg_tables WHERE catalog_name=? AND"
-            " (table_namespace=? OR table_namespace LIKE ? ESCAPE '!') LIMIT 1"
+        var args: List[String] = [self.name, namespace, pattern]
+        var t = self.driver.query(
+            (
+                "SELECT 1 FROM iceberg_tables WHERE catalog_name=? AND"
+                " (table_namespace=? OR table_namespace LIKE ? ESCAPE '!')"
+                " LIMIT 1"
+            ),
+            args,
         )
-        t.bind_text(1, self.name)
-        t.bind_text(2, namespace)
-        t.bind_text(3, pattern)
-        if t.step():
+        if len(t) > 0:
             return True
-        var p = self.db.prepare(
-            "SELECT 1 FROM iceberg_namespace_properties WHERE catalog_name=?"
-            " AND (namespace=? OR namespace LIKE ? ESCAPE '!') LIMIT 1"
+        var p = self.driver.query(
+            (
+                "SELECT 1 FROM iceberg_namespace_properties WHERE"
+                " catalog_name=? AND (namespace=? OR namespace LIKE ? ESCAPE"
+                " '!') LIMIT 1"
+            ),
+            args,
         )
-        p.bind_text(1, self.name)
-        p.bind_text(2, namespace)
-        p.bind_text(3, pattern)
-        if p.step():
-            return True
-        return False
+        return len(p) > 0
 
     def create_namespace(
         mut self,
@@ -258,18 +289,27 @@ struct SqlCatalog(Movable):
             raise Error("iceberg: namespace already exists: " + namespace)
         if len(properties) == 0:
             properties[NAMESPACE_EXISTS_PROPERTY] = "true"
-        with self.db.transaction():
+        self.driver.begin()
+        try:
             for entry in properties.items():
-                var stmt = self.db.prepare(
-                    "INSERT INTO iceberg_namespace_properties"
-                    " (catalog_name, namespace, property_key, property_value)"
-                    " VALUES (?,?,?,?)"
+                var args: List[String] = [
+                    self.name,
+                    namespace,
+                    entry.key,
+                    entry.value,
+                ]
+                _ = self.driver.execute(
+                    (
+                        "INSERT INTO iceberg_namespace_properties"
+                        " (catalog_name, namespace, property_key,"
+                        " property_value) VALUES (?,?,?,?)"
+                    ),
+                    args,
                 )
-                stmt.bind_text(1, self.name)
-                stmt.bind_text(2, namespace)
-                stmt.bind_text(3, entry.key)
-                stmt.bind_text(4, entry.value)
-                _ = stmt.step()
+        except e:
+            self._rollback_quietly()
+            raise e
+        self.driver.commit()
 
     def drop_namespace(mut self, namespace: String) raises:
         if not self.namespace_exists(namespace):
@@ -283,13 +323,14 @@ struct SqlCatalog(Movable):
                 + String(len(tables))
                 + " tables exist"
             )
-        var stmt = self.db.prepare(
-            "DELETE FROM iceberg_namespace_properties WHERE catalog_name=?"
-            " AND namespace=?"
+        var args: List[String] = [self.name, namespace]
+        _ = self.driver.execute(
+            (
+                "DELETE FROM iceberg_namespace_properties WHERE catalog_name=?"
+                " AND namespace=?"
+            ),
+            args,
         )
-        stmt.bind_text(1, self.name)
-        stmt.bind_text(2, namespace)
-        _ = stmt.step()
 
     def list_namespaces(self, parent: String = "") raises -> List[String]:
         if parent != "" and not self.namespace_exists(parent):
@@ -299,21 +340,19 @@ struct SqlCatalog(Movable):
         var pattern = parent + ".%" if parent != "" else String("")
 
         var candidates = List[String]()
+        var args: List[String] = [self.name]
+        if pattern != "":
+            args.append(pattern)
+
         var sql1 = String(
             "SELECT DISTINCT table_namespace FROM iceberg_tables WHERE"
             " catalog_name=?"
         )
         if pattern != "":
             sql1 += " AND table_namespace LIKE ?"
-        var stmt1 = self.db.prepare(sql1)
-        stmt1.bind_text(1, self.name)
-        if pattern != "":
-            stmt1.bind_text(2, pattern)
-        while True:
-            var row = stmt1.step()
-            if not row:
-                break
-            candidates.append(row.value().text_val(0))
+        var rows1 = self.driver.query(sql1, args)
+        for k in range(len(rows1)):
+            candidates.append(_cell(rows1[k], 0))
 
         var sql2 = String(
             "SELECT DISTINCT namespace FROM iceberg_namespace_properties"
@@ -321,15 +360,9 @@ struct SqlCatalog(Movable):
         )
         if pattern != "":
             sql2 += " AND namespace LIKE ?"
-        var stmt2 = self.db.prepare(sql2)
-        stmt2.bind_text(1, self.name)
-        if pattern != "":
-            stmt2.bind_text(2, pattern)
-        while True:
-            var row = stmt2.step()
-            if not row:
-                break
-            candidates.append(row.value().text_val(0))
+        var rows2 = self.driver.query(sql2, args)
+        for k in range(len(rows2)):
+            candidates.append(_cell(rows2[k], 0))
 
         var seen = Dict[String, Bool]()
         var out = List[String]()
@@ -360,19 +393,18 @@ struct SqlCatalog(Movable):
     ) raises -> Dict[String, String]:
         if not self.namespace_exists(namespace):
             raise Error("iceberg: namespace does not exist: " + namespace)
-        var stmt = self.db.prepare(
-            "SELECT property_key, property_value FROM"
-            " iceberg_namespace_properties WHERE catalog_name=? AND"
-            " namespace=?"
+        var args: List[String] = [self.name, namespace]
+        var rows = self.driver.query(
+            (
+                "SELECT property_key, property_value FROM"
+                " iceberg_namespace_properties WHERE catalog_name=? AND"
+                " namespace=?"
+            ),
+            args,
         )
-        stmt.bind_text(1, self.name)
-        stmt.bind_text(2, namespace)
         var out = Dict[String, String]()
-        while True:
-            var row = stmt.step()
-            if not row:
-                break
-            out[row.value().text_val(0)] = row.value().text_val(1)
+        for k in range(len(rows)):
+            out[_cell(rows[k], 0)] = _cell(rows[k], 1)
         return out^
 
     def update_namespace_properties(
@@ -396,54 +428,71 @@ struct SqlCatalog(Movable):
         for entry in updates.items():
             updated.append(entry.key)
 
-        with self.db.transaction():
+        self.driver.begin()
+        try:
             for k in range(len(removals)):
-                var stmt = self.db.prepare(
-                    "DELETE FROM iceberg_namespace_properties WHERE"
-                    " catalog_name=? AND namespace=? AND property_key=?"
+                var del_args: List[String] = [
+                    self.name,
+                    namespace,
+                    removals[k],
+                ]
+                _ = self.driver.execute(
+                    (
+                        "DELETE FROM iceberg_namespace_properties WHERE"
+                        " catalog_name=? AND namespace=? AND property_key=?"
+                    ),
+                    del_args,
                 )
-                stmt.bind_text(1, self.name)
-                stmt.bind_text(2, namespace)
-                stmt.bind_text(3, removals[k])
-                _ = stmt.step()
             for entry in updates.items():
-                var del_stmt = self.db.prepare(
-                    "DELETE FROM iceberg_namespace_properties WHERE"
-                    " catalog_name=? AND namespace=? AND property_key=?"
+                var key_args: List[String] = [
+                    self.name,
+                    namespace,
+                    entry.key,
+                ]
+                _ = self.driver.execute(
+                    (
+                        "DELETE FROM iceberg_namespace_properties WHERE"
+                        " catalog_name=? AND namespace=? AND property_key=?"
+                    ),
+                    key_args,
                 )
-                del_stmt.bind_text(1, self.name)
-                del_stmt.bind_text(2, namespace)
-                del_stmt.bind_text(3, entry.key)
-                _ = del_stmt.step()
-                var ins_stmt = self.db.prepare(
-                    "INSERT INTO iceberg_namespace_properties"
-                    " (catalog_name, namespace, property_key, property_value)"
-                    " VALUES (?,?,?,?)"
+                var ins_args: List[String] = [
+                    self.name,
+                    namespace,
+                    entry.key,
+                    entry.value,
+                ]
+                _ = self.driver.execute(
+                    (
+                        "INSERT INTO iceberg_namespace_properties"
+                        " (catalog_name, namespace, property_key,"
+                        " property_value) VALUES (?,?,?,?)"
+                    ),
+                    ins_args,
                 )
-                ins_stmt.bind_text(1, self.name)
-                ins_stmt.bind_text(2, namespace)
-                ins_stmt.bind_text(3, entry.key)
-                ins_stmt.bind_text(4, entry.value)
-                _ = ins_stmt.step()
+        except e:
+            self._rollback_quietly()
+            raise e
+        self.driver.commit()
 
         return NamespacePropertiesUpdateSummary(removed^, updated^, missing^)
 
     # ── tables ───────────────────────────────────────────────────────────────
 
     def load_table(self, namespace: String, name: String) raises -> Table:
-        var stmt = self.db.prepare(
-            "SELECT metadata_location FROM iceberg_tables WHERE"
-            " catalog_name=? AND table_namespace=? AND table_name=?"
+        var args: List[String] = [self.name, namespace, name]
+        var rows = self.driver.query(
+            (
+                "SELECT metadata_location FROM iceberg_tables WHERE"
+                " catalog_name=? AND table_namespace=? AND table_name=?"
+            ),
+            args,
         )
-        stmt.bind_text(1, self.name)
-        stmt.bind_text(2, namespace)
-        stmt.bind_text(3, name)
-        var row = stmt.step()
-        if not row:
+        if len(rows) == 0:
             raise Error(
                 "iceberg: table does not exist: " + namespace + "." + name
             )
-        var loc = row.value().text_val(0)
+        var loc = _cell(rows[0], 0)
         if loc == "":
             raise Error(
                 "iceberg: table does not exist: " + namespace + "." + name
@@ -461,18 +510,17 @@ struct SqlCatalog(Movable):
     def list_tables(self, namespace: String) raises -> List[String]:
         if namespace != "" and not self.namespace_exists(namespace):
             raise Error("iceberg: namespace does not exist: " + namespace)
-        var stmt = self.db.prepare(
-            "SELECT table_name FROM iceberg_tables WHERE catalog_name=? AND"
-            " table_namespace=?"
+        var args: List[String] = [self.name, namespace]
+        var rows = self.driver.query(
+            (
+                "SELECT table_name FROM iceberg_tables WHERE catalog_name=? AND"
+                " table_namespace=?"
+            ),
+            args,
         )
-        stmt.bind_text(1, self.name)
-        stmt.bind_text(2, namespace)
         var out = List[String]()
-        while True:
-            var row = stmt.step()
-            if not row:
-                break
-            out.append(row.value().text_val(0))
+        for k in range(len(rows)):
+            out.append(_cell(rows[k], 0))
         return out^
 
     def create_table(
@@ -503,25 +551,28 @@ struct SqlCatalog(Movable):
         self.io.write_new(path, m.to_json().as_bytes())
         m.metadata_file_location = path
 
+        var args: List[String] = [self.name, namespace, name, path]
         try:
-            var stmt = self.db.prepare(
-                "INSERT INTO iceberg_tables (catalog_name, table_namespace,"
-                " table_name, metadata_location, previous_metadata_location)"
-                " VALUES (?,?,?,?,NULL)"
+            _ = self.driver.execute(
+                (
+                    "INSERT INTO iceberg_tables (catalog_name, table_namespace,"
+                    " table_name, metadata_location,"
+                    " previous_metadata_location) VALUES (?,?,?,?,NULL)"
+                ),
+                args,
             )
-            stmt.bind_text(1, self.name)
-            stmt.bind_text(2, namespace)
-            stmt.bind_text(3, name)
-            stmt.bind_text(4, path)
-            _ = stmt.step()
-        except:
+        except e:
+            # The metadata file was written before the row; a refused row
+            # leaves it orphaned, so take it back out.
             try:
                 self.io.delete(path)
             except:
                 pass
-            raise Error(
-                "iceberg: table already exists: " + namespace + "." + name
-            )
+            if is_unique_violation(e):
+                raise Error(
+                    "iceberg: table already exists: " + namespace + "." + name
+                )
+            raise e
 
         return Table(m^, path^, self.io.copy(), namespace + "." + name)
 
@@ -529,15 +580,15 @@ struct SqlCatalog(Movable):
         """Remove the catalog row. Matches PyIceberg's `SqlCatalog`: the data
         and metadata files are left in place — use `purge_table` semantics at
         a higher layer if the files themselves need to go."""
-        var stmt = self.db.prepare(
-            "DELETE FROM iceberg_tables WHERE catalog_name=? AND"
-            " table_namespace=? AND table_name=?"
+        var args: List[String] = [self.name, namespace, name]
+        var affected = self.driver.execute(
+            (
+                "DELETE FROM iceberg_tables WHERE catalog_name=? AND"
+                " table_namespace=? AND table_name=?"
+            ),
+            args,
         )
-        stmt.bind_text(1, self.name)
-        stmt.bind_text(2, namespace)
-        stmt.bind_text(3, name)
-        _ = stmt.step()
-        if self._changes() < 1:
+        if affected < 1:
             raise Error(
                 "iceberg: table does not exist: " + namespace + "." + name
             )
@@ -551,22 +602,33 @@ struct SqlCatalog(Movable):
     ) raises -> Table:
         if not self.namespace_exists(to_namespace):
             raise Error("iceberg: namespace does not exist: " + to_namespace)
+        var args: List[String] = [
+            to_namespace,
+            to_name,
+            self.name,
+            from_namespace,
+            from_name,
+        ]
+        var affected: Int
         try:
-            var stmt = self.db.prepare(
-                "UPDATE iceberg_tables SET table_namespace=?, table_name=?"
-                " WHERE catalog_name=? AND table_namespace=? AND table_name=?"
+            affected = self.driver.execute(
+                (
+                    "UPDATE iceberg_tables SET table_namespace=?, table_name=?"
+                    " WHERE catalog_name=? AND table_namespace=? AND"
+                    " table_name=?"
+                ),
+                args,
             )
-            stmt.bind_text(1, to_namespace)
-            stmt.bind_text(2, to_name)
-            stmt.bind_text(3, self.name)
-            stmt.bind_text(4, from_namespace)
-            stmt.bind_text(5, from_name)
-            _ = stmt.step()
-        except:
-            raise Error(
-                "iceberg: table already exists: " + to_namespace + "." + to_name
-            )
-        if self._changes() < 1:
+        except e:
+            if is_unique_violation(e):
+                raise Error(
+                    "iceberg: table already exists: "
+                    + to_namespace
+                    + "."
+                    + to_name
+                )
+            raise e
+        if affected < 1:
             raise Error(
                 "iceberg: table does not exist: "
                 + from_namespace
@@ -588,19 +650,26 @@ struct SqlCatalog(Movable):
         <old_location>`. `old_location` is the value this attempt's read saw,
         so zero rows affected means another commit already moved it — the
         same guard PyIceberg's `SqlCatalog.commit_table` uses."""
-        var stmt = self.db.prepare(
-            "UPDATE iceberg_tables SET metadata_location=?,"
-            " previous_metadata_location=? WHERE catalog_name=? AND"
-            " table_namespace=? AND table_name=? AND metadata_location=?"
+        var args: List[String] = [
+            new_location,
+            old_location,
+            self.name,
+            namespace,
+            name,
+            old_location,
+        ]
+        return (
+            self.driver.execute(
+                (
+                    "UPDATE iceberg_tables SET metadata_location=?,"
+                    " previous_metadata_location=? WHERE catalog_name=? AND"
+                    " table_namespace=? AND table_name=? AND"
+                    " metadata_location=?"
+                ),
+                args,
+            )
+            >= 1
         )
-        stmt.bind_text(1, new_location)
-        stmt.bind_text(2, old_location)
-        stmt.bind_text(3, self.name)
-        stmt.bind_text(4, namespace)
-        stmt.bind_text(5, name)
-        stmt.bind_text(6, old_location)
-        _ = stmt.step()
-        return self._changes() >= 1
 
     def commit_append(
         mut self,

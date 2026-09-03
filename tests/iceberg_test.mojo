@@ -44,6 +44,12 @@ from iceberg.catalog.sql import (
     SqlCatalog,
     sqlite_path_from_uri,
 )
+from iceberg.catalog._sqldriver import (
+    SqlDriver,
+    _placeholders,
+    is_postgres_uri,
+    is_unique_violation,
+)
 from iceberg.puffin import (
     BLOB_DELETION_VECTOR_V1,
     BlobMetadata,
@@ -3592,9 +3598,56 @@ def write_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
     return batch_of([ids^, region^, amount^, ts^, ok^])
 
 
-def fresh_sql_catalog(scenario: String) raises -> SqlCatalog:
-    """A SQL catalog of this test's own: a fresh sqlite file and warehouse."""
-    var root = WRITE_ROOT + "/sql-" + scenario
+comptime SQLITE_BACKEND = String("sqlite")
+comptime POSTGRES_BACKEND = String("postgres")
+
+
+def postgres_test_dsn() -> String:
+    """The throwaway PostgreSQL server `tests/run_tests.sh` started, if any."""
+    return getenv("POSTGRES_TEST_DSN", "")
+
+
+def sql_catalog_backends() raises -> List[String]:
+    """Which databases the SQL-catalog tests run against this time.
+
+    Always sqlite, which needs nothing. PostgreSQL as well when
+    `$POSTGRES_TEST_DSN` names a server — `tests/run_tests.sh` starts one from
+    the conda `postgresql` package and exports it. When it does not, the
+    PostgreSQL half prints why it is being skipped rather than passing
+    silently.
+
+    Returns:
+        The backend names to loop the test body over.
+    """
+    var out: List[String] = [SQLITE_BACKEND]
+    if postgres_test_dsn() != "":
+        out.append(POSTGRES_BACKEND)
+    else:
+        print(
+            "        (postgres: $POSTGRES_TEST_DSN is unset, so only the"
+            " sqlite half of this test ran)"
+        )
+    return out^
+
+
+def fresh_sql_catalog(
+    scenario: String, backend: String = SQLITE_BACKEND
+) raises -> SqlCatalog:
+    """A SQL catalog of this test's own: a fresh database and warehouse.
+
+    On sqlite that is a file nobody else has touched. On PostgreSQL the
+    server is shared — one throwaway cluster per test run — so the two
+    catalog tables are dropped first instead, which is what makes each test
+    independent of the ones before it.
+
+    Args:
+        scenario: A name unique to the calling test.
+        backend: `"sqlite"` or `"postgres"`.
+
+    Returns:
+        The catalog, with both tables freshly created and empty.
+    """
+    var root = WRITE_ROOT + "/sql-" + backend + "-" + scenario
     var io = FileIO.local()
     try:
         var existing = io.list(root)
@@ -3603,6 +3656,14 @@ def fresh_sql_catalog(scenario: String) raises -> SqlCatalog:
     except:
         pass
     makedirs(root, exist_ok=True)
+
+    if backend == POSTGRES_BACKEND:
+        var dsn = postgres_test_dsn()
+        var driver = SqlDriver(dsn)
+        _ = driver.execute("DROP TABLE IF EXISTS iceberg_tables")
+        _ = driver.execute("DROP TABLE IF EXISTS iceberg_namespace_properties")
+        return SqlCatalog.local("default", dsn, root + "/warehouse")
+
     var db_path = root + "/catalog.db"
     try:
         io.delete(db_path)
@@ -3626,8 +3687,46 @@ def test_sqlite_path_from_uri() raises:
     )
 
 
-def test_sql_catalog_namespaces_and_properties() raises:
-    var cat = fresh_sql_catalog("namespaces")
+def test_sql_driver_recognises_a_postgres_uri() raises:
+    assert_true(is_postgres_uri("postgresql://user@host/db"))
+    assert_true(is_postgres_uri("postgres://user@host/db"))
+    assert_false(is_postgres_uri("sqlite:///catalog.db"))
+    assert_false(is_postgres_uri("/already/a/path.db"))
+    assert_false(is_postgres_uri(":memory:"))
+
+
+def test_sql_driver_rewrites_placeholders_for_postgres() raises:
+    """`?` becomes `$n`, except inside a single-quoted literal — which is
+    what `LIKE ? ESCAPE '!'` needs, and what a literal holding a question
+    mark would need."""
+    assert_equal(
+        _placeholders(
+            "SELECT 1 FROM iceberg_tables WHERE catalog_name=? AND"
+            " (table_namespace=? OR table_namespace LIKE ? ESCAPE '!')"
+            " LIMIT 1"
+        ),
+        (
+            "SELECT 1 FROM iceberg_tables WHERE catalog_name=$1 AND"
+            " (table_namespace=$2 OR table_namespace LIKE $3 ESCAPE '!')"
+            " LIMIT 1"
+        ),
+    )
+    assert_equal(
+        _placeholders("INSERT INTO t VALUES (?,?,?,?,NULL)"),
+        "INSERT INTO t VALUES ($1,$2,$3,$4,NULL)",
+    )
+    # A `?` inside a literal is data, not a placeholder.
+    assert_equal(
+        _placeholders("SELECT ? WHERE x = 'a?b' AND y = ?"),
+        "SELECT $1 WHERE x = 'a?b' AND y = $2",
+    )
+    # `''` is an escaped quote: the scan stays inside the literal.
+    assert_equal(_placeholders("SELECT 'it''s ?' , ?"), "SELECT 'it''s ?' , $1")
+    assert_equal(_placeholders("SELECT 1"), "SELECT 1")
+
+
+def _sql_catalog_namespaces_and_properties_on(backend: String) raises:
+    var cat = fresh_sql_catalog("namespaces", backend)
     assert_false(cat.namespace_exists("db"))
     cat.create_namespace("db")
     assert_true(cat.namespace_exists("db"))
@@ -3683,8 +3782,13 @@ def test_sql_catalog_namespaces_and_properties() raises:
     assert_false(cat.namespace_exists("db"))
 
 
-def test_sql_catalog_tables_crud() raises:
-    var cat = fresh_sql_catalog("tables")
+def test_sql_catalog_namespaces_and_properties() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_namespaces_and_properties_on(backend)
+
+
+def _sql_catalog_tables_crud_on(backend: String) raises:
+    var cat = fresh_sql_catalog("tables", backend)
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     assert_false(cat.table_exists("db", "orders"))
@@ -3719,8 +3823,13 @@ def test_sql_catalog_tables_crud() raises:
         cat.drop_table("db", "orders2")
 
 
-def test_sql_catalog_append_delete_overwrite() raises:
-    var cat = fresh_sql_catalog("commit")
+def test_sql_catalog_tables_crud() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_tables_crud_on(backend)
+
+
+def _sql_catalog_append_delete_overwrite_on(backend: String) raises:
+    var cat = fresh_sql_catalog("commit", backend)
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     _ = cat.create_table(
@@ -3759,8 +3868,13 @@ def test_sql_catalog_append_delete_overwrite() raises:
     assert_equal(len(delete_files_of(final)), 0)
 
 
-def test_sql_catalog_dynamic_partition_overwrite() raises:
-    var cat = fresh_sql_catalog("dynamic")
+def test_sql_catalog_append_delete_overwrite() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_append_delete_overwrite_on(backend)
+
+
+def _sql_catalog_dynamic_partition_overwrite_on(backend: String) raises:
+    var cat = fresh_sql_catalog("dynamic", backend)
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     var spec = PartitionSpec(
@@ -3788,7 +3902,14 @@ def test_sql_catalog_dynamic_partition_overwrite() raises:
     assert_equal(cat.load_table("db", "t").scan().to_table().num_rows(), 9)
 
 
-def test_sql_catalog_guarded_commit_rejects_a_stale_pointer() raises:
+def test_sql_catalog_dynamic_partition_overwrite() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_dynamic_partition_overwrite_on(backend)
+
+
+def _sql_catalog_guarded_commit_rejects_a_stale_pointer_on(
+    backend: String,
+) raises:
     """The atomic swap PyIceberg's `SqlCatalog` performs: an `UPDATE ... WHERE
     metadata_location = <the value this attempt read>` that a concurrent
     writer's completed commit makes affect zero rows.
@@ -3799,7 +3920,7 @@ def test_sql_catalog_guarded_commit_rejects_a_stale_pointer() raises:
     location it originally read. It must fail without touching the row a
     successful commit just wrote.
     """
-    var cat = fresh_sql_catalog("conflict")
+    var cat = fresh_sql_catalog("conflict", backend)
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     _ = cat.create_table("db", "t", schema)
@@ -3821,11 +3942,16 @@ def test_sql_catalog_guarded_commit_rejects_a_stale_pointer() raises:
     assert_equal(still.scan().to_table().num_rows(), 6)
 
 
-def test_sql_catalog_retries_past_its_own_stale_read() raises:
+def test_sql_catalog_guarded_commit_rejects_a_stale_pointer() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_guarded_commit_rejects_a_stale_pointer_on(backend)
+
+
+def _sql_catalog_retries_past_its_own_stale_read_on(backend: String) raises:
     """`commit_append` reloads and retries on a lost race rather than
     surfacing it — the same shape as the REST catalog's 409 handling, just
     against the guarded `UPDATE` instead of a status code."""
-    var cat = fresh_sql_catalog("retry")
+    var cat = fresh_sql_catalog("retry", backend)
     cat.create_namespace("db")
     var schema = Schema.parse(WRITE_SCHEMA)
     _ = cat.create_table("db", "t", schema)
@@ -3840,6 +3966,71 @@ def test_sql_catalog_retries_past_its_own_stale_read() raises:
     var final = cat.load_table("db", "t")
     assert_equal(len(final.metadata.snapshots), 2)
     assert_equal(final.scan().to_table().num_rows(), 6)
+
+
+def test_sql_catalog_retries_past_its_own_stale_read() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_retries_past_its_own_stale_read_on(backend)
+
+
+def _sql_catalog_reports_a_duplicate_key_on(backend: String) raises:
+    """A second row for the same primary key must be recognisable as a
+    duplicate, not merely as "something failed".
+
+    `create_table` guards with `table_exists` first, so this path is only
+    reached when two writers race — and it is the one place where the two
+    engines report differently: PostgreSQL raises SQLSTATE `23505`, SQLite
+    says `UNIQUE constraint failed`. `is_unique_violation` is what makes both
+    of those "the table already exists" rather than an unexplained error, so
+    it is checked directly against a real duplicate on both.
+    """
+    var cat = fresh_sql_catalog("dupkey", backend)
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table("db", "orders", schema)
+
+    var args: List[String] = ["default", "db", "orders", "somewhere-else"]
+    var raised = False
+    try:
+        _ = cat.driver.execute(
+            (
+                "INSERT INTO iceberg_tables (catalog_name, table_namespace,"
+                " table_name, metadata_location, previous_metadata_location)"
+                " VALUES (?,?,?,?,NULL)"
+            ),
+            args,
+        )
+    except e:
+        raised = True
+        assert_true(
+            is_unique_violation(e),
+            "a duplicate primary key must be recognised as one, got: "
+            + String(e),
+        )
+    assert_true(raised, "the duplicate INSERT must be refused")
+
+    # An error that is *not* a duplicate must not be mistaken for one.
+    var none_args = List[String]()
+    try:
+        _ = cat.driver.execute(
+            "SELECT no_such_column FROM iceberg_tables", none_args
+        )
+        assert_true(False, "selecting a column that does not exist must fail")
+    except other:
+        assert_false(
+            is_unique_violation(other),
+            "an unrelated error must not read as a duplicate key",
+        )
+
+    # The connection is still usable afterwards — on PostgreSQL a failed
+    # statement outside a block leaves the session perfectly fine, and that is
+    # what the catalog relies on when it retries.
+    assert_true(cat.table_exists("db", "orders"))
+
+
+def test_sql_catalog_reports_a_duplicate_key() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_reports_a_duplicate_key_on(backend)
 
 
 def fresh_catalog(scenario: String) raises -> FilesystemCatalog:
