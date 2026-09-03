@@ -134,6 +134,10 @@ jobs:
         working-directory: iceberg.mojo
         run: pixi run -e ${{ matrix.env }} check
 
+      - name: Lint (mojolint --lsp)
+        working-directory: iceberg.mojo
+        run: pixi run -e ${{ matrix.env }} lint
+
       # Through `pixi run`, because the CLI dlopens the objectstore/zstd/lz4
       # shims from $CONDA_PREFIX/lib and that variable only exists inside the
       # environment.

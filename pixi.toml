@@ -55,6 +55,10 @@ postgresql = ">=16,<19"
 psycopg = ">=3.2"
 # The REST-catalog mock server and the fixture/oracle tooling.
 python = ">=3.10,<3.14"
+# Added by `pixi shelf add lint-mojo`: the linter comes from GitHub as a pixi
+# source dependency pinned at the revision mojoshelf published, and builds
+# the `mojolint` executable into every environment next to mojo-lsp-server.
+lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "2a12807b7847984aff2c8bf148b0eb7515a99844" }
 
 [activation.env]
 # sqlite.mojo's package directory is `sqlite/` at its repo root, not `src/`;
@@ -66,8 +70,13 @@ ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../hashes.mojo/src -I ../av
 # PostgreSQL cluster when available), runs everything, tears them down. See
 # tests/run_tests.sh.
 test = { cmd = "bash tests/run_tests.sh" }
+# mojolint (lint-mojo, below): the origin and threading mistakes the compiler
+# lets through, with mojo-lsp-server behind the rules. Exit 1 on findings.
+# tools/ is left out: tools/make_fixtures.mojo also imports iceberg_rs from
+# ../iceberg-rs.mojo/src, a sibling CI does not check out for this repo.
+lint = { cmd = "mojolint --lsp $ICEBERG_INCLUDES src tests bench" }
 # CI runs `check`: the tests plus a build of the CLI, so a broken CLI fails too.
-check = { depends-on = ["test", "cli"] }
+check = { depends-on = ["test", "cli", "lint"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
 bench = { cmd = "bash bench/run_bench.sh" }
