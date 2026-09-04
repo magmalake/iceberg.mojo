@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.6.1"
+version = "0.6.2"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -58,7 +58,7 @@ python = ">=3.10,<3.14"
 # Added by `pixi shelf add lint-mojo`: the linter comes from GitHub as a pixi
 # source dependency pinned at the revision mojoshelf published, and builds
 # the `mojolint` executable into every environment next to mojo-lsp-server.
-lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "2a12807b7847984aff2c8bf148b0eb7515a99844" }
+lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "3fa66644756c1de7aece83e5a89375323b6e0ce7" }
 
 [activation.env]
 # sqlite.mojo's package directory is `sqlite/` at its repo root, not `src/`;
@@ -123,7 +123,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.6.1"
+version = "0.6.2"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }

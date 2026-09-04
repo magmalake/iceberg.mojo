@@ -47,7 +47,7 @@ struct Snapshot(Copyable, Movable, Writable):
     var timestamp_ms: Int64
     var manifest_list: String
     var manifests: List[String]
-    """v1 only: an inline manifest list. Empty when `manifest-list` is set."""
+    """V1 only: an inline manifest list. Empty when `manifest-list` is set."""
     var summary: Dict[String, String]
     var schema_id: Int
     var has_schema_id: Bool
@@ -388,7 +388,7 @@ struct TableMetadata(Copyable, Movable):
     var table_uuid: String
     var location: String
     var has_location: Bool
-    """v4 makes `location` optional; v1-v3 always carry it."""
+    """V4 makes `location` optional; v1-v3 always carry it."""
     var last_sequence_number: Int64
     var last_updated_ms: Int64
     var last_column_id: Int

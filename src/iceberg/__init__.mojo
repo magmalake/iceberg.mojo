@@ -1,4 +1,4 @@
-"""iceberg.mojo — native Apache Iceberg: metadata, planning, and rows.
+"""Native Apache Iceberg: metadata, planning, and rows — the `iceberg` package of iceberg.mojo.
 
 Part of magmalake: data lake building blocks in Mojo.
 

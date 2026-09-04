@@ -1863,7 +1863,7 @@ def read_data_file(
                     leaf_arrays,
                     n,
                 )
-            var all_kept = True
+            var all_kept: Bool
             if has_position_deletes:
                 for r in range(n):
                     var p_at = Int(base) + r

@@ -396,7 +396,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/noarch/mojo-python-1.1.0.dev2026082905-release.conda
       - conda_source: brotli-mojo[e2c361bc] @ git+https://github.com/magmalake/brotli.mojo#336ea0ab0ac1347276265a495a7fcaf79059b3e7
       - conda_source: brotli-shim[e2637359] @ git+https://github.com/magmalake/brotli.mojo?subdirectory=shim#336ea0ab0ac1347276265a495a7fcaf79059b3e7
-      - conda_source: lint-mojo[bcfc8d37] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
+      - conda_source: lint-mojo[8b53559d] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
       - conda_source: lz4-mojo[4a5b68cc] @ git+https://github.com/magmalake/lz4.mojo#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: lz4-shim[536833ef] @ git+https://github.com/magmalake/lz4.mojo?subdirectory=shim#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: objectstore-mojo[f9d8170c] @ git+https://github.com/magmalake/objectstore.mojo#3142f9e41c496473021ebc9681cec11231d1723b
@@ -740,7 +740,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/osx-arm64/mojo-compiler-1.1.0.dev2026082905-release.conda
       - conda_source: brotli-mojo[2e8dbcd5] @ git+https://github.com/magmalake/brotli.mojo#336ea0ab0ac1347276265a495a7fcaf79059b3e7
       - conda_source: brotli-shim[001d41b5] @ git+https://github.com/magmalake/brotli.mojo?subdirectory=shim#336ea0ab0ac1347276265a495a7fcaf79059b3e7
-      - conda_source: lint-mojo[6339f348] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
+      - conda_source: lint-mojo[7894a15c] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
       - conda_source: lz4-mojo[6d90dd8d] @ git+https://github.com/magmalake/lz4.mojo#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: lz4-shim[487e49ef] @ git+https://github.com/magmalake/lz4.mojo?subdirectory=shim#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: objectstore-mojo[144fafe7] @ git+https://github.com/magmalake/objectstore.mojo#3142f9e41c496473021ebc9681cec11231d1723b
@@ -834,7 +834,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/noarch/mojo-python-1.0.0-release.conda
       - conda_source: brotli-mojo[e2c361bc] @ git+https://github.com/magmalake/brotli.mojo#336ea0ab0ac1347276265a495a7fcaf79059b3e7
       - conda_source: brotli-shim[e2637359] @ git+https://github.com/magmalake/brotli.mojo?subdirectory=shim#336ea0ab0ac1347276265a495a7fcaf79059b3e7
-      - conda_source: lint-mojo[bcfc8d37] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
+      - conda_source: lint-mojo[8b53559d] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
       - conda_source: lz4-mojo[4a5b68cc] @ git+https://github.com/magmalake/lz4.mojo#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: lz4-shim[536833ef] @ git+https://github.com/magmalake/lz4.mojo?subdirectory=shim#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: objectstore-mojo[f9d8170c] @ git+https://github.com/magmalake/objectstore.mojo#3142f9e41c496473021ebc9681cec11231d1723b
@@ -915,7 +915,7 @@ environments:
       - conda: https://conda.modular.com/max-nightly/osx-arm64/mojo-compiler-1.0.0-release.conda
       - conda_source: brotli-mojo[2e8dbcd5] @ git+https://github.com/magmalake/brotli.mojo#336ea0ab0ac1347276265a495a7fcaf79059b3e7
       - conda_source: brotli-shim[001d41b5] @ git+https://github.com/magmalake/brotli.mojo?subdirectory=shim#336ea0ab0ac1347276265a495a7fcaf79059b3e7
-      - conda_source: lint-mojo[6339f348] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
+      - conda_source: lint-mojo[7894a15c] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
       - conda_source: lz4-mojo[6d90dd8d] @ git+https://github.com/magmalake/lz4.mojo#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: lz4-shim[487e49ef] @ git+https://github.com/magmalake/lz4.mojo?subdirectory=shim#177625f88711fa4d9684583cd5f7c38940b22587
       - conda_source: objectstore-mojo[144fafe7] @ git+https://github.com/magmalake/objectstore.mojo#3142f9e41c496473021ebc9681cec11231d1723b
@@ -11198,8 +11198,8 @@ packages:
   - conda: https://conda.anaconda.org/conda-forge/linux-64/libgcc-16.2.0-ha9f2e26_4.conda
   - conda: https://conda.anaconda.org/conda-forge/linux-64/libgomp-16.2.0-he0feb66_4.conda
   - conda: https://conda.anaconda.org/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_4.conda
-- conda_source: lint-mojo[6339f348] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
-  version: 0.1.1
+- conda_source: lint-mojo[7894a15c] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
+  version: 0.1.2
   build: h60d57d3_0
   subdir: osx-arm64
   variants:
@@ -11250,8 +11250,8 @@ packages:
   - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hf451053_7.conda
   - conda: https://conda.modular.com/max-nightly/noarch/mojo-python-1.0.0-release.conda
   - conda: https://conda.modular.com/max-nightly/osx-arm64/mojo-compiler-1.0.0-release.conda
-- conda_source: lint-mojo[bcfc8d37] @ git+https://github.com/magmalake/lint.mojo?rev=2a12807b7847984aff2c8bf148b0eb7515a99844#2a12807b7847984aff2c8bf148b0eb7515a99844
-  version: 0.1.1
+- conda_source: lint-mojo[8b53559d] @ git+https://github.com/magmalake/lint.mojo?rev=3fa66644756c1de7aece83e5a89375323b6e0ce7#3fa66644756c1de7aece83e5a89375323b6e0ce7
+  version: 0.1.2
   build: hb0f4dca_0
   subdir: linux-64
   variants:

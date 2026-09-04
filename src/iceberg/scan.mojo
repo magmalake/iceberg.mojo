@@ -228,7 +228,7 @@ struct _ConcatCtx(Movable):
 
 
 def _concat_one_column(c: Int, ctx: OpaquePtr) -> None:
-    var x = UnsafePointer[_ConcatCtx, MutUntrackedOrigin](
+    var x = Pointer[_ConcatCtx, MutUntrackedOrigin](
         unsafe_from_address=Int(ctx)
     )
     try:
@@ -287,7 +287,7 @@ def _concat_parts(
         w = ncols
     parallel_for[_concat_one_column](
         n_tasks=ncols,
-        ctx=opaque_ptr(Int(UnsafePointer(to=ctx))),
+        ctx=opaque_ptr(Int(Pointer(to=ctx))),
         num_workers=w,
     )
     for k in range(len(ctx.errors)):
@@ -304,7 +304,7 @@ def _scan_one_file(i: Int, ctx: OpaquePtr) -> None:
     after the join, in task order, so the message a scan fails with does not
     depend on which worker lost.
     """
-    var c = UnsafePointer[_FileScanCtx, MutUntrackedOrigin](
+    var c = Pointer[_FileScanCtx, MutUntrackedOrigin](
         unsafe_from_address=Int(ctx)
     )
     try:
@@ -702,7 +702,7 @@ struct TableScan(Copyable, Movable):
         )
         parallel_for[_scan_one_file](
             n_tasks=n,
-            ctx=opaque_ptr(Int(UnsafePointer(to=ctx))),
+            ctx=opaque_ptr(Int(Pointer(to=ctx))),
             num_workers=workers,
         )
         # `ctx` is mentioned here, after the join, on purpose: Mojo destroys a
