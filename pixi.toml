@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.6.3"
+version = "0.6.4"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -123,7 +123,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.6.3"
+version = "0.6.4"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -145,7 +145,7 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "d6cd38b96d3370b313ce7913a4a1645d6e46e663" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "0a50f85422fd301dcd4f827efb99b3bb9df1abef" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "e6dce017ba654de4bb96b9a06215faa2e09dc320" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
@@ -161,7 +161,7 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "d6cd38b96d3370b313ce7913a4a1645d6e46e663" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "0a50f85422fd301dcd4f827efb99b3bb9df1abef" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "e6dce017ba654de4bb96b9a06215faa2e09dc320" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
