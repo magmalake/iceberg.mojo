@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.6.2"
+version = "0.6.3"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -38,7 +38,7 @@ libcurl = ">=8,<9"
 # It matters here and not for the other siblings because the stable toolchain
 # resolves `sqlite` to this package's installed .mojopkg rather than to the
 # `-I ../sqlite.mojo` source checkout.
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "7af88b4665f9fe942ec255fb5d116ecf7ff591aa" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "2364a6e895277e8520b60e5666a0491bd7871bb1" }
 libsqlite = ">=3.45,<4"
 sqlite = ">=3.45,<4"
 # postgres.mojo, the SQL catalog's other backend, on the same terms: the git
@@ -123,7 +123,7 @@ stable = ["stable"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.6.2"
+version = "0.6.3"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -141,29 +141,29 @@ extra-args = ["-I", "$PREFIX/lib/mojo"]
 # ever resolve in this checkout.
 [package.host-dependencies]
 mojo-compiler = "==1.0.0"
-avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0df43fc9037b98c280f74b14a80c319bae4f2934" }
-hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "7f56128396cf7f4dc7620ac23dc0b725f4b8a26f" }
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627ee4263c756f679369c1b3f3ca5f7c" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "3142f9e41c496473021ebc9681cec11231d1723b" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "0e6c3de482e588c1aa115f4566f8e3f397a32a90" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "d6cd38b96d3370b313ce7913a4a1645d6e46e663" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "e6dce017ba654de4bb96b9a06215faa2e09dc320" }
-roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "1e62801d5b4ef8e3c901ead1cc2047c3a9e6ca62" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
-thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "5c474cbc4ccec1d98f5750598786d4e93d0fd931" }
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "7af88b4665f9fe942ec255fb5d116ecf7ff591aa" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "f4c3bdddd0c06bbad0c49c2b05c7afc30e7aa67a" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "2364a6e895277e8520b60e5666a0491bd7871bb1" }
 
 [package.build-dependencies]
 mojo-compiler = "==1.0.0"
 
 [package.run-dependencies]
 mojo-compiler = ">=1.0.0,<2"
-avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0df43fc9037b98c280f74b14a80c319bae4f2934" }
-hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "7f56128396cf7f4dc7620ac23dc0b725f4b8a26f" }
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627ee4263c756f679369c1b3f3ca5f7c" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "3142f9e41c496473021ebc9681cec11231d1723b" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "0e6c3de482e588c1aa115f4566f8e3f397a32a90" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "d6cd38b96d3370b313ce7913a4a1645d6e46e663" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "e6dce017ba654de4bb96b9a06215faa2e09dc320" }
-roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "1e62801d5b4ef8e3c901ead1cc2047c3a9e6ca62" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
-thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "5c474cbc4ccec1d98f5750598786d4e93d0fd931" }
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "7af88b4665f9fe942ec255fb5d116ecf7ff591aa" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "f4c3bdddd0c06bbad0c49c2b05c7afc30e7aa67a" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "2364a6e895277e8520b60e5666a0491bd7871bb1" }
