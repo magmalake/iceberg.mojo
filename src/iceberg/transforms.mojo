@@ -319,7 +319,7 @@ def _paren_int(s: String) raises -> Int:
 
 # ── partition specs ─────────────────────────────────────────────────────────
 comptime PARTITION_DATA_ID_START: Int = 1000
-"""v1 assigned partition field ids sequentially from 1000 with no record."""
+"""V1 assigned partition field ids sequentially from 1000 with no record."""
 
 
 @fieldwise_init
@@ -328,7 +328,7 @@ struct PartitionField(Copyable, Movable, Writable):
 
     var source_id: Int
     var source_ids: List[Int]
-    """v3 multi-argument transforms. Single-source specs mirror `source_id`."""
+    """V3 multi-argument transforms. Single-source specs mirror `source_id`."""
     var field_id: Int
     var name: String
     var transform: Transform
@@ -432,7 +432,7 @@ struct PartitionSpec(Copyable, Movable):
 
     @staticmethod
     def from_fields_json(doc: Json, i: Int, spec_id: Int) raises -> Self:
-        """v1's bare `partition-spec` array (no wrapping object)."""
+        """V1's bare `partition-spec` array (no wrapping object)."""
         var fields = List[PartitionField]()
         var next_v1_id = PARTITION_DATA_ID_START
         for k in range(doc.size(i)):

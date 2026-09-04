@@ -249,7 +249,7 @@ def plan_row_deletes(
 
         var residual = parse_filter(task.residual)
         var trivial = residual.is_true(residual.root)
-        var positions = List[UInt64]()
+        var positions: List[UInt64]
         var live: Int64 = task.data_file.record_count - Int64(len(existing))
         if trivial and not has_equality:
             # The partition predicate alone proves every row matches: no read.

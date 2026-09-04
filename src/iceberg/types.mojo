@@ -160,23 +160,23 @@ struct TypeNode(Copyable, Movable):
     var kind: UInt8
     var prim: UInt8
     var precision: Int
-    """decimal(P, S)"""
+    """`decimal(P, S)`."""
     var scale: Int
     var length: Int
-    """fixed[L]"""
+    """`fixed[L]`."""
     var crs: String
-    """geometry(C) / geography(C, A)"""
+    """`geometry(C)` / `geography(C, A)`."""
     var algorithm: String
     var raw: String
     """Original spelling, for `P_UNRECOGNIZED` and for exact re-serialization."""
     var fields: List[NestedField]
-    """struct"""
+    """`struct`."""
     var element: Int
-    """list: element type index"""
+    """`list`: element type index."""
     var element_id: Int
     var element_required: Bool
     var key: Int
-    """map: key type index"""
+    """`map`: key type index."""
     var key_id: Int
     var value: Int
     var value_id: Int

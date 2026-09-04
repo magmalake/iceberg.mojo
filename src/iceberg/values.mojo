@@ -97,7 +97,7 @@ struct Datum(Copyable, Movable, Writable):
 
     @staticmethod
     def integral(kind: UInt8, v: Int64) -> Self:
-        """int/long/date/time/timestamp[_ns][tz] — all carried as Int64."""
+        """`int`/`long`/`date`/`time`/`timestamp[_ns][tz]` — all carried as Int64."""
         return Self(kind, v, 0.0, "", [], 0, 0, 0, True)
 
     @staticmethod
