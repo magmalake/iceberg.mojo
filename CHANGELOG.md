@@ -10,6 +10,12 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-09-07
+
+Pins parquet-mojo 0.8.0, whose `open_projected` / `needed_byte_ranges` this
+release is built on. Patch rather than minor: no API moved — the change is
+entirely in how `read_data_file` obtains its bytes.
+
 ### Changed
 - **A scan fetches the column chunks its projection reaches, not the whole
   file.** The bytes now arrive in two steps with the projection between them:
