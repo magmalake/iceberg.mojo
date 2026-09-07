@@ -10,6 +10,40 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Changed
+- **A scan fetches the column chunks its projection reaches, not the whole
+  file.** The bytes now arrive in two steps with the projection between them:
+  two range requests for the footer, then — once `file_fields` says which
+  leaves this scan decodes — the chunks those leaves live in. On the
+  eight-query [taxibench](https://github.com/magmalake/taxibench.example)
+  suite over 79.5M NYC-taxi rows, single-threaded, p50 of five in a process
+  per query, the total went from **4054.5 ms to 3228.3 ms** (−20%), against an
+  unchanged PyIceberg 0.11.1 at 4327.9 ms — 1.07x to **1.34x**. The two
+  queries that were behind are not any more: q1 444.5 ms → 289.2 ms (0.68x →
+  1.04x) and q8 919.7 ms → 780.1 ms (0.87x → 1.03x). q7, which projects all
+  nineteen columns, does not move (169.7 ms → 167.2 ms): there is nothing to
+  skip, and the two extra range requests cost nothing measurable. Every answer
+  is identical.
+
+  This is not a decoder improvement. A like-for-like column sweep — no filter,
+  so neither side reduces anything — put our per-column decode ~8.5% *cheaper*
+  than pyarrow's dataset scanner already; what we were paying was a ~228 ms
+  fixed cost against its ~0, and that cost was reading 47 MiB of every 60 MiB
+  file that nothing then decoded. See parquet.mojo#27.
+
+  `ParquetReader.needed_byte_ranges` is asked *after* `select_fields`, so what
+  is fetched is exactly what the reader will decode rather than a guess kept
+  in step with the plan by hand. Anything unexpected about the footer reads the
+  whole file instead, so the fast path is an optimisation and never a
+  correctness condition.
+
+- `ScanOptions.lazy` is retained and no longer read. It fetched the footer and
+  the row-group extents; a row group holds every column, so on a file of any
+  width that is the whole file minus its gaps, which is why it never paid for
+  itself. Fetching by column chunk does pay, so a scan now does it
+  unconditionally.
+
+
 ## [0.7.1] - 2026-09-07
 
 Filed under *Changed* because no API moved and every answer is identical, but
