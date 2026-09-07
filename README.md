@@ -131,7 +131,9 @@ The ZSTD and LZ4 codecs are needed because real Iceberg writers use them: of
 the 271 column chunks in this repo's own fixtures, **97 are ZSTD**.
 `threads.mojo` is what `ScanOptions.num_workers` spends: file scan tasks are
 shared-nothing, so a scan over many files is the obvious place for a second
-core.
+core — and when a scan touches too few files to use the budget, the remainder
+goes to parquet.mojo's own workers, which decode row groups and column chunks
+inside one file.
 
 ## Status
 
@@ -716,8 +718,57 @@ scaling at four workers on this machine for the same reason. `to_table` scales
 slightly worse than `to_batches` because the concatenation it adds is a second
 pass over every byte.
 
-A scan with a `limit` ignores `num_workers` and stays sequential: stopping
-early is only meaningful in order.
+A scan with a `limit` ignores the file axis and stays sequential: stopping
+early is only meaningful in order. It still reads each file it visits with the
+whole budget, on the second axis below.
+
+#### The second axis: inside one file
+
+Files are only one of the two axes a scan can spend threads on, and it is the
+one that runs out first. A query that touches a single data file has exactly
+one file scan task, so before parquet-mojo 0.7.0 it ran on one core however
+many workers were asked for — while pyarrow multithreaded across the row
+groups inside that same file.
+
+`num_workers` is therefore a budget for the scan rather than a count of files.
+`_worker_split` fills the file axis first, because file scan tasks are the
+coarser and the more independent unit, and hands whatever the plan is too
+narrow to use to `ParquetReader.num_workers`, which spends it on the *(row
+group, leaf)* pairs inside each file. The two never nest past the budget: with
+`w` workers over `n` files the split is `min(w, n)` files at once and `w //
+min(w, n)` threads in each, so `n >= w` — every plan wide enough to saturate
+the file axis on its own — reads one file per thread exactly as it always did.
+
+Measured against the 79.5M-row NYC-taxi table in
+[taxibench.example](https://github.com/magmalake/taxibench.example) (24 monthly
+files, ~1.3 GB, M4 with four performance cores; p50 of seven timed runs after a
+warm-up, p90 in brackets), on the query that reads all 19 columns of one
+3.5M-row file:
+
+| workers | q7, one file, 19 columns | speedup |
+|---|---|---|
+| 1 | 181.7 ms (183.9) | 1.00× |
+| 2 | 113.4 ms (116.3) | 1.60× |
+| 3 | 90.3 ms (91.8) | 2.01× |
+| 4 | 78.4 ms (79.1) | 2.32× |
+| 6 | 71.7 ms (77.1) | 2.54× |
+| 8 | 67.8 ms (68.8) | 2.68× |
+| 10 | **64.4 ms** (66.2) | 2.82× |
+
+This query did not move at all before — 187 ms on one worker and 191 ms on
+ten, because one file is one task. PyIceberg 0.11.1 reads it in 255 ms on one
+thread and 88.6 ms on ten, so the same query moved from **0.46×** to
+**1.36×** its speed, and iceberg.mojo is now the faster of the two at every
+worker count rather than only at one. The 24-file queries take the unchanged
+path and did not move.
+
+**The bend is at four workers, and the ceiling is what stays sequential.**
+Fitting Amdahl's law to that ladder puts the serial fraction at 25–28%, which
+predicts a ceiling near 3.5–4×, and four is this machine's performance-core
+count rather than its ten total. That quarter of the work is what a scan does
+on the calling thread after the decode returns: casting each batch to the
+table's current types, evaluating the residual, applying deletes and
+assembling Arrow. That, not the worker count, is where the next factor is.
 
 ### Nested columns
 
@@ -926,7 +977,7 @@ def main() raises:
     options.lazy = True
 
     var wide = ScanOptions()
-    wide.num_workers = 0        # one file-scan worker per core; 1 is default
+    wide.num_workers = 0        # one worker per core; 1 is the default
 
     var rows = (
         t.scan()

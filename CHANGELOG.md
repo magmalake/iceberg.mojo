@@ -10,6 +10,22 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Changed
+- **`ScanOptions.num_workers` is now a thread budget for the whole scan, not a
+  file count.** It used to fan out over planned data files and nothing else, so
+  a query that touched one file ran on one core however many workers were
+  asked for. The budget is now filled on the file axis first, and whatever the
+  plan is too narrow to use is handed to `ParquetReader.num_workers`, which
+  spends it on the *(row group, leaf)* pairs inside each file. A plan with at
+  least as many files as workers is unchanged, down to reading each file on
+  one thread, and no scan reorders rows at any worker count. On the 79.5M-row
+  NYC-taxi benchmark, an all-columns scan of a single 3.5M-row file went from
+  183 ms to 64 ms (2.8×) at ten workers — from 0.46× to 1.36× the speed of
+  PyIceberg 0.11.1 on that query — while the 24-file queries did not move. The
+  ladder bends at four workers, the machine's performance-core count, against
+  a serial fraction of 25–28%: per-batch casting, filtering and Arrow assembly
+  all still happen on the calling thread.
+
 ## [0.6.0] - 2026-09-02
 
 ### Added

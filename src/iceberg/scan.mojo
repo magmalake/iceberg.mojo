@@ -106,6 +106,42 @@ struct _PendingDelete(Copyable, Movable):
     var spec_unpartitioned: Bool
 
 
+def _worker_split(num_workers: Int, n_files: Int) -> Tuple[Int, Int]:
+    """A scan's thread budget, divided into files-at-once and threads-per-file.
+
+    A scan has two nested axes it can spend threads on: the planned data files,
+    which this module fans out over, and the *(row group, leaf)* pairs inside
+    one file, which `ParquetReader.num_workers` fans out over. The file axis is
+    the coarser and the cheaper — tasks are shared-nothing whole files — so it
+    is filled first, and only what it cannot use is passed inward. Splitting
+    the budget evenly instead would be strictly worse at both ends: it would
+    leave half the threads idle on a 24-file scan, where the file axis alone
+    already saturates, and it would cap a one-file scan at half the machine.
+
+    Concretely, with `w` resolved workers and `n` files:
+
+    * `n >= w` — every worker gets a file and there is nothing left over, so
+      each file is read on one thread. This is byte-for-byte the behaviour
+      that existed before the second axis was wired up.
+    * `n < w` — the file axis is `n` wide and `w - n` threads would otherwise
+      idle, so each file is read with `w // n` of them. A single-file scan is
+      the limiting case and gets the whole budget inside the reader, which is
+      the case this exists for.
+
+    The product `n_files_at_once * per_file` never exceeds `w`, so the nested
+    `parallel_for`s cannot oversubscribe the machine between them.
+    """
+    var w = num_workers
+    if w == 0:
+        w = num_cpus()
+    if w < 1:
+        w = 1
+    if n_files <= 0:
+        return (0, w)
+    var at_once = w if w < n_files else n_files
+    return (at_once, w // at_once)
+
+
 struct _FileScanCtx(Movable):
     """Everything a parallel file-scan task reads, and where it writes.
 
@@ -660,14 +696,20 @@ struct TableScan(Copyable, Movable):
         `tasks[k]`, so the rows a scan returns and the order they come in are
         the same whichever path ran. A `limit` never takes the parallel path;
         `to_table`/`to_batches` handle that case themselves.
+
+        The file axis is only as wide as the plan, so on its own it leaves the
+        budget's remainder idle whenever a query touches fewer files than there
+        are workers — a single-file scan ran on exactly one core however many
+        were asked for. `_worker_split` hands that remainder to the reader,
+        which spends it on the *(row group, leaf)* pairs inside each file; see
+        its docstring for why the two are not simply halved.
         """
         var specs = self._specs_for(tasks)
         var n = len(tasks)
-        var workers = options.num_workers
-        if workers == 0:
-            workers = num_cpus()
-        if workers > n:
-            workers = n
+        var split = _worker_split(options.num_workers, n)
+        var workers = split[0]
+        var opts = options.copy()
+        opts.num_workers = split[1]
         if workers <= 1 or n <= 1:
             var out = List[List[ScanResult]]()
             for k in range(n):
@@ -684,7 +726,7 @@ struct TableScan(Copyable, Movable):
                         mapping,
                         tasks[k].residual,
                         self.case_sensitive,
-                        options,
+                        opts,
                     )
                 )
             return out^
@@ -697,7 +739,7 @@ struct TableScan(Copyable, Movable):
             ids.copy(),
             meta_columns.copy(),
             mapping.copy(),
-            options.copy(),
+            opts^,
             self.case_sensitive,
         )
         parallel_for[_scan_one_file](

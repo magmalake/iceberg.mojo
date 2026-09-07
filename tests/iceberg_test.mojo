@@ -99,7 +99,7 @@ from iceberg.manifest_write import (
     manifest_list_schema_json,
     PartitionTyping,
 )
-from iceberg.scan import TableScan, FileScanTask
+from iceberg.scan import TableScan, FileScanTask, _worker_split
 from iceberg.transforms import parse_transform
 from iceberg.write import (
     WriteOptions,
@@ -5768,6 +5768,102 @@ def test_num_workers_zero_uses_every_core() raises:
         fixture_scan("bucket_part").to_table(opts).num_rows(),
         fixture_scan("bucket_part").to_table().num_rows(),
     )
+
+
+def test_worker_split_fills_the_file_axis_first() raises:
+    """The budget goes to files until the plan runs out of them, and only the
+    remainder goes inside a file.
+
+    The two properties this pins are the ones a wrong split would break
+    silently, because either still returns the right rows: that a plan with at
+    least as many files as workers keeps reading one file per thread — the
+    behaviour that existed before the reader had a second axis — and that a
+    plan too narrow to use the budget hands the rest inward instead of leaving
+    it idle. A one-file scan is the case the second axis exists for, and it
+    must come back with the whole budget.
+    """
+    # More files than workers, and exactly as many: the file axis alone.
+    var saturating = [8, 16, 24]
+    for k in range(len(saturating)):
+        var wide = _worker_split(8, saturating[k])
+        assert_equal(
+            wide[0], 8, String("files at once, ", saturating[k], " files")
+        )
+        assert_equal(wide[1], 1, String("per file, ", saturating[k], " files"))
+
+    # Fewer files than workers: the remainder goes to the reader.
+    var one = _worker_split(10, 1)
+    assert_equal(one[0], 1, "one file is read on one task")
+    assert_equal(one[1], 10, "and gets the whole budget inside")
+    var three = _worker_split(10, 3)
+    assert_equal(three[0], 3, "three files, three tasks")
+    assert_equal(three[1], 3, "10 // 3 threads each")
+
+    # A single worker is single threaded on both axes, which is the default.
+    var single = _worker_split(1, 24)
+    assert_equal(single[0], 1, "one worker plans one file at a time")
+    assert_equal(single[1], 1, "and does not thread inside it")
+
+    # Whatever the shape, the two axes multiplied never exceed the budget.
+    for w in range(1, 33):
+        for n in range(1, 33):
+            var s = _worker_split(w, n)
+            assert_true(
+                s[0] * s[1] <= w,
+                String(w, " workers over ", n, " files oversubscribes"),
+            )
+
+
+def test_budget_wider_than_the_plan_is_identical() raises:
+    """The second axis, on a budget the file axis cannot absorb.
+
+    `test_multi_worker_to_table_is_identical` fixes the worker count and lets
+    the plan decide the split, so a fixture with as many files as workers only
+    ever exercises the file axis. Here the budget is chosen *from* the plan —
+    four workers per planned file — which forces `_worker_split` to hand four
+    threads to `ParquetReader` for every table, whatever its file count. Those
+    threads decode the *(row group, leaf)* pairs of one file, so this is the
+    path that a one-file query takes and the old file axis could not reach.
+
+    Row groups and column chunks assemble in file order at any worker count,
+    so the assertion is the strict one: the same rows in the same order as a
+    wholly sequential read.
+    """
+    var tables = all_fixture_table_names()
+    var checked = 0
+    for t in range(len(tables)):
+        var n_files = len(fixture_scan(tables[t]).plan_files())
+        if n_files == 0:
+            continue
+        var budget = 4 * n_files
+        var split = _worker_split(budget, n_files)
+        assert_equal(
+            split[1],
+            4,
+            String("the plan of ", tables[t], " did not free four threads"),
+        )
+        var want = _join_rows(
+            ordered_rows(fixture_scan(tables[t]).to_table(ScanOptions()))
+        )
+        var opts = ScanOptions()
+        opts.num_workers = budget
+        var got = _join_rows(
+            ordered_rows(fixture_scan(tables[t]).to_table(opts))
+        )
+        assert_equal(
+            got,
+            want,
+            String(
+                budget,
+                " workers over ",
+                n_files,
+                " files changed ",
+                tables[t],
+            ),
+        )
+        checked += 1
+    assert_true(checked > 0, "no fixture table planned any file")
+    print("    budget wider than the plan:", checked, "tables")
 
 
 # ── the per-scan manifest cache ────────────────────────────────────────────
