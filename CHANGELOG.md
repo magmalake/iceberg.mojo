@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-07
+
 ### Added
 - **`TableScan.count()`** — the row count off the manifests when they already
   hold it. Every `DataFile` entry carries `record_count`, so an unfiltered
@@ -57,6 +59,42 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   ladder bends at four workers, the machine's performance-core count, against
   a serial fraction of 25–28%: per-batch casting, filtering and Arrow assembly
   all still happen on the calling thread.
+
+### Fixed
+- **A predicate the partition already guarantees no longer costs anything.**
+  Strict projection stepped its literal exactly as inclusive projection does,
+  but the two need opposite bounds: inclusive needs a *closed* bound and so
+  steps `<` and `>`, while strict needs an *open* one and must step `<=` and
+  `>=`. Using the inclusive stepping strictly left every strict bound one
+  partition too conservative, at all four operators — so `ResidualEvaluator`
+  never returned `true` and a range query on a partitioned table read and
+  evaluated its filter column for every row of every file, even where the
+  partition value alone settled the predicate. A month-aligned range over a
+  `month(ts)` table now reduces to a literal `["true"]` residual and the
+  timestamp column leaves the read set: on the 79.5M-row NYC-taxi table one
+  file and one projected column went from 55.8 ms to 20.9 ms, and the suite's
+  three partition-filtered queries went from 0.86×, 1.92× and 1.36× the speed
+  of PyIceberg 0.11.1 to 1.84×, 2.12× and 1.47×. A mid-month range still does
+  not reduce, which is correct — that partition holds rows on both sides of
+  the bound. Covers `year`/`month`/`day`/`hour` on timestamps and dates and
+  `truncate[W]` on integers; `truncate` on strings, binaries, decimals and
+  floats stays conservative, as it does in Iceberg's Java implementation,
+  because those have no adjacent value to step to. Java's
+  `fixStrictTimeProjection` comes with it: Iceberg 0.10.0 and earlier wrote
+  pre-epoch partition values one unit high, and this change is what newly
+  enables reduction in that range, so a value that could have been written
+  high is tightened by one rather than trusted.
+
+## [0.6.1] – [0.6.7] - 2026-09-03 … 2026-09-06
+
+Dependency re-pins and repository maintenance only; no change a consumer's
+code would see. 0.6.1 re-pinned threads-mojo 0.4.0, 0.6.2/0.6.3 the
+deprecation-sweep releases of avro, hashes, objectstore, roaring, sqlite and
+thrift, and 0.6.4 through 0.6.7 successive parquet-mojo releases up to 0.7.0.
+Alongside them: CI moved to pixi 0.78.0 and setup-pixi v0.10.2, source-
+dependency environments were pinned to the stable toolchain, mojolint was
+added to CI, and this repository's own sources were made to compile without
+deprecation warnings.
 
 ## [0.6.0] - 2026-09-02
 
