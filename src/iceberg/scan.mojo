@@ -66,7 +66,24 @@ from .manifest import (
 from .metadata import Snapshot, TableMetadata
 from .schema import Schema
 from .transforms import PartitionSpec
+from .types import (
+    P_BOOLEAN,
+    P_DECIMAL,
+    P_DOUBLE,
+    P_FLOAT,
+    P_UUID,
+    TK_PRIMITIVE,
+    is_integer_like,
+)
 from .values import compare
+
+
+comptime TRUE_RESIDUAL = String('["true"]')
+"""What `Expr.text` prints for a residual that has nothing left to check.
+
+`ResidualEvaluator.residual_for` builds that residual as a single `OP_TRUE`
+node, and `Expr.text` prints exactly this for it, so the comparison is against
+a canonical string and not against something a user typed."""
 
 
 @fieldwise_init
@@ -869,6 +886,99 @@ struct TableScan(Copyable, Movable):
             _ = _drain_into(rev.pop(), out)
         return out^
 
+    # ── counting ───────────────────────────────────────────────────────────
+    def count(self, options: ScanOptions = ScanOptions()) raises -> Int64:
+        """How many rows this scan would return, without reading the ones the
+        manifests have already counted.
+
+        A `DataFile` carries `record_count`, so a task whose every row survives
+        to the caller contributes its count with the data file never opened —
+        which is the whole point: an unfiltered `COUNT(*)` becomes a walk of
+        the manifests instead of a decode of the table.
+        `_countable_from_metadata` decides which tasks those are, and the rest
+        are read and their surviving rows counted, so a scan that cannot be
+        answered from metadata is still answered, only slowly.
+
+        Adding the two halves is exact because the tasks partition the scan's
+        rows: a row belongs to exactly one data file, and `to_batches` produces
+        each task's rows independently of every other task's. The answer is
+        therefore `len(to_table())` by construction, and the tests assert
+        exactly that on every fixture that takes the reading path.
+
+        This is not `select count(x)`: `select` narrows the columns and never
+        the rows, so a projection is ignored here. Snapshot selection is not
+        ignored — `plan_files` has already resolved `use_snapshot`, `use_ref`
+        and `as_of`, so time travel, a branch and a tag each count their own
+        snapshot, and a table that has never been written to plans no tasks and
+        counts zero.
+        """
+        var tasks = self.plan_files()
+
+        # A `limit` truncates the scan in task order, so the count has to be
+        # accumulated in that order too and stopped where the reader would
+        # stop. Only the tasks that are actually reached get read, which is
+        # what makes `count` with a small limit cheap on a table it cannot
+        # count from metadata at all.
+        if options.limit >= 0:
+            var lim = Int64(options.limit)
+            var seen: Int64 = 0
+            for k in range(len(tasks)):
+                if seen >= lim:
+                    break
+                if _countable_from_metadata(tasks[k]):
+                    seen += tasks[k].data_file.record_count
+                    continue
+                var opts = options.copy()
+                opts.limit = Int(lim - seen)
+                var one = List[FileScanTask]()
+                one.append(tasks[k].copy())
+                seen += self._count_by_reading(one^, opts)
+            return lim if seen > lim else seen
+
+        var total: Int64 = 0
+        var to_read = List[FileScanTask]()
+        for k in range(len(tasks)):
+            if _countable_from_metadata(tasks[k]):
+                total += tasks[k].data_file.record_count
+            else:
+                to_read.append(tasks[k].copy())
+        return total + self._count_by_reading(to_read^, options)
+
+    def _count_by_reading(
+        self, var tasks: List[FileScanTask], options: ScanOptions
+    ) raises -> Int64:
+        """The rows these tasks really return, counted by reading them.
+
+        Only ever called with tasks `_countable_from_metadata` rejected, so the
+        work here is proportional to how much of the table the metadata could
+        not answer for rather than to the table.
+
+        `options.limit` is honoured per file, which is only the same thing as a
+        scan-wide limit when there is one task — so `count` calls this one task
+        at a time whenever a limit is set, and hands it every remaining task at
+        once when there is none.
+        """
+        if len(tasks) == 0:
+            return 0
+        var schema = self.current_schema()
+        var ids = _count_projection(schema)
+        if len(ids) == 0:
+            raise Error(
+                "iceberg: cannot count '"
+                + self.metadata.location
+                + "' by reading: its schema has no columns, and the file"
+                " metadata does not carry a usable record count"
+            )
+        var mapping = self.name_mapping()
+        var all = self._read_files(
+            tasks^, schema, ids, List[String](), mapping, options
+        )
+        var n: Int64 = 0
+        for k in range(len(all)):
+            for j in range(len(all[k])):
+                n += Int64(all[k][j].num_rows())
+        return n
+
     # ── output ─────────────────────────────────────────────────────────────
     def plan_files_json(self) raises -> String:
         """The plan in the same shape `ib_scan_plan_files_json` emits."""
@@ -904,6 +1014,112 @@ struct TableScan(Copyable, Movable):
             out += "}"
         out += "]"
         return out^
+
+
+def _countable_from_metadata(task: FileScanTask) -> Bool:
+    """Whether `record_count` is exactly what this task will hand the caller.
+
+    The question is never "is the metadata plausible" but the much narrower
+    "will the reader return every row of this file, and only those rows". Each
+    clause below is one way `read_data_file` can answer that with a different
+    number, and a clause it cannot decide is answered `False`: being slow costs
+    a read, being wrong costs the caller a number they cannot tell is wrong.
+
+    1. **Any delete file at all.** `record_count` is what the writer put in the
+       file, and every kind of delete removes rows from that afterwards: a v2
+       position-delete file, a v3 deletion vector, and an equality delete all
+       leave the file's own count untouched. It is not enough that a delete
+       exists somewhere in the snapshot — `_deletes_for` has already narrowed
+       them to the ones whose scope covers this data file — but a delete that
+       is in scope may still remove nothing, and finding out costs a read of
+       both files, so an in-scope delete is disqualifying on sight.
+    2. **A residual that is not `true`.** The residual is what the filter still
+       has to check per row, and the reader evaluates exactly this string. When
+       it is `true` no row is dropped, so the file's rows and the scan's rows
+       are the same set; anything else drops an unknown number of them. Keying
+       off the residual rather than off the filter is what makes this widen on
+       its own as `ResidualEvaluator` gets sharper — a boundary-aligned range
+       over a partitioned table that reduces to `true` becomes countable here
+       with no change to this function.
+    3. **A task that is not the whole file.** `plan_files` emits one task per
+       data file today, so `start` is 0 and `length` is the file's size, and
+       `record_count` — a per-file number — is the count of exactly what the
+       task covers. Were the planner to split a file across tasks, summing
+       `record_count` per task would count every split file once per split, so
+       the invariant that made this sound is asserted rather than assumed.
+    4. **A record count that is not positive.** A count of zero is either a
+       genuinely empty file, which reading answers correctly and instantly, or
+       a manifest whose schema has no `record_count` field, which decodes to
+       the same zero and would silently swallow the file's rows. The two are
+       indistinguishable from here, so both are read.
+
+    Not disqualifying, deliberately: a DELETED manifest entry, which
+    `ManifestEntry.is_live` already dropped during planning and which therefore
+    cannot reach a task; a partition pruned away whole, which produces no task
+    and so contributes nothing to the sum; and the projection, which changes
+    which columns come back and never how many rows.
+    """
+    if len(task.delete_files) > 0:
+        return False
+    if task.residual != TRUE_RESIDUAL:
+        return False
+    if task.start != 0 or task.length != task.data_file.file_size_in_bytes:
+        return False
+    if task.data_file.record_count <= 0:
+        return False
+    return True
+
+
+def _count_projection(schema: Schema) raises -> List[Int]:
+    """The one column to read when a count has to be counted the slow way.
+
+    How many rows come back does not depend on which column is read, so this
+    picks the one that costs least to decode and hands `read_data_file` only
+    that: a fixed-width primitive is a memcpy per page, a string or a binary is
+    an offset buffer and a heap of bytes, and a nested column has to assemble
+    every leaf under it to produce one value. The reader adds back whatever the
+    residual and the equality deletes still need to look at, so this is a floor
+    on the columns read and not a ceiling.
+
+    Being *present in the file* matters more than being narrow, which is why a
+    required field wins over an optional one of the same shape: a column added
+    by a later schema is absent from the older files and comes back as a
+    constant null, which is correct but reads nothing and so cannot be checked
+    against anything. The row count is right either way — a batch's row count
+    comes from the row group, not from the columns selected out of it.
+    """
+    var cols = schema.columns()
+    var best = -1
+    var best_rank = 1 << 20
+    for k in range(len(cols)):
+        ref node = schema.store.nodes[cols[k].type]
+        var rank = 4
+        if node.kind == TK_PRIMITIVE:
+            rank = 2 if _is_fixed_width(node.prim) else 3
+        if cols[k].required:
+            rank -= 2
+        if rank < best_rank:
+            best_rank = rank
+            best = cols[k].id
+    var out = List[Int]()
+    if best >= 0:
+        out.append(best)
+    return out^
+
+
+def _is_fixed_width(prim: UInt8) -> Bool:
+    """True for the primitives that decode to a fixed number of bytes per row.
+
+    `fixed` and `binary` are left out on purpose: the first is fixed-width but
+    can be arbitrarily wide, and the second is not fixed-width at all."""
+    return (
+        is_integer_like(prim)
+        or prim == P_BOOLEAN
+        or prim == P_FLOAT
+        or prim == P_DOUBLE
+        or prim == P_DECIMAL
+        or prim == P_UUID
+    )
 
 
 def _deletes_for(

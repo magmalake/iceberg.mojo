@@ -5979,5 +5979,219 @@ def test_one_cache_carries_across_snapshots() raises:
     assert_true(cache.hits > 0, "no manifest was read twice")
 
 
+# ══ counting ════════════════════════════════════════════════════════════════
+#
+# `TableScan.count()` has one contract and it is exactly checkable: whatever
+# path it takes, the number it returns is the number of rows `to_table()`
+# returns. Every test here asserts that equality rather than asserting which
+# path ran, because a fallback condition that is wrong shows up as the two
+# disagreeing and nothing else — a count that came off the manifests when it
+# should have been read looks perfectly ordinary on its own.
+def test_count_agrees_with_the_scan_on_every_fixture() raises:
+    """Every fixture table, under each of the six oracle filters recorded for
+    it.
+
+    Those filters were chosen to exercise the planner, which makes them exactly
+    the right ones here: between them they cover an unfiltered scan, an
+    equality the partitioning decides on its own, a range it does not, a null
+    check and a predicate on a column that is not partitioned at all — over
+    tables with position deletes, deletion vectors and equality deletes. Both
+    of `count`'s paths run many times over, and neither is named.
+    """
+    for name in all_fixture_table_names():
+        var filters = fixture_filters(name)
+        for k in range(len(filters)):
+            var scan = fixture_scan(name).filter(filters[k])
+            assert_equal(
+                scan.count(),
+                Int64(scan.to_table().num_rows()),
+                String("count() disagrees for ", name, " under ", filters[k]),
+            )
+
+
+def test_count_falls_back_for_position_deletes() raises:
+    """A v2 position-delete file removes rows the manifest still counts."""
+    var scan = fixture_scan("deletes_v2")
+    var tasks = scan.plan_files()
+    var stored: Int64 = 0
+    var positional = 0
+    for k in range(len(tasks)):
+        stored += tasks[k].data_file.record_count
+        for j in range(len(tasks[k].delete_files)):
+            ref d = tasks[k].delete_files[j]
+            if d.is_position_delete() and not d.is_deletion_vector():
+                positional += 1
+    assert_true(positional > 0, "deletes_v2 planned no position delete file")
+    var rows = Int64(scan.to_table().num_rows())
+    assert_true(
+        stored > rows,
+        String("deletes_v2 stores ", stored, " and returns ", rows),
+    )
+    assert_equal(scan.count(), rows)
+
+
+def test_count_falls_back_for_a_deletion_vector() raises:
+    """A v3 deletion vector is a delete file like any other as far as the
+    manifest's `record_count` is concerned: it is the count before it."""
+    var scan = fixture_scan("dv_v3")
+    var tasks = scan.plan_files()
+    var stored: Int64 = 0
+    var vectors = 0
+    for k in range(len(tasks)):
+        stored += tasks[k].data_file.record_count
+        for j in range(len(tasks[k].delete_files)):
+            if tasks[k].delete_files[j].is_deletion_vector():
+                vectors += 1
+    assert_true(vectors > 0, "dv_v3 planned no deletion vector")
+    var rows = Int64(scan.to_table().num_rows())
+    assert_equal(stored, 6)
+    assert_equal(rows, 4)
+    assert_equal(scan.count(), rows)
+
+
+def test_count_falls_back_for_equality_deletes() raises:
+    """An equality delete removes rows by value, so how many it removes cannot
+    be known without reading both files."""
+    var scan = fixture_scan("eq_deletes_v2")
+    var tasks = scan.plan_files()
+    var stored: Int64 = 0
+    var equalities = 0
+    for k in range(len(tasks)):
+        stored += tasks[k].data_file.record_count
+        for j in range(len(tasks[k].delete_files)):
+            if tasks[k].delete_files[j].is_equality_delete():
+                equalities += 1
+    assert_true(equalities > 0, "eq_deletes_v2 planned no equality delete")
+    var rows = Int64(scan.to_table().num_rows())
+    assert_true(stored > rows)
+    assert_equal(scan.count(), rows)
+
+
+def test_count_falls_back_for_a_partial_predicate() raises:
+    """An unpartitioned table can decide nothing from its partitioning, so the
+    filter survives whole as the residual and every row has to be checked."""
+    var scan = fixture_scan("unpartitioned").filter('[">","id",2]')
+    var tasks = scan.plan_files()
+    assert_true(len(tasks) > 0)
+    var stored: Int64 = 0
+    for k in range(len(tasks)):
+        assert_true(
+            tasks[k].residual != '["true"]',
+            String("expected a residual, got ", tasks[k].residual),
+        )
+        stored += tasks[k].data_file.record_count
+    var rows = Int64(scan.to_table().num_rows())
+    assert_true(stored > rows, "the filter dropped nothing")
+    assert_equal(scan.count(), rows)
+
+
+def test_count_uses_the_metadata_when_the_partition_decides_the_filter() raises:
+    """The case the whole feature exists for, on the other side of the fence:
+    an identity-partitioned equality leaves no residual, so the count comes off
+    the manifests even though a filter was set."""
+    var scan = fixture_scan("ident_part").filter('["=","region","eu"]')
+    var tasks = scan.plan_files()
+    assert_true(len(tasks) > 0)
+    var stored: Int64 = 0
+    for k in range(len(tasks)):
+        assert_equal(tasks[k].residual, '["true"]')
+        assert_equal(len(tasks[k].delete_files), 0)
+        stored += tasks[k].data_file.record_count
+    assert_equal(scan.count(), stored)
+    assert_equal(scan.count(), Int64(scan.to_table().num_rows()))
+
+
+def test_count_does_not_read_the_data_files() raises:
+    """The claim `count` is worth making at all: when the manifests answer, the
+    data files are never opened.
+
+    Proved destructively, because nothing short of it is proof — a fast count
+    is only evidence. The data files are deleted out from under a table whose
+    metadata still describes them: `count` keeps answering, and the scan that
+    would have had to read them cannot.
+    """
+    var table = build_written_table("count_metadata_only", "unpartitioned", 2)
+    var counted = table.scan().count()
+    assert_equal(counted, 18)
+
+    var tasks = table.scan().plan_files()
+    assert_true(len(tasks) > 0)
+    var io = FileIO.local()
+    for k in range(len(tasks)):
+        io.delete(tasks[k].data_file.file_path)
+
+    assert_equal(table.scan().count(), counted)
+    with assert_raises():
+        _ = table.scan().to_table()
+
+
+def test_count_of_a_table_that_was_never_written_is_zero() raises:
+    """A created-and-not-appended-to table has a schema, no snapshot and no
+    rows. It plans no tasks, so the sum over them is zero rather than an error.
+    """
+    var table = build_written_table("count_empty", "unpartitioned", 2, 0)
+    assert_false(table.metadata.has_current_snapshot)
+    assert_equal(table.scan().count(), 0)
+    assert_equal(table.scan().to_table().num_rows(), 0)
+
+
+def test_count_honours_a_limit() raises:
+    """A limit truncates the scan in task order, and the count with it."""
+    var limits = [0, 1, 3, 5, 1000]
+    for name in all_fixture_table_names():
+        for k in range(len(limits)):
+            var opts = ScanOptions()
+            opts.limit = limits[k]
+            var scan = fixture_scan(name)
+            assert_equal(
+                scan.count(opts),
+                Int64(scan.to_table(opts).num_rows()),
+                String("limit ", limits[k], " miscounted for ", name),
+            )
+    # A limit does not turn a table it *can* count from metadata into one it
+    # has to read: the deleted-files trick still works with one set.
+    var table = build_written_table("count_limited", "unpartitioned", 2)
+    var tasks = table.scan().plan_files()
+    var io = FileIO.local()
+    for k in range(len(tasks)):
+        io.delete(tasks[k].data_file.file_path)
+    var opts = ScanOptions()
+    opts.limit = 7
+    assert_equal(table.scan().count(opts), 7)
+
+
+def test_count_follows_time_travel() raises:
+    """Snapshot selection is the planner's business, not `count`'s: each
+    snapshot counts the files that snapshot names."""
+    var m = load_fixture_metadata("evolved")
+    assert_true(len(m.snapshots) > 1)
+    var seen = List[Int64]()
+    for k in range(len(m.snapshots)):
+        var scan = fixture_scan("evolved").use_snapshot(
+            m.snapshots[k].snapshot_id
+        )
+        var rows = Int64(scan.to_table().num_rows())
+        assert_equal(scan.count(), rows)
+        seen.append(rows)
+    # The fixture grows across its snapshots, so the counts really do differ —
+    # otherwise this would pass on a `count` that ignored the snapshot.
+    assert_true(
+        seen[0] != seen[len(seen) - 1],
+        "every snapshot of `evolved` holds the same number of rows",
+    )
+
+
+def test_count_ignores_the_projection() raises:
+    """`select` changes which columns come back and never how many rows, so
+    counting a projection counts the same rows. Checked on the nested fixture
+    because that is where a projection changes the most."""
+    var full = fixture_scan("nested_v2").count()
+    assert_true(full > 0)
+    assert_equal(fixture_scan("nested_v2").select([String("id")]).count(), full)
+    assert_equal(
+        fixture_scan("nested_v2").select([String("addr")]).count(), full
+    )
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

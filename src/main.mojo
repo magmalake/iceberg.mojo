@@ -5,6 +5,7 @@
     iceberg-mojo snapshots <metadata.json | table-dir>
     iceberg-mojo cat       <metadata.json | table-dir> [--limit N]
                                                        [--format csv|json]
+    iceberg-mojo count     <metadata.json | table-dir> [--filter DSL]
     iceberg-mojo files     <metadata.json | table-dir> [--snapshot ID]
                                                        [--ref NAME]
                                                        [--as-of MS]
@@ -17,6 +18,10 @@
 
 `cat` reads the rows themselves — deletes applied, filter evaluated,
 projection resolved by field id — and prints them as CSV or JSON.
+
+`count` prints how many rows the same scan would return, off the manifests
+alone when no delete file and no leftover predicate can change the answer, and
+by reading the files where one can.
 
 A location can be a local path, a `file://` or `s3://` URI (S3 credentials
 come from `AWS_*` in the environment, or from `--property`), or a table in a
@@ -49,6 +54,7 @@ comptime USAGE = String(
     "  iceberg-mojo snapshots <table>\n"
     "  iceberg-mojo files     <table> [options]\n"
     "  iceberg-mojo cat       <table> [options]\n"
+    "  iceberg-mojo count     <table> [options]\n"
     "\n"
     "<table> is a metadata.json, a table directory, a file:// or s3:// URI,\n"
     "or — with --rest and --table — a table in a REST catalog.\n"
@@ -62,7 +68,7 @@ comptime USAGE = String(
     "  --select a,b,c    project these columns; `cat` also accepts the\n"
     "                    metadata columns _file, _pos, _spec_id, _partition,\n"
     "                    _row_id and _last_updated_sequence_number\n"
-    "  --limit N         stop after N rows (`cat`)\n"
+    "  --limit N         stop after N rows (`cat`, `count`)\n"
     "  --format csv|json output format (`cat`, default csv)\n"
     "  --lazy            fetch only the footer and the row groups needed\n"
     "  --rebase FROM=TO  rewrite location prefixes before opening files\n"
@@ -268,6 +274,21 @@ def main() raises:
             print(rows.to_csv(), end="")
         else:
             raise Error("unknown --format '" + format + "'; use csv or json")
+    elif command == "count":
+        # No `--select`: a projection changes which columns come back and
+        # never how many rows, so `count` ignores one rather than pretending
+        # it counted something narrower.
+        var scan = table.scan().filter(filter_dsl)
+        if has_snapshot:
+            scan = scan.use_snapshot(snapshot_id)
+        elif ref_name != "":
+            scan = scan.use_ref(ref_name)
+        elif has_as_of:
+            scan = scan.as_of(as_of)
+        var options = ScanOptions()
+        options.limit = limit
+        options.lazy = lazy
+        print(scan.count(options))
     elif command == "files":
         var scan = table.scan().filter(filter_dsl)
         if len(selected) > 0:

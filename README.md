@@ -959,7 +959,7 @@ pixi run verify-pg-catalog  # the same, over PostgreSQL
 | `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
 | `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
 | `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
-| `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `plan_files_with`, `to_table`, `to_batches` |
+| `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `plan_files_with`, `to_table`, `to_batches`, `count` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
 | `iceberg.catalog.rest` | `RestCatalog`, `RestCatalogConfig`, `LoadTableResult` |
@@ -990,6 +990,14 @@ def main() raises:
 
     for batch in t.scan().to_batches(wide):  # Arrow, straight off the kernels
         print(batch.num_rows, batch.num_columns())
+
+    # `COUNT(*)` off the manifests: every `DataFile` carries its `record_count`,
+    # so an unfiltered count reads no data file at all — 1.65 ms on the 79.5M-row
+    # taxi table against PyIceberg's 12.7 ms. A scan the manifests cannot answer
+    # for — one with a delete file, or a filter the partitioning does not decide
+    # — falls back to reading, per file, so only the part that needs reading is
+    # read.
+    print(t.scan().count())
 ```
 
 Nested columns need no separate API — a dotted name is a column name, and a

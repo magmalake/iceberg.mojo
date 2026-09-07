@@ -10,6 +10,20 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+- **`TableScan.count()`** — the row count off the manifests when they already
+  hold it. Every `DataFile` entry carries `record_count`, so an unfiltered
+  `COUNT(*)` is a walk of the manifest tree and a sum, with no data file
+  opened: 1.65 ms on the 79.5M-row NYC-taxi table against PyIceberg 0.11.1's
+  12.7 ms for the same call (7.7x), and against 3.1 s for the cheapest count
+  available before this — a one-column `to_batches()` summing `num_rows`. The
+  metadata is only used where it is exactly the answer: a task carrying any
+  delete file (v2 position deletes, equality deletes or a v3 deletion vector),
+  a task whose residual is not `true`, a task that is not a whole file, or one
+  whose `record_count` is not positive is read instead and its surviving rows
+  counted, per task, so a scan that is only partly countable pays only for the
+  part that is not. `iceberg-mojo count <table>` exposes it on the CLI.
+
 ### Changed
 - **`ScanOptions.num_workers` is now a thread budget for the whole scan, not a
   file count.** It used to fan out over planned data files and nothing else, so
