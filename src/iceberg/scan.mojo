@@ -886,6 +886,24 @@ struct TableScan(Copyable, Movable):
             _ = _drain_into(rev.pop(), out)
         return out^
 
+    def to_batch_reader(
+        self, options: ScanOptions = ScanOptions()
+    ) raises -> BatchReader:
+        """The same rows again, one batch at a time instead of all at once.
+
+        `to_batches` holds the whole result before the caller sees the first
+        batch, so a scan that returns most of a large table costs the whole
+        table in memory. A `BatchReader` reads the plan in waves and hands the
+        batches out as it goes, so a caller that folds — counts, sums, writes
+        onward — holds one wave rather than one result. The rows and their
+        order are the same as `to_batches`; see `BatchReader` for what a wave
+        is and why the order survives `num_workers`.
+
+        Planning happens here, not on the first batch, so a bad snapshot or an
+        unreadable manifest raises from this call rather than from the loop.
+        """
+        return BatchReader(self, options)
+
     # ── counting ───────────────────────────────────────────────────────────
     def count(self, options: ScanOptions = ScanOptions()) raises -> Int64:
         """How many rows this scan would return, without reading the ones the
@@ -1014,6 +1032,259 @@ struct TableScan(Copyable, Movable):
             out += "}"
         out += "]"
         return out^
+
+
+struct BatchReader(Movable):
+    """A scan being read a batch at a time, in the order `to_batches` returns.
+
+    The plan is consumed in **waves**: the next `wave` file scan tasks go
+    through `TableScan._read_files` together, their batches are handed out in
+    task order, and only when the last of them has been yielded is the next
+    wave started. Nothing beyond the wave in flight is held, so a fold over a
+    scan costs one wave rather than one result — with the default
+    `num_workers = 1` a wave is one data file.
+
+    ## Ordering
+
+    **Rows arrive in exactly the order `to_batches` returns them, for every
+    `num_workers`.** That is the whole reason for the wave: within a wave the
+    merge is `_read_files`' existing merge by task index, and waves are
+    consumed in plan order, so thread scheduling cannot reach the output. The
+    alternative — yielding each file as its worker finishes — would have made
+    a scan's row order depend on which core won a race, and therefore differ
+    between two runs of the same query on the same data. The `num_workers`
+    docstring promises the opposite, and `to_table`/`to_batches` both depend
+    on it; a streaming path that quietly broke it would be a worse API than
+    one that buffers.
+
+    The wave is `TableScan._worker_split`'s file-axis width, which is
+    `min(num_workers, len(tasks))`, so every worker still gets a file and the
+    parallel path is as wide as it was. What the wave costs instead is a
+    barrier at its end: a wave is only done when its slowest file is, and a
+    worker that finishes early idles until then, where `to_batches` would have
+    moved it onto the next file. That is the price of the ordering guarantee,
+    and it is paid in time, not in memory.
+
+    A scan with a `limit` streams one file at a time — the file axis is not
+    used at all, exactly as in `to_batches`, because stopping early is only
+    meaningful in order.
+
+    ## Errors
+
+    `next_batch` is the primitive and raises what a read raises. `batches()`
+    exists for `for batch in reader.batches():`, and a `for` loop cannot carry
+    an error out: `Iterator.__next__` may raise only `StopIteration`. A read
+    that fails inside the loop therefore *ends* the loop and parks the message
+    on the reader, and **the caller must call `raise_if_failed` afterwards**
+    or a truncated scan reads as a complete one:
+
+    ```mojo
+    var reader = table.scan().to_batch_reader(options)
+    var rows = 0
+    for batch in reader.batches():
+        rows += batch.num_rows
+    reader.raise_if_failed()
+    ```
+    """
+
+    var scan: TableScan
+    var tasks: List[FileScanTask]
+    var schema: Schema
+    var ids: List[Int]
+    var meta_columns: List[String]
+    var mapping: NameMapping
+    var options: ScanOptions
+    var wave: Int
+    """How many data files a wave reads before any of them is handed out."""
+    var next_task: Int
+    """The first task of the wave that has not been read yet."""
+    var pending: List[RecordBatch]
+    """The current wave's undelivered batches, *reversed*: `pop()` takes the
+    next one in task order and moves it, where indexing would copy an arena."""
+    var rows: Int
+    """Rows handed out, which is what a `limit` counts down."""
+    var done: Bool
+    var failure: String
+    """What a read raised inside `batches()`, where it could not escape."""
+
+    def __init__(
+        out self, scan: TableScan, options: ScanOptions = ScanOptions()
+    ) raises:
+        self.scan = scan.copy()
+        self.schema = scan.current_schema()
+        var split = scan._split_selection()
+        self.ids = split[0].copy()
+        self.meta_columns = split[1].copy()
+        self.mapping = scan.name_mapping()
+        self.tasks = scan.plan_files()
+        self.options = options.copy()
+        # `_worker_split` on the whole plan, so the wave is the same file-axis
+        # width `to_batches` would have used; `_read_files` recomputes the
+        # split per wave and lands on the same numbers, because
+        # `min(w, min(w, n)) == min(w, n)`.
+        var budget = _worker_split(options.num_workers, len(self.tasks))
+        self.wave = budget[0] if budget[0] > 0 else 1
+        if options.limit >= 0:
+            self.wave = 1
+        self.next_task = 0
+        self.pending = List[RecordBatch]()
+        self.rows = 0
+        self.done = False
+        self.failure = String("")
+
+    def __init__(out self, *, deinit move: Self):
+        self.scan = move.scan^
+        self.tasks = move.tasks^
+        self.schema = move.schema^
+        self.ids = move.ids^
+        self.meta_columns = move.meta_columns^
+        self.mapping = move.mapping^
+        self.options = move.options^
+        self.wave = move.wave
+        self.next_task = move.next_task
+        self.pending = move.pending^
+        self.rows = move.rows
+        self.done = move.done
+        self.failure = move.failure^
+
+    def num_tasks(self) -> Int:
+        """How many data files the plan has — the scan's whole work list."""
+        return len(self.tasks)
+
+    def _fill(mut self) raises -> Bool:
+        """Read waves until one produces a batch. False when nothing is left.
+
+        The loop is needed because a wave can be empty — every row in it
+        deleted, or filtered out by the residual — and an empty wave must not
+        look like the end of the scan.
+        """
+        while self.next_task < len(self.tasks):
+            if self.options.limit >= 0 and self.rows >= self.options.limit:
+                return False
+            var lo = self.next_task
+            var hi = lo + self.wave
+            if hi > len(self.tasks):
+                hi = len(self.tasks)
+            var wave_tasks = List[FileScanTask]()
+            for k in range(lo, hi):
+                wave_tasks.append(self.tasks[k].copy())
+            var opts = self.options.copy()
+            if self.options.limit >= 0:
+                opts.limit = self.options.limit - self.rows
+            var read = self.scan._read_files(
+                wave_tasks^,
+                self.schema,
+                self.ids,
+                self.meta_columns,
+                self.mapping,
+                opts,
+            )
+            self.next_task = hi
+            var n = len(read)
+            var rev = List[List[ScanResult]]()
+            for _ in range(n):
+                rev.append(read.pop())
+            var ordered = List[RecordBatch]()
+            for _ in range(n):
+                _ = _drain_into(rev.pop(), ordered)
+            var m = len(ordered)
+            for _ in range(m):
+                self.pending.append(ordered.pop())
+            if m > 0:
+                return True
+        return False
+
+    def next_batch(mut self) raises -> Optional[RecordBatch]:
+        """The next batch, or nothing once the scan is finished.
+
+        This is the API that reports a read failure honestly; `batches()` is
+        the same walk with `for`-loop sugar and a deferred error.
+        """
+        if self.done:
+            return None
+        if len(self.pending) == 0:
+            if not self._fill():
+                self.done = True
+                return None
+        var batch = self.pending.pop()
+        self.rows += batch.num_rows
+        return Optional[RecordBatch](batch^)
+
+    def batches(mut self) -> _BatchIter[origin_of(self)]:
+        """A `for`-loop view of this reader. See the note on errors above: the
+        loop ends on a read failure and `raise_if_failed` is what reports it.
+        """
+        return _BatchIter[origin_of(self)](Pointer(to=self))
+
+    def failed(self) -> Bool:
+        """Whether a read failed inside `batches()` and ended the loop early."""
+        return self.failure != ""
+
+    def raise_if_failed(self) raises:
+        """Re-raise what `batches()` could not. A no-op after a clean scan."""
+        if self.failure != "":
+            raise Error(self.failure)
+
+
+@fieldwise_init
+struct _BatchIter[origin: Origin[mut=True]](
+    ImplicitlyCopyable, Iterable, Iterator
+):
+    """Walks a `BatchReader` that outlives the loop, and never owns its state.
+
+    The origin is mutable and tracked: the reader is what advances, and this
+    is a borrow of it rather than a copy, so `raise_if_failed` on the reader
+    the caller still holds sees what the loop hit. That is also why
+    `BatchReader` is not itself `Iterable` — the trait's `IteratorType` has to
+    be well-formed at an immutable origin too, and a copy of a reader would
+    duplicate the plan and then swallow the error into the duplicate.
+    """
+
+    comptime Element = RecordBatch
+    comptime IteratorType[
+        iterable_mut: Bool, //, iterable_origin: Origin[mut=iterable_mut]
+    ]: Iterator = Self
+
+    var _reader: Pointer[BatchReader, Self.origin]
+
+    def __iter__(ref self) -> Self.IteratorType[origin_of(self)]:
+        """An iterator is its own iterable.
+
+        Returns:
+            A copy of this iterator, which is one pointer.
+        """
+        return self.copy()
+
+    def __next__(mut self) raises StopIteration -> RecordBatch:
+        """The next batch.
+
+        Returns:
+            The batch the reader is on.
+
+        Raises:
+            StopIteration: At the end of the scan, and also when a read
+                failed — the failure is parked on the reader for
+                `raise_if_failed`, because this signature admits no other
+                error.
+        """
+        var got: Optional[RecordBatch]
+        try:
+            got = self._reader[].next_batch()
+        except e:
+            self._reader[].failure = String(e)
+            raise StopIteration()
+        if not got:
+            raise StopIteration()
+        return got.take()
+
+    def bounds(self) -> Tuple[Int, Optional[Int]]:
+        """How many batches are left, which a scan does not know until it has
+        read them.
+
+        Returns:
+            `(0, None)` — no lower bound worth quoting and no upper one.
+        """
+        return (0, None)
 
 
 def _countable_from_metadata(task: FileScanTask) -> Bool:

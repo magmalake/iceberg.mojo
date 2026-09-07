@@ -252,6 +252,11 @@ unknown transforms).
   `RecordBatch`es (`export_c` gives them to anything speaking the Arrow C Data
   Interface); `to_table()` concatenates them; CSV and Appendix-D JSON are
   formatted on demand. No tagged value is materialised per cell.
+- **Streaming**, for the scans whose result does not want to be held:
+  `to_batch_reader()` yields the same batches in the same order one at a time,
+  so a fold costs one wave of data files instead of the whole result — 319 MB
+  against 978 MB on a 79.5M-row scan. See [Streaming: one wave instead of one
+  result](#streaming-one-wave-instead-of-one-result).
 - **Lazy IO** as an option: fetch the footer, then only the byte ranges of the
   row groups that survive statistics pruning, into a buffer the size of the
   file with everything else left zero. Parquet addresses everything by absolute
@@ -770,6 +775,72 @@ on the calling thread after the decode returns: casting each batch to the
 table's current types, evaluating the residual, applying deletes and
 assembling Arrow. That, not the worker count, is where the next factor is.
 
+### Streaming: one wave instead of one result
+
+`to_batches()` returns a `List[RecordBatch]`, so a scan's peak memory is the
+size of its whole result. That is fine for the queries in the suite above,
+which all have a predicate that cuts the output down first, and it is exactly
+wrong for a scan that returns most of a large table. `to_batch_reader()`
+returns a `BatchReader` instead, which hands the batches out as it reads them,
+so a caller that folds holds one wave rather than one result:
+
+```mojo
+var reader = t.scan().to_batch_reader(options)
+while True:
+    var batch = reader.next_batch()
+    if not batch:
+        break
+    rows += batch.take().num_rows
+
+# or, with the loop sugar — see below for why the check is not optional
+var loop = t.scan().to_batch_reader(options)
+for batch in loop.batches():
+    rows += batch.num_rows
+loop.raise_if_failed()
+```
+
+The same 79.5M-row table, one `double` column, 24 files, folded to a row
+count. Peak RSS is `/usr/bin/time -l`'s maximum resident set size, one scan per
+process because a high-water mark cannot be re-taken; p50 of seven processes
+with p90 beside it, on an M4 with two other builds running (load average 1.9 to
+2.6 throughout, and every leg measured under the same load):
+
+| | peak RSS p50 (p90) | scan p50 (p90) |
+|---|---:|---:|
+| `to_batches()`, 1 worker | 978 MB (1043) | 549 ms (700) |
+| **`to_batch_reader()`, 1 worker** | **319 MB (319)** | **463 ms (467)** |
+| `to_batches()`, 4 workers | 1229 MB (1304) | 202 ms (450) |
+| `to_batch_reader()`, 4 workers | 949 MB (1003) | 218 ms (225) |
+| `to_batches()`, 8 workers | 1874 MB (1971) | 179 ms (209) |
+| `to_batch_reader()`, 8 workers | 1637 MB (1810) | 189 ms (218) |
+
+**Rows come back in the order `to_batches()` returns them, at every worker
+count.** The reader consumes the plan in *waves* of `min(num_workers, files)`
+data files: a wave goes through the same `_read_files` and the same merge by
+task index, its batches are handed out in task order, and only then is the next
+wave started. The alternative — yielding each file as its worker finished —
+would have made a scan's row order depend on which core won a race, and so
+differ between two runs of the same query on the same data.
+
+What the wave costs is a barrier at its end, and that is the 6–8% the threaded
+rows above give up: a wave is done when its slowest file is, where `to_batches`
+would have moved that worker straight on to the next file. The memory saved
+shrinks the same way, because a wave of `w` files is `w` files in flight — the
+single-threaded scan, where the wave is one file, is where the 3.1× is. Single
+threaded is also the case the issue was raised for: PyIceberg's streaming
+`to_arrow_batch_reader()` holds 0.59 GB on the same query.
+
+`Iterator.__next__` may raise only `StopIteration`, so a read that fails inside
+`for batch in reader.batches()` cannot carry its error out of the loop. It ends
+the loop and parks the message on the reader instead, which is why
+`raise_if_failed()` is part of the shape and not a nicety — without it a
+truncated scan reads as a complete one. `next_batch()` has no such constraint
+and raises what the read raised.
+
+`to_table()` and `to_batches()` are unchanged and are still the right call when
+the result fits: they are the convenient shape, and the measurements above put
+`to_batches` and the reader within a few percent of each other on time.
+
 ### Nested columns
 
 The same benchmark over 200 000 rows of `id long`, `addr struct<city string,
@@ -959,7 +1030,7 @@ pixi run verify-pg-catalog  # the same, over PostgreSQL
 | `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
 | `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
 | `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
-| `iceberg.scan` | `TableScan`, `FileScanTask` — `plan_files`, `plan_files_with`, `to_table`, `to_batches`, `count` |
+| `iceberg.scan` | `TableScan`, `FileScanTask`, `BatchReader` — `plan_files`, `plan_files_with`, `to_table`, `to_batches`, `to_batch_reader`, `count` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |
 | `iceberg.catalog.rest` | `RestCatalog`, `RestCatalogConfig`, `LoadTableResult` |
@@ -998,6 +1069,15 @@ def main() raises:
     # — falls back to reading, per file, so only the part that needs reading is
     # read.
     print(t.scan().count())
+
+    # The same batches in the same order, one at a time, so a fold over a
+    # large scan holds one wave of files instead of the whole result.
+    var reader = t.scan().to_batch_reader(wide)
+    var seen = 0
+    for batch in reader.batches():
+        seen += batch.num_rows
+    reader.raise_if_failed()  # a loop cannot raise; this is where a read
+    print(seen, "rows")       # failure comes out
 ```
 
 Nested columns need no separate API — a dotted name is a column name, and a

@@ -99,7 +99,12 @@ from iceberg.manifest_write import (
     manifest_list_schema_json,
     PartitionTyping,
 )
-from iceberg.scan import TableScan, FileScanTask, _worker_split
+from iceberg.scan import (
+    BatchReader,
+    FileScanTask,
+    TableScan,
+    _worker_split,
+)
 from iceberg.transforms import parse_transform
 from iceberg.write import (
     WriteOptions,
@@ -6262,6 +6267,382 @@ def test_budget_wider_than_the_plan_is_identical() raises:
         checked += 1
     assert_true(checked > 0, "no fixture table planned any file")
     print("    budget wider than the plan:", checked, "tables")
+
+
+# ── streaming a scan ────────────────────────────────────────────────────────
+def _batch_digest(b: RecordBatch) raises -> String:
+    """A batch folded to one comparable string, structure and position
+    included.
+
+    Every buffer goes in, not only the values: a batch whose arena has been
+    permuted, whose offsets have slipped, or whose children have been reordered
+    would fold to the same thing as the original if only the payload were
+    hashed, and preserving order is the streaming path's whole job. The walk
+    is depth-first over an explicit stack and each node writes its own child
+    count, so the tree's shape is in the fold too.
+    """
+    var out = String(b.num_rows, "|", b.num_columns(), "|")
+    var stack = List[Int]()
+    for c in range(b.num_columns()):
+        stack.append(b.roots[b.num_columns() - 1 - c])
+    while len(stack) > 0:
+        ref a = b.arena.nodes[stack.pop()]
+        out += String(
+            a.name,
+            ":",
+            a.type.id,
+            ":",
+            a.length,
+            ":",
+            a.null_count,
+            ":",
+            len(a.children),
+            ":",
+            hex_of(a.validity),
+            ":",
+        )
+        for k in range(len(a.offsets)):
+            out += String(a.offsets[k], ",")
+        out += ":"
+        for k in range(len(a.large_offsets)):
+            out += String(a.large_offsets[k], ",")
+        out += ":" + hex_of(a.values) + "\x01"
+        var n = len(a.children)
+        for k in range(n):
+            stack.append(a.children[n - 1 - k])
+    return out^
+
+
+def _batch_digests(batches: List[RecordBatch]) raises -> List[String]:
+    var out = List[String]()
+    for k in range(len(batches)):
+        out.append(_batch_digest(batches[k]))
+    return out^
+
+
+def _streamed_digests(
+    scan: TableScan, options: ScanOptions
+) raises -> List[String]:
+    """Every batch a `BatchReader` yields, folded, through `next_batch`."""
+    var reader = scan.to_batch_reader(options)
+    var out = List[String]()
+    while True:
+        var got = reader.next_batch()
+        if not got:
+            break
+        out.append(_batch_digest(got.take()))
+    return out^
+
+
+def test_streaming_yields_what_to_batches_returns() raises:
+    """Same batches, same boundaries, same bytes — the reader is `to_batches`
+    without the list.
+
+    The digest folds each array's buffers *and* its position in the tree, so a
+    reader that returned the right rows in the wrong batches, or the right
+    batches in the wrong order, fails here rather than passing on a row count.
+    """
+    var tables = all_fixture_table_names()
+    var checked = 0
+    for t in range(len(tables)):
+        var opts = ScanOptions()
+        var want = _batch_digests(fixture_scan(tables[t]).to_batches(opts))
+        var got = _streamed_digests(fixture_scan(tables[t]), opts)
+        assert_equal(
+            len(got), len(want), "streamed batch count for " + tables[t]
+        )
+        for b in range(len(want)):
+            assert_equal(
+                got[b],
+                want[b],
+                String("streamed batch ", b, " of ", tables[t]),
+            )
+        checked += 1
+    print("    streaming matches to_batches:", checked, "tables")
+
+
+def test_streaming_keeps_batch_order_inside_a_wave() raises:
+    """The order batches leave a wave in, not just the order waves come in.
+
+    A fixture data file is one row group, so at the default `batch_size` a
+    single-worker wave is one file and one batch, and a reader that handed a
+    wave's batches out backwards would agree with `to_batches` anyway. Three
+    written files of six rows read at `batch_size` 1, 2 and 4 give a wave two
+    to six batches to get wrong.
+    """
+    var table = build_written_table("stream_batches", "unpartitioned", 2)
+    var sizes = [1, 2, 4]
+    for k in range(len(sizes)):
+        var small = ScanOptions()
+        small.batch_size = sizes[k]
+        var want = _batch_digests(table.scan().to_batches(small))
+        assert_true(
+            len(want) >= 6,
+            String(
+                "batch_size ",
+                sizes[k],
+                " made only ",
+                len(want),
+                " batch(es)",
+            ),
+        )
+        var got = _streamed_digests(table.scan(), small)
+        assert_equal(
+            len(got), len(want), String("batch count at batch_size ", sizes[k])
+        )
+        for b in range(len(want)):
+            assert_equal(
+                got[b],
+                want[b],
+                String("batch ", b, " at batch_size ", sizes[k]),
+            )
+
+
+def test_streaming_keeps_task_order_at_every_worker_count() raises:
+    """The guarantee the wave exists to keep.
+
+    A reader that yielded files as their workers finished would return these
+    batches in an order that depends on which core won, so the comparison is
+    against the *sequential* `to_batches` and the digests must line up
+    one-for-one.
+
+    Every fixture plans at least two data files, so every one of them has a
+    file axis to be reordered along; `bucket_part`'s six are the widest.
+    """
+    var tables = all_fixture_table_names()
+    var workers = [2, 4, 8]
+    var checked = 0
+    for t in range(len(tables)):
+        assert_true(
+            len(fixture_scan(tables[t]).plan_files()) >= 2,
+            tables[t] + " plans one file and cannot reorder",
+        )
+        var one = ScanOptions()
+        var want = _batch_digests(fixture_scan(tables[t]).to_batches(one))
+        for w in range(len(workers)):
+            var opts = ScanOptions()
+            opts.num_workers = workers[w]
+            var got = _streamed_digests(fixture_scan(tables[t]), opts)
+            assert_equal(
+                len(got),
+                len(want),
+                String(
+                    workers[w], " workers changed batch count of ", tables[t]
+                ),
+            )
+            for b in range(len(want)):
+                assert_equal(
+                    got[b],
+                    want[b],
+                    String(
+                        workers[w],
+                        " workers reordered batch ",
+                        b,
+                        " of ",
+                        tables[t],
+                    ),
+                )
+            checked += 1
+    print("    streaming order:", checked, "comparisons")
+
+
+def test_streaming_reads_one_wave_ahead_and_no_further() raises:
+    """The memory claim, as far as a unit test can state it.
+
+    Peak RSS is a measurement, not an assertion, but what makes it hold is
+    structural and can be asserted: when the caller has taken a batch, the
+    reader has read at most one wave of files, and it never runs ahead of the
+    wave it is handing out. `bucket_part` plans six files, so a default scan
+    has five it must not have touched yet.
+    """
+    var scan = fixture_scan("bucket_part")
+    var reader = scan.to_batch_reader()
+    assert_true(
+        reader.num_tasks() >= 4,
+        String("bucket_part planned only ", reader.num_tasks(), " files"),
+    )
+    assert_equal(reader.wave, 1, "one worker reads one file at a time")
+    var batches = 0
+    while True:
+        var got = reader.next_batch()
+        if not got:
+            break
+        batches += 1
+        _ = got.take()
+        # Everything read so far is the wave being drained plus the ones
+        # already finished; the reader is never further ahead than that.
+        assert_true(
+            reader.next_task <= batches * reader.wave,
+            String(
+                "read ",
+                reader.next_task,
+                " files after ",
+                batches,
+                " batches",
+            ),
+        )
+    assert_equal(reader.next_task, reader.num_tasks())
+
+    # Four workers widen the wave to four files, and no wider.
+    var wide = ScanOptions()
+    wide.num_workers = 4
+    var w = scan.to_batch_reader(wide)
+    assert_equal(w.wave, 4, "four workers read four files at a time")
+    _ = w.next_batch()
+    assert_true(
+        w.next_task <= 4,
+        String("read ", w.next_task, " files for the first wave"),
+    )
+
+    # A budget wider than the plan is capped by the plan, never zero.
+    var huge = ScanOptions()
+    huge.num_workers = 64
+    assert_equal(
+        scan.to_batch_reader(huge).wave, scan.to_batch_reader().num_tasks()
+    )
+    # An empty plan still has a wave of at least one — a zero would spin.
+    var pruned = scan.filter(String('["=","id",-424242]'))
+    assert_equal(len(pruned.plan_files()), 0, "the filter pruned nothing")
+    assert_true(pruned.to_batch_reader().wave >= 1)
+    var per_core = ScanOptions()
+    per_core.num_workers = 0
+    assert_true(scan.to_batch_reader(per_core).wave >= 1)
+
+
+def test_streaming_limit_matches_to_batches() raises:
+    """A `limit` streams one file at a time, and stops where the list does.
+
+    The table is written here rather than taken from the fixtures because the
+    limit has to be able to stop *inside* a file to be tested at all: three
+    appends of six rows give three files of six, so a limit of 1, 2 or 5 cuts
+    a file in half. A fixture whose files hold a row apiece would let a reader
+    that ignored the limit entirely still agree with `to_batches`.
+    """
+    var table = build_written_table("stream_limit", "unpartitioned", 2)
+    var total = table.scan().to_table().num_rows()
+    assert_equal(total, 18)
+    assert_equal(len(table.scan().plan_files()), 3)
+    var limits = [0, 1, 2, 5, 6, 7, 13, 18, 1000]
+    var checked = 0
+    for k in range(len(limits)):
+        var opts = ScanOptions()
+        opts.limit = limits[k]
+        var batches = table.scan().to_batches(opts)
+        var rows = 0
+        for b in range(len(batches)):
+            rows += batches[b].num_rows
+        var want = _batch_digests(batches)
+        var got = _streamed_digests(table.scan(), opts)
+        assert_equal(
+            len(got), len(want), String("limit ", limits[k], " batch count")
+        )
+        for b in range(len(want)):
+            assert_equal(
+                got[b], want[b], String("limit ", limits[k], " batch ", b)
+            )
+        assert_true(
+            rows <= limits[k],
+            String("limit ", limits[k], " returned ", rows, " rows"),
+        )
+        # A limit never uses the file axis, whatever the budget says.
+        var wide = opts.copy()
+        wide.num_workers = 8
+        assert_equal(table.scan().to_batch_reader(wide).wave, 1)
+        checked += 1
+    print("    streaming limit:", checked, "limits")
+
+
+def test_streaming_reports_a_read_failure() raises:
+    """`next_batch` raises; `batches()` cannot, so it parks the message.
+
+    `Iterator.__next__` may raise only `StopIteration`, so a `for` loop over a
+    scan that fails halfway ends quietly. That is exactly the shape that turns
+    a broken read into a short answer, so the reader remembers, and this pins
+    both halves: the raising API raises, and the loop's silence is visible
+    through `failed`/`raise_if_failed`.
+    """
+    # The metadata still resolves — planning has to succeed, or the failure
+    # would be the planner's and never reach a batch — and only the data files
+    # are sent nowhere. First matching prefix wins, so the narrower rule leads.
+    var io = FileIO.local()
+    io.rebase(WAREHOUSE_PREFIX + "/bucket_part/data", FIXTURES + "/nowhere")
+    io.rebase(WAREHOUSE_PREFIX, FIXTURES)
+    var broken = TableScan(load_fixture_metadata("bucket_part"), io^)
+    assert_true(len(broken.plan_files()) > 0, "nothing planned to fail on")
+    var raising = broken.to_batch_reader()
+    with assert_raises():
+        _ = raising.next_batch()
+
+    var reader = broken.to_batch_reader()
+    var seen = 0
+    for batch in reader.batches():
+        seen += batch.num_rows
+    assert_equal(seen, 0, "a failed scan yielded rows")
+    assert_true(reader.failed(), "the loop swallowed the failure silently")
+    with assert_raises():
+        reader.raise_if_failed()
+
+    # A scan that reads cleanly leaves nothing behind to re-raise.
+    var ok = fixture_scan("bucket_part").to_batch_reader()
+    var rows = 0
+    for batch in ok.batches():
+        rows += batch.num_rows
+    assert_false(ok.failed())
+    ok.raise_if_failed()
+    assert_equal(rows, fixture_scan("bucket_part").to_table().num_rows())
+
+
+def test_streaming_folds_every_fixture_through_the_for_loop() raises:
+    """The shape the README shows, over every fixture: the rows a fold sees
+    are the rows `to_table` returns.
+
+    `batches()` is a second entry point into the same walk, so what this adds
+    over the digest test is the sugar itself — that the loop terminates, that
+    it terminates only at the end, and that a clean scan leaves
+    `raise_if_failed` with nothing to say — and it runs it over the parallel
+    path, where the wave boundaries are the ones the loop has to cross.
+    """
+    var tables = all_fixture_table_names()
+    for t in range(len(tables)):
+        var opts = ScanOptions()
+        opts.num_workers = 4
+        var reader = fixture_scan(tables[t]).to_batch_reader(opts)
+        var rows = 0
+        for batch in reader.batches():
+            rows += batch.num_rows
+        reader.raise_if_failed()
+        assert_equal(
+            rows,
+            fixture_scan(tables[t]).to_table().num_rows(),
+            "streamed rows for " + tables[t],
+        )
+
+
+def test_streaming_skips_a_wave_that_yields_no_rows() raises:
+    """A wave can come back empty, and an empty wave is not the end of a scan.
+
+    A planned data file returns nothing when its residual cuts every row the
+    metrics could not prune away first — which is what `deletes_v2` filtered
+    to `region = eu` does: two files are planned and the first of them yields
+    no batch at all. A reader that read one wave and stopped when it produced
+    nothing would return an empty result here and look like a correct answer
+    to a query that matches nothing.
+    """
+    var scan = fixture_scan("deletes_v2").filter(String('["=","region","eu"]'))
+    var planned = len(scan.plan_files())
+    assert_equal(planned, 2, "the fixture stopped planning two files")
+    var want = _batch_digests(scan.to_batches())
+    assert_true(len(want) > 0, "the filter matches nothing at all")
+    assert_true(
+        len(want) < planned,
+        String(planned, " files produced ", len(want), " batches: none empty"),
+    )
+    var got = _streamed_digests(scan, ScanOptions())
+    assert_equal(len(got), len(want), "streamed batch count past an empty wave")
+    for b in range(len(want)):
+        assert_equal(
+            got[b], want[b], String("batch ", b, " past an empty wave")
+        )
 
 
 # ── the per-scan manifest cache ────────────────────────────────────────────

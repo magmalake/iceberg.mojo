@@ -23,6 +23,24 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   whose `record_count` is not positive is read instead and its surviving rows
   counted, per task, so a scan that is only partly countable pays only for the
   part that is not. `iceberg-mojo count <table>` exposes it on the CLI.
+- **`TableScan.to_batch_reader()`, a streaming path for a scan.** `to_batches()`
+  returns a `List[RecordBatch]`, so a scan's peak memory was the size of its
+  whole result; a `BatchReader` hands the batches out as it reads them, so a
+  caller that folds holds one *wave* of data files instead. On the 79.5M-row
+  NYC-taxi table, one `double` column over 24 files single-threaded, peak RSS
+  went from 978 MB to **319 MB** (p50 of seven processes under
+  `/usr/bin/time -l`) and the scan from 549 ms to 463 ms. The rows come back in
+  exactly the order `to_batches()` returns them at every `num_workers`: a wave
+  is `min(num_workers, files)` files read through the existing `_read_files`
+  merge-by-task-index and handed out in task order, rather than each file being
+  yielded as its worker finished, which would have made a scan's row order
+  depend on which core won a race. The barrier at the end of a wave costs 6–8%
+  on the threaded legs, and the memory saved narrows as the wave widens
+  (1229 MB → 949 MB at four workers). `to_table()` and `to_batches()` are
+  unchanged. `next_batch()` raises what a read raises; `batches()` gives the
+  `for`-loop shape, and because `Iterator.__next__` may raise only
+  `StopIteration` a failure inside the loop ends it and is reported by
+  `raise_if_failed()`.
 
 ### Changed
 - **`ScanOptions.num_workers` is now a thread budget for the whole scan, not a
