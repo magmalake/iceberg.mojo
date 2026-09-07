@@ -83,9 +83,7 @@ from parquet.arrow import (
     bit_get,
     bit_set,
     load_f32,
-    load_f64,
     load_i32,
-    load_i64,
 )
 from parquet.ext_full import AllCodecs
 
@@ -156,6 +154,14 @@ from .kernels import (
     is_large_binary_type,
     is_var_width,
     keys_equal,
+    sel_and,
+    sel_any,
+    sel_apply_validity,
+    sel_compare,
+    sel_count,
+    sel_not,
+    sel_or,
+    sel_uninit,
     value_extent,
 )
 from .manifest import DataFile
@@ -859,6 +865,69 @@ def _is_comparison(op: UInt8) -> Bool:
     )
 
 
+def _int_compare_bulk(
+    a: ArrayData, lit: Int64, acc: _Accept, n: Int, mut out: List[Bool]
+) raises -> Bool:
+    """A comparison against an integral literal, sixteen rows at a time.
+
+    Every width widens to `int64` before the comparison rather than narrowing
+    the literal to the column's width, which removes the question of what an
+    out-of-range literal means: `payment_type > 2**40` is simply false
+    everywhere, decided by the same code that decides `payment_type > 2`.
+
+    `AT_UINT64` is read *signed*, which is what the scalar path it replaces
+    did; changing that is a semantic fix, not a performance one, and does not
+    belong in the same change.
+
+    Returns `False` for a shape with no kernel — `AT_BOOL`, whose values are a
+    bitmap rather than a fixed-width buffer — so the caller keeps its scalar
+    fallback for it.
+    """
+    var id = a.type.id
+    var vals = Span(a.values)
+    if (
+        id == AT_INT64
+        or id == AT_TIME64
+        or id == AT_TIMESTAMP
+        or id == AT_UINT64
+    ):
+        sel_compare[DType.int64, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_INT32 or id == AT_DATE32 or id == AT_TIME32:
+        sel_compare[DType.int32, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_UINT32:
+        sel_compare[DType.uint32, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_INT16:
+        sel_compare[DType.int16, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_UINT16:
+        sel_compare[DType.uint16, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_INT8:
+        sel_compare[DType.int8, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    if id == AT_UINT8:
+        sel_compare[DType.uint8, DType.int64](
+            vals, n, lit, acc.lt, acc.eq, acc.gt, out
+        )
+        return True
+    return False
+
+
 def _vector_leaf(
     e: Expr, i: Int, a: ArrayData, mut out: List[Bool]
 ) raises -> Bool:
@@ -982,23 +1051,10 @@ def _vector_leaf(
 
     if cls == CMP_INT:
         var lit = nd.lits[0].i
-        var id = a.type.id
-        if (
-            id == AT_INT64
-            or id == AT_TIME64
-            or id == AT_TIMESTAMP
-            or id == AT_UINT64
-        ):
-            # The overwhelmingly common width, read without the per-row
-            # type switch `int_at` would do.
-            var vals = Span(a.values)
-            for r in range(n):
-                if not no_nulls and not bit_get(Span(a.validity), r):
-                    out[r] = False
-                    continue
-                var v = load_i64(vals, r)
-                out[r] = acc.takes(0 if v == lit else (-1 if v < lit else 1))
+        if _int_compare_bulk(a, lit, acc, n, out):
+            sel_apply_validity(out, Span(a.validity), n)
             return True
+        # `AT_BOOL` only: a bit per row, so there is no values buffer to walk.
         for r in range(n):
             var valid = True if no_nulls else bit_get(Span(a.validity), r)
             if not valid:
@@ -1012,14 +1068,26 @@ def _vector_leaf(
         var flit = d.f if (
             d.kind == P_FLOAT or d.kind == P_DOUBLE
         ) else Float64(d.i)
-        if a.type.id == AT_FLOAT64:
+        # A NaN literal inverts Iceberg's rule — every number sorts *below* it
+        # rather than above — which is the one case the kernel does not model,
+        # so it keeps the scalar comparator that already gets it right.
+        if flit == flit:
             var vals = Span(a.values)
-            for r in range(n):
-                if not no_nulls and not bit_get(Span(a.validity), r):
-                    out[r] = False
-                    continue
-                out[r] = acc.takes(_cmp_float(load_f64(vals, r), flit))
-            return True
+            if a.type.id == AT_FLOAT64:
+                sel_compare[DType.float64, DType.float64](
+                    vals, n, flit, acc.lt, acc.eq, acc.gt, out
+                )
+                sel_apply_validity(out, Span(a.validity), n)
+                return True
+            if a.type.id == AT_FLOAT32:
+                # Widened to `double` before the comparison, so a literal that
+                # no `float` represents exactly still compares against the
+                # value Iceberg says the column holds.
+                sel_compare[DType.float32, DType.float64](
+                    vals, n, flit, acc.lt, acc.eq, acc.gt, out
+                )
+                sel_apply_validity(out, Span(a.validity), n)
+                return True
         for r in range(n):
             var valid = True if no_nulls else bit_get(Span(a.validity), r)
             if not valid:
@@ -1073,18 +1141,12 @@ def _selection(
         var left = _selection(
             e, nd.left, arrays, plans, read_ids, leaves, leaf_arrays, n
         )
-        var any = False
-        for r in range(n):
-            if left[r]:
-                any = True
-                break
-        if not any:
+        if not sel_any(left):
             return left^
         var right = _selection(
             e, nd.right, arrays, plans, read_ids, leaves, leaf_arrays, n
         )
-        for r in range(n):
-            left[r] = left[r] and right[r]
+        sel_and(left, right)
         return left^
     if nd.op == OP_OR:
         var left = _selection(
@@ -1093,15 +1155,13 @@ def _selection(
         var right = _selection(
             e, nd.right, arrays, plans, read_ids, leaves, leaf_arrays, n
         )
-        for r in range(n):
-            left[r] = left[r] or right[r]
+        sel_or(left, right)
         return left^
     if nd.op == OP_NOT:
         var inner = _selection(
             e, nd.left, arrays, plans, read_ids, leaves, leaf_arrays, n
         )
-        for r in range(n):
-            inner[r] = not inner[r]
+        sel_not(inner)
         return inner^
 
     var slot = _index_of(read_ids, nd.field_id)
@@ -1111,7 +1171,7 @@ def _selection(
             if leaves[k].field_id != nd.field_id:
                 continue
             ref lp = leaves[k]
-            var out = List[Bool](length=n, fill=False)
+            var out = sel_uninit(n)
             if _vector_leaf(e, i, leaf_arrays[k], out):
                 return out^
             for r in range(n):
@@ -1139,7 +1199,7 @@ def _selection(
         var v = eval_leaf(e, i, p.constant)
         return List[Bool](length=n, fill=v)
 
-    var out = List[Bool](length=n, fill=False)
+    var out = sel_uninit(n)
     ref a = arrays[slot].arena.nodes[arrays[slot].root]
     if _vector_leaf(e, i, a, out):
         return out^
@@ -1902,10 +1962,7 @@ def read_data_file(
                     if eq.contains(key):
                         keep[r] = False
 
-            var n_keep = 0
-            for r in range(n):
-                if keep[r]:
-                    n_keep += 1
+            var n_keep = sel_count(keep)
             all_kept = n_keep == n
             if options.limit >= 0 and kept_total + n_keep > options.limit:
                 var room = options.limit - kept_total

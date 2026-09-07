@@ -62,6 +62,8 @@ from iceberg.puffin import (
 )
 from roaring import Bitmap64
 from iceberg.read import (
+    _vector_leaf,
+    eval_leaf,
     read_data_file,
     read_data_file_table,
     META_FILE,
@@ -115,8 +117,38 @@ from iceberg.write import (
     truncate_lower,
     truncate_upper,
 )
+from std.memory import bitcast
+
 from parquet import RecordBatch
-from parquet.arrow import AT_LIST, AT_MAP, AT_STRUCT
+from parquet.arrow import (
+    AT_FLOAT32,
+    AT_FLOAT64,
+    AT_INT8,
+    AT_INT16,
+    AT_INT32,
+    AT_INT64,
+    AT_LIST,
+    AT_MAP,
+    AT_STRUCT,
+    AT_UINT8,
+    AT_UINT16,
+    AT_UINT32,
+    ArrayData,
+    ArrowType,
+    bit_set,
+    load_i64,
+)
+from iceberg.kernels import (
+    extract_datum,
+    filter_array,
+    sel_and,
+    sel_any,
+    sel_apply_validity,
+    sel_compare,
+    sel_count,
+    sel_not,
+    sel_or,
+)
 from iceberg.manifest import (
     ManifestCache,
     ManifestFile,
@@ -197,6 +229,9 @@ from iceberg.expressions import (
     OP_FALSE,
     OP_NOT_EQ,
     OP_NOT_IN,
+    OP_AND,
+    OP_OR,
+    OP_NOT,
     op_name,
 )
 from iceberg.transforms import (
@@ -6974,3 +7009,598 @@ def test_count_ignores_the_projection() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+# ── selection-vector kernels ────────────────────────────────────────────────
+# The oracle gates above compare whole answers against PyIceberg and DuckDB,
+# but every fixture table is a handful of rows: a comparison kernel that
+# handles sixteen rows per step would never execute its vector body there, and
+# a bug living only in that body would pass all of them. These tests exist to
+# reach it, which is why every length is swept across the lane boundary and
+# every array carries a null pattern, a NaN and both signed zeros.
+
+
+def _sel_lengths() -> List[Int]:
+    """Lengths either side of `SEL_LANES`, so the vector body and the scalar
+    tail both run and their boundary is crossed in both directions."""
+    return [0, 1, 15, 16, 17, 31, 33, 64, 65, 200]
+
+
+def _sel_ops() -> List[Tuple[UInt8, Bool, Bool, Bool]]:
+    """Every comparison, as the `(lt, eq, gt)` triple the kernels take."""
+    return [
+        (OP_LT, True, False, False),
+        (OP_LT_EQ, True, True, False),
+        (OP_EQ, False, True, False),
+        (OP_NOT_EQ, True, False, True),
+        (OP_GT_EQ, False, True, True),
+        (OP_GT, False, False, True),
+    ]
+
+
+def _sel_doubles(n: Int) -> Tuple[List[Float64], List[Bool]]:
+    """A double column with NaN, both zeros, and every fourth row null."""
+    var vals = List[Float64]()
+    var valid = List[Bool]()
+    for i in range(n):
+        var m = i % 7
+        if m == 0:
+            vals.append(0.0)
+        elif m == 1:
+            vals.append(-0.0)
+        elif m == 2:
+            vals.append(
+                Float64(1.0) / Float64(0.0) - Float64(1.0) / Float64(0.0)
+            )
+        elif m == 3:
+            vals.append(-2.5)
+        elif m == 4:
+            vals.append(1.5)
+        elif m == 5:
+            vals.append(1000000.25)
+        else:
+            vals.append(-1000000.25)
+        valid.append(i % 4 != 3)
+    return (vals^, valid^)
+
+
+def _double_array(vals: List[Float64], valid: List[Bool]) raises -> ArrayData:
+    var a = ArrayData(ArrowType(AT_FLOAT64), String("x"))
+    a.length = len(vals)
+    var any_null = False
+    for i in range(len(valid)):
+        if not valid[i]:
+            any_null = True
+    for i in range(len(vals)):
+        var bits = bitcast[DType.uint64](vals[i])
+        for b in range(8):
+            a.values.append(UInt8((bits >> UInt64(8 * b)) & 0xFF))
+    if any_null:
+        a.validity = List[UInt8](length=(len(vals) + 7) // 8, fill=0)
+        for i in range(len(vals)):
+            if valid[i]:
+                bit_set(a.validity, i, True)
+            else:
+                a.null_count += 1
+    return a^
+
+
+def _int_array(
+    var t: ArrowType, width: Int, vals: List[Int64], valid: List[Bool]
+) raises -> ArrayData:
+    var a = ArrayData(t^, String("x"))
+    a.length = len(vals)
+    var any_null = False
+    for i in range(len(valid)):
+        if not valid[i]:
+            any_null = True
+    for i in range(len(vals)):
+        var bits = bitcast[DType.uint64](vals[i])
+        for b in range(width):
+            a.values.append(UInt8((bits >> UInt64(8 * b)) & 0xFF))
+    if any_null:
+        a.validity = List[UInt8](length=(len(vals) + 7) // 8, fill=0)
+        for i in range(len(vals)):
+            if valid[i]:
+                bit_set(a.validity, i, True)
+            else:
+                a.null_count += 1
+    return a^
+
+
+def _accepts(c: Int, lt: Bool, eq: Bool, gt: Bool) -> Bool:
+    return lt if c < 0 else (eq if c == 0 else gt)
+
+
+def _iceberg_cmp_float(x: Float64, y: Float64) -> Int:
+    """Iceberg's float order, written out here so the test does not borrow the
+    comparator it is checking: NaN sorts above every number, and -0.0 == 0.0."""
+    var xn = x != x
+    var yn = y != y
+    if xn and yn:
+        return 0
+    if xn:
+        return 1
+    if yn:
+        return -1
+    if x < y:
+        return -1
+    return 0 if x == y else 1
+
+
+def test_sel_compare_doubles() raises:
+    """The vectorised `double` comparison against a scalar reference, over
+    lengths that cross the lane boundary in both directions."""
+    var ops = _sel_ops()
+    var lits = [Float64(0.0), Float64(1.5), Float64(-2.5), Float64(9.0)]
+    var lengths = _sel_lengths()
+    for li in range(len(lengths)):
+        var n = lengths[li]
+        var column = _sel_doubles(n)
+        var a = _double_array(column[0], column[1])
+        for oi in range(len(ops)):
+            ref op = ops[oi]
+            for ki in range(len(lits)):
+                var lit = lits[ki]
+                var got = List[Bool](length=n, fill=False)
+                sel_compare[DType.float64, DType.float64](
+                    Span(a.values), n, lit, op[1], op[2], op[3], got
+                )
+                sel_apply_validity(got, Span(a.validity), n)
+                for r in range(n):
+                    var want = column[1][r] and _accepts(
+                        _iceberg_cmp_float(column[0][r], lit),
+                        op[1],
+                        op[2],
+                        op[3],
+                    )
+                    assert_equal(
+                        got[r],
+                        want,
+                        String(
+                            "double compare op ",
+                            op_name(op[0]),
+                            " lit ",
+                            lit,
+                            " row ",
+                            r,
+                            " of ",
+                            n,
+                        ),
+                    )
+
+
+def test_sel_compare_narrow_integers() raises:
+    """Every integer width the reader can hand the kernel, compared at
+    `int64`. The literals include values no narrow column can hold, which is
+    the case a kernel that narrowed the literal instead would get wrong."""
+    var ops = _sel_ops()
+    var widths = [1, 2, 4, 8]
+    var types = [
+        ArrowType(AT_INT8),
+        ArrowType(AT_INT16),
+        ArrowType(AT_INT32),
+        ArrowType(AT_INT64),
+    ]
+    var lits = [
+        Int64(-129),
+        Int64(-1),
+        Int64(0),
+        Int64(3),
+        Int64(127),
+        Int64(40000),
+    ]
+    for ti in range(len(types)):
+        var width = widths[ti]
+        var lengths = _sel_lengths()
+        for li in range(len(lengths)):
+            var n = lengths[li]
+            var vals = List[Int64]()
+            var valid = List[Bool]()
+            for i in range(n):
+                # Values inside int8's range, so one column serves every width.
+                vals.append(Int64((i % 13) - 6))
+                valid.append(i % 5 != 4)
+            var a = _int_array(types[ti].copy(), width, vals, valid)
+            for oi in range(len(ops)):
+                ref op = ops[oi]
+                for ki in range(len(lits)):
+                    var lit = lits[ki]
+                    var got = List[Bool](length=n, fill=False)
+                    if width == 1:
+                        sel_compare[DType.int8, DType.int64](
+                            Span(a.values), n, lit, op[1], op[2], op[3], got
+                        )
+                    elif width == 2:
+                        sel_compare[DType.int16, DType.int64](
+                            Span(a.values), n, lit, op[1], op[2], op[3], got
+                        )
+                    elif width == 4:
+                        sel_compare[DType.int32, DType.int64](
+                            Span(a.values), n, lit, op[1], op[2], op[3], got
+                        )
+                    else:
+                        sel_compare[DType.int64, DType.int64](
+                            Span(a.values), n, lit, op[1], op[2], op[3], got
+                        )
+                    sel_apply_validity(got, Span(a.validity), n)
+                    for r in range(n):
+                        var c = 0
+                        if vals[r] < lit:
+                            c = -1
+                        elif vals[r] > lit:
+                            c = 1
+                        var want = valid[r] and _accepts(c, op[1], op[2], op[3])
+                        assert_equal(
+                            got[r],
+                            want,
+                            String(
+                                "int",
+                                8 * width,
+                                " compare op ",
+                                op_name(op[0]),
+                                " lit ",
+                                lit,
+                                " row ",
+                                r,
+                                " of ",
+                                n,
+                            ),
+                        )
+
+
+def test_sel_combines_and_counts() raises:
+    """`and`, `or`, `not`, `any` and the count, against scalar references."""
+    var lengths = _sel_lengths()
+    for li in range(len(lengths)):
+        var n = lengths[li]
+        var left = List[Bool](length=n, fill=False)
+        var right = List[Bool](length=n, fill=False)
+        for i in range(n):
+            left[i] = i % 3 != 0
+            right[i] = i % 5 != 0
+        var want_count = 0
+        for i in range(n):
+            if left[i]:
+                want_count += 1
+        assert_equal(sel_count(left), want_count, "sel_count")
+        assert_equal(sel_any(left), want_count > 0, "sel_any")
+
+        var conj = left.copy()
+        sel_and(conj, right)
+        var disj = left.copy()
+        sel_or(disj, right)
+        var neg = left.copy()
+        sel_not(neg)
+        for i in range(n):
+            assert_equal(conj[i], left[i] and right[i], "sel_and")
+            assert_equal(disj[i], left[i] or right[i], "sel_or")
+            assert_equal(neg[i], not left[i], "sel_not")
+    # `sel_any` has to see a row that is set only in the scalar tail.
+    var sparse = List[Bool](length=33, fill=False)
+    assert_false(sel_any(sparse))
+    sparse[32] = True
+    assert_true(sel_any(sparse), "a row past the last full lane still counts")
+    assert_equal(sel_count(sparse), 1)
+
+
+def _filter_reference(vals: List[Int64], keep: List[Bool]) -> List[Int64]:
+    var out = List[Int64]()
+    for i in range(len(keep)):
+        if keep[i]:
+            out.append(vals[i])
+    return out^
+
+
+def test_filter_array_both_strategies() raises:
+    """`filter_array` picks between a run copy and a branch-free compaction by
+    selectivity, so both sides of that threshold have to be exercised — and
+    the null case, which only the run copy serves."""
+    var n = 4000
+    var vals = List[Int64]()
+    for i in range(n):
+        vals.append(Int64(i) * 7 - 3)
+    # One dense selection (well above the compaction threshold), one sparse
+    # (well below it), one that keeps nothing and one that keeps everything.
+    var densities = [2, 3, 97, 1000, 1, 0]
+    for di in range(len(densities)):
+        var every = densities[di]
+        var keep = List[Bool](length=n, fill=False)
+        for i in range(n):
+            keep[i] = every == 1 or (every > 1 and i % every == 0)
+        var n_keep = sel_count(keep)
+        var want = _filter_reference(vals, keep)
+        assert_equal(len(want), n_keep)
+        for nulls in range(2):
+            var valid = List[Bool](length=n, fill=True)
+            if nulls == 1:
+                for i in range(n):
+                    valid[i] = i % 6 != 5
+            var a = _int_array(ArrowType(AT_INT64), 8, vals, valid)
+            var got = filter_array(a, keep, n_keep)
+            assert_equal(got.length, n_keep, "filtered length")
+            assert_equal(len(got.values), 8 * n_keep, "filtered values buffer")
+            for j in range(n_keep):
+                assert_equal(
+                    load_i64(Span(got.values), j),
+                    want[j],
+                    String("filter every ", every, " nulls ", nulls, " at ", j),
+                )
+            if nulls == 1:
+                var at = 0
+                for i in range(n):
+                    if not keep[i]:
+                        continue
+                    assert_equal(
+                        got.is_valid(at),
+                        valid[i],
+                        String("filtered validity at ", at),
+                    )
+                    at += 1
+
+
+# ── residual reduction, conjunct by conjunct ────────────────────────────────
+def test_residual_drops_satisfied_conjuncts() raises:
+    """A conjunct the partition already guarantees leaves the residual, and
+    with it the column the reader would have decoded only to check it.
+
+    This is the common shape of a query against a time-partitioned table: a
+    month-aligned range plus a predicate on data. Reducing only when the
+    *whole* filter is strictly satisfied leaves the timestamp column in the
+    read set of every such scan.
+    """
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = _ts_spec("month")
+    var r = ResidualEvaluator(
+        bound_filter(
+            '["and",["and",[">=","ts","2024-06-01T00:00:00"],'
+            '["<","ts","2024-07-01T00:00:00"]],[">","amount",1.5]]'
+        ),
+        spec,
+        schema,
+    )
+    var june = List[Datum]()
+    june.append(Datum.int_(653))
+    assert_true(r.selects(june))
+    var res = r.residual_for(june)
+    assert_equal(
+        res.text(res.root),
+        '[">","amount",1.5]',
+        "the month-aligned bounds are satisfied by June and must not survive",
+    )
+    # Nothing is dropped when the partition cannot decide the range.
+    var partial = ResidualEvaluator(
+        bound_filter(
+            '["and",[">=","ts","2024-06-15T00:00:00"],[">","amount",1.5]]'
+        ),
+        spec,
+        schema,
+    )
+    var res2 = partial.residual_for(june)
+    assert_true(
+        res2.text(res2.root).find("ts") >= 0,
+        String("a mid-month bound must survive, got ", res2.text(res2.root)),
+    )
+    # A disjunction is one conjunct, not two: dropping the side a partition
+    # happens to satisfy would turn `a or b` into `b` and lose every row that
+    # matched only `a`. Here neither side is strictly satisfied, so the whole
+    # `or` has to survive — including the timestamp bound inside it, which the
+    # conjunct rule would have been entitled to drop had it been a conjunct.
+    var either = ResidualEvaluator(
+        bound_filter(
+            '["and",["or",[">=","ts","2024-06-15T00:00:00"],'
+            '[">","amount",1.5]],["<","id",100]]'
+        ),
+        spec,
+        schema,
+    )
+    var res3 = either.residual_for(june)
+    var text3 = res3.text(res3.root)
+    assert_true(
+        text3.find("amount") >= 0 and text3.find("ts") >= 0,
+        String("an `or` must survive whole, got ", text3),
+    )
+
+
+def test_residual_conjuncts_never_overclaim() raises:
+    """The safety property for the per-conjunct reduction, swept the way
+    `test_strict_time_projection_never_overclaims` sweeps the whole-filter one.
+
+    A conjunct dropped from a residual is a promise that every row the
+    partition can hold satisfies it. Checked at both edges of each bucket,
+    which is the only place an off-by-one can hide, and against a filter whose
+    second conjunct — on a non-partition column — must never be dropped.
+    """
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var kinds = [T_HOUR, T_DAY, T_MONTH, T_YEAR]
+    var names = [String("hour"), String("day"), String("month"), String("year")]
+    var ops = [OP_LT, OP_LT_EQ, OP_GT, OP_GT_EQ]
+    var june = parse_iso(P_TIMESTAMP, "2024-06-01T00:00:00")
+    var reduced = 0
+    for ki in range(len(kinds)):
+        var kind = kinds[ki]
+        var t = Transform(kind, 0, names[ki])
+        var spec = _ts_spec(names[ki])
+        var parts = List[Int64]()
+        for p in range(-2, 3):
+            parts.append(Int64(p))
+        var modern = t.apply(Datum.integral(P_TIMESTAMP, june)).i
+        for d in range(-1, 2):
+            parts.append(modern + Int64(d))
+        var bounds = List[Int64]()
+        for pi in range(len(parts)):
+            var s = _bucket_span(kind, parts[pi])
+            bounds.append(s[0] - 1)
+            bounds.append(s[0])
+            bounds.append(s[1])
+            bounds.append(s[1] + 1)
+        for oi in range(len(ops)):
+            for bi in range(len(bounds)):
+                # The timestamp predicate, conjoined with one on `amount` that
+                # no partition can decide.
+                var one = _ts_predicate(ops[oi], bounds[bi])
+                var both = Expr()
+                var left = _copy_into(one, one.root, both)
+                var right = both.bound(
+                    OP_GT, 3, P_DOUBLE, [Datum.double_(1.5)], String("amount")
+                )
+                both.root = both.connective(OP_AND, left, right)
+                var r = ResidualEvaluator(both, spec, schema)
+                for pi in range(len(parts)):
+                    var span = _bucket_span(kind, parts[pi])
+                    var part = List[Datum]()
+                    part.append(t.apply(Datum.integral(P_TIMESTAMP, span[0])))
+                    if not r.selects(part):
+                        continue
+                    var res = r.residual_for(part)
+                    var text = res.text(res.root)
+                    assert_true(
+                        text.find("amount") >= 0,
+                        String(
+                            "the data predicate must always survive, got ",
+                            text,
+                        ),
+                    )
+                    if text.find("ts") >= 0:
+                        continue
+                    # The timestamp conjunct was dropped: every instant this
+                    # bucket can hold must satisfy it.
+                    reduced += 1
+                    for e in range(2):
+                        assert_true(
+                            _holds(ops[oi], span[e], bounds[bi]),
+                            String(
+                                "dropped a ",
+                                names[ki],
+                                " conjunct that ",
+                                span[e],
+                                " does not satisfy: ",
+                                op_name(ops[oi]),
+                                " ",
+                                bounds[bi],
+                            ),
+                        )
+    assert_true(
+        reduced > 0,
+        "no conjunct was ever dropped, so this test proved nothing",
+    )
+    print("    per-conjunct residual reductions checked:", reduced)
+
+
+def _copy_into(src: Expr, i: Int, mut dst: Expr) -> Int:
+    """A subtree, moved into another arena. The test builds its conjunctions
+    by hand because the DSL parser has no way to bind two schemas at once."""
+    ref n = src.nodes[i]
+    var node = n.copy()
+    if n.op == OP_AND or n.op == OP_OR:
+        node.left = _copy_into(src, n.left, dst)
+        node.right = _copy_into(src, n.right, dst)
+    elif n.op == OP_NOT:
+        node.left = _copy_into(src, n.left, dst)
+        node.right = -1
+    return dst.add(node^)
+
+
+def test_vector_leaf_matches_the_datum_path() raises:
+    """The vectorised leaf against the `Datum` evaluator it replaces, over
+    every Arrow type the reader can hand it.
+
+    The kernel tests above check one comparison at a time; this checks the
+    *dispatch* — which Arrow type is read at which machine width, and with
+    which sign. Reading a signed `int8` column as unsigned is a bug no
+    single-kernel test can see, because both kernels are individually correct.
+    `eval_leaf` over `extract_datum` is the reference because it is the path
+    the reader falls back to and the one that produced every answer before
+    this change.
+    """
+    var n = 40
+    var types = [
+        ArrowType(AT_INT8),
+        ArrowType(AT_INT16),
+        ArrowType(AT_INT32),
+        ArrowType(AT_INT64),
+        ArrowType(AT_UINT8),
+        ArrowType(AT_UINT16),
+        ArrowType(AT_UINT32),
+    ]
+    var widths = [1, 2, 4, 8, 1, 2, 4]
+    var kinds = [P_INT, P_INT, P_INT, P_LONG, P_INT, P_INT, P_LONG]
+    var ops = _sel_ops()
+    var lits = [Int64(-3), Int64(0), Int64(5), Int64(120), Int64(-200)]
+    for ti in range(len(types)):
+        var vals = List[Int64]()
+        var valid = List[Bool]()
+        for i in range(n):
+            # Spans both signs, so a sign-blind read of a signed column and a
+            # sign-extending read of an unsigned one both show up.
+            vals.append(Int64((i % 15) - 7))
+            valid.append(i % 6 != 5)
+        var a = _int_array(types[ti].copy(), widths[ti], vals, valid)
+        for oi in range(len(ops)):
+            ref op = ops[oi]
+            for ki in range(len(lits)):
+                var e = Expr()
+                e.root = e.bound(
+                    op[0], 1, kinds[ti], [Datum.long_(lits[ki])], String("x")
+                )
+                var got = List[Bool](length=n, fill=False)
+                assert_true(
+                    _vector_leaf(e, e.root, a, got),
+                    "every integer width must have a kernel",
+                )
+                for r in range(n):
+                    var want = eval_leaf(
+                        e, e.root, extract_datum(a, r, kinds[ti], 0, 0, 0)
+                    )
+                    assert_equal(
+                        got[r],
+                        want,
+                        String(
+                            "leaf on arrow type ",
+                            types[ti].id,
+                            " op ",
+                            op_name(op[0]),
+                            " lit ",
+                            lits[ki],
+                            " row ",
+                            r,
+                        ),
+                    )
+
+    # `float` is stored at 32 bits and compared at 64, so the literal that no
+    # `float` represents exactly is the case that separates the two.
+    var f = ArrayData(ArrowType(AT_FLOAT32), String("x"))
+    f.length = n
+    var f32 = List[Float64]()
+    for i in range(n):
+        var v = Float64(Float32(Float64(i) * 0.1 - 2.0))
+        f32.append(v)
+        var bits = bitcast[DType.uint32](Float32(v))
+        for b in range(4):
+            f.values.append(UInt8((bits >> UInt32(8 * b)) & 0xFF))
+    var flits = [Float64(0.1), Float64(-2.0), Float64(0.30000000000000004)]
+    for oi in range(len(ops)):
+        ref op = ops[oi]
+        for ki in range(len(flits)):
+            var e = Expr()
+            e.root = e.bound(
+                op[0], 1, P_FLOAT, [Datum.double_(flits[ki])], String("x")
+            )
+            var got = List[Bool](length=n, fill=False)
+            assert_true(_vector_leaf(e, e.root, f, got), "float32 leaf")
+            for r in range(n):
+                var want = eval_leaf(
+                    e, e.root, extract_datum(f, r, P_FLOAT, 0, 0, 0)
+                )
+                assert_equal(
+                    got[r],
+                    want,
+                    String(
+                        "float32 leaf op ",
+                        op_name(op[0]),
+                        " lit ",
+                        flits[ki],
+                        " row ",
+                        r,
+                    ),
+                )
