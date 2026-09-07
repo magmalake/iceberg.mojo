@@ -44,7 +44,13 @@ every delete by sequence number and partition.
 from std.collections import Dict
 from std.memory import bitcast
 
-from parquet import ParquetReader, Predicate, RecordBatch
+from parquet import (
+    ParquetReader,
+    Predicate,
+    RecordBatch,
+    footer_only_buffer,
+    footer_start_of,
+)
 from parquet.reader import (
     OP_EQ as OP_EQ_PQ,
     OP_GE as OP_GE_PQ,
@@ -1234,8 +1240,14 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     var prune: Bool
     """Use the residual to drop row groups and pages before decoding."""
     var lazy: Bool
-    """Fetch the footer and only the surviving row groups, instead of the
-    whole file. Worth it over the network, pointless on a local disk."""
+    """Retained, and no longer read.
+
+    This used to fetch the footer and the row-group extents instead of the
+    whole file. A row group holds every column, so on a file of any width
+    that is the whole file minus its gaps — which is why it never paid for
+    itself. Fetching by *column chunk* does pay, so a scan now does it
+    unconditionally and this flag selects nothing. It stays so that a caller
+    setting it still compiles."""
     var num_workers: Int
     """How many OS threads a scan may use, in total.
 
@@ -1641,8 +1653,19 @@ def read_data_file(
                 out_subs.append(List[Int]())
                 read_subs.append([id])
 
-    var data = _load_bytes(io, data_file, options)
-    var reader = ParquetReader[AllCodecs](data^)
+    # The bytes arrive in two steps, and the projection is what separates
+    # them. Step one is the footer, which is all it takes to resolve the
+    # column plan below; step two, once `file_fields` says which leaves this
+    # scan actually decodes, fetches those chunks and nothing else. A
+    # four-of-nineteen projection over an NYC-taxi file reads 13 MiB instead
+    # of 60 MiB, and on that file reading the other 47 MiB cost more than
+    # decompressing the 13 (measured: 13.8 ms -> 7.7 ms for one column,
+    # 32.5 ms -> 26.6 ms for four). `_load_footer` falls back to the whole
+    # file whenever anything about the footer is unexpected, so the second
+    # step is an optimisation and never a correctness condition.
+    var sparse = False
+    var footer_only = _load_footer(io, data_file, sparse)
+    var reader = ParquetReader[AllCodecs](footer_only^)
     reader.batch_size = options.batch_size
     reader.verify_crc = options.verify_crc
     # The inner axis. `_worker_split` has already taken out whatever the file
@@ -1798,6 +1821,20 @@ def read_data_file(
         plans.append(plan^)
 
     reader.select_fields(file_fields)
+    if sparse:
+        # `needed_byte_ranges` is asked *after* `select_fields`, so what is
+        # fetched is exactly what the reader will decode rather than a guess
+        # that has to be kept in step with the plan above.
+        var ranges = reader.needed_byte_ranges()
+        for k in range(len(ranges)):
+            reader.fill_range(
+                ranges[k][0],
+                Span(
+                    io.read_range(
+                        data_file.file_path, ranges[k][0], ranges[k][1]
+                    )
+                ),
+            )
 
     # Which columns need a materialised array: everything projected, plus the
     # key columns of any equality delete and the owner of any struct leaf.
@@ -2168,124 +2205,39 @@ def _nested_field(schema: Schema, id: Int) raises -> NestedField:
 
 
 # ── loading the bytes ───────────────────────────────────────────────────────
-def _load_bytes(
-    io: FileIO, data_file: DataFile, options: ScanOptions
+def _load_footer(
+    io: FileIO, data_file: DataFile, mut sparse: Bool
 ) raises -> List[UInt8]:
-    """The file's bytes, or just the parts of them a scan will touch.
+    """A file-length buffer holding the footer, ready to be filled in.
 
-    `lazy` fetches the footer and then only the byte ranges of the row groups
-    that survive statistics pruning, into a buffer the size of the file with
-    everything else left zero. Parquet addresses everything by absolute file
-    offset, so a sparse buffer decodes exactly like the whole file — and over
-    a network this is the difference between one range request per row group
-    and downloading the object.
+    Two range requests — the 8-byte trailer, then the metadata — are enough
+    to build a `ParquetReader` and resolve a projection against it. The
+    chunks that projection reaches are fetched afterwards, by the caller,
+    through `ParquetReader.fill_range`.
+
+    `sparse` comes back True when the buffer holds the footer alone and the
+    chunks still have to be fetched, and False when anything unexpected about
+    the footer made this read the whole file instead — in which case the
+    caller skips the second step. That is the only fallback there is: this
+    never guesses which bytes a scan will want.
     """
-    if not options.lazy:
-        return io.read_all(data_file.file_path)
-
+    sparse = False
     var size = Int(data_file.file_size_in_bytes)
     if size <= 0:
         size = io.length(data_file.file_path)
     if size < 12:
         return io.read_all(data_file.file_path)
     var tail = io.read_range(data_file.file_path, size - 8, 8)
-    if len(tail) != 8 or tail[4] != 0x50 or tail[7] != 0x31:
-        # Not a footer we recognise; fall back rather than guess.
+    var footer_start = footer_start_of(size, Span(tail))
+    if footer_start < 0:
         return io.read_all(data_file.file_path)
-    var footer_len = (
-        Int(tail[0])
-        | (Int(tail[1]) << 8)
-        | (Int(tail[2]) << 16)
-        | (Int(tail[3]) << 24)
-    )
-    var footer_start = size - 8 - footer_len
-    if footer_start < 4 or footer_len <= 0:
-        return io.read_all(data_file.file_path)
-
     var footer = io.read_range(
-        data_file.file_path, footer_start, footer_len + 8
+        data_file.file_path, footer_start, size - footer_start
     )
-
-    # A footer-only reader is enough to say where each row group lives: a
-    # buffer of the right length with nothing in it but the magic and the
-    # footer parses exactly like the whole file.
-    var probe_bytes = List[UInt8](length=footer_start, fill=0)
-    probe_bytes[0] = 0x50
-    probe_bytes[1] = 0x41
-    probe_bytes[2] = 0x52
-    probe_bytes[3] = 0x31
-    probe_bytes.extend(Span(footer))
-    var probe = ParquetReader[AllCodecs](probe_bytes^)
-
-    var starts = List[Int]()
-    var lengths = List[Int]()
-    for g in range(probe.num_row_groups()):
-        var extent = _row_group_extent(probe, g)
-        if extent[1] <= 0 or extent[0] < 4 or extent[0] + extent[1] > size:
-            continue
-        # Insertion order, by offset: the buffer is filled front to back so
-        # every copy is one `extend` rather than a scatter.
-        var at = len(starts)
-        while at > 0 and starts[at - 1] > extent[0]:
-            at -= 1
-        starts.insert(at, extent[0])
-        lengths.insert(at, extent[1])
-
-    var buf = List[UInt8](capacity=size)
-    buf.append(0x50)
-    buf.append(0x41)
-    buf.append(0x52)
-    buf.append(0x31)
-    for k in range(len(starts)):
-        if starts[k] < len(buf):
-            # Overlapping extents: the earlier one already covers this.
-            continue
-        buf.resize(starts[k], 0)
-        buf.extend(
-            Span(io.read_range(data_file.file_path, starts[k], lengths[k]))
-        )
-    if len(buf) > footer_start:
-        raise Error(
-            "iceberg: '"
-            + data_file.file_path
-            + "' has a row group that runs into its footer"
-        )
-    buf.resize(footer_start, 0)
-    buf.extend(Span(footer))
-    buf.resize(size, 0)
-    return buf^
-
-
-def _row_group_extent(
-    reader: ParquetReader[AllCodecs], g: Int
-) raises -> Tuple[Int, Int]:
-    """`(start, length)` of one row group's column data.
-
-    A row group's first byte is the first page of its first column chunk —
-    the dictionary page when there is one — and `total_compressed_size` on the
-    column chunks covers the rest.
-    """
-    ref rg = reader.meta.row_groups[g]
-    var start = -1
-    var end = -1
-    for c in range(len(rg.columns)):
-        ref chunk = rg.columns[c]
-        if not chunk.meta_data:
-            continue
-        ref md = chunk.meta_data.value()
-        var at = Int(md.data_page_offset)
-        if md.dictionary_page_offset:
-            var dp = Int(md.dictionary_page_offset.value())
-            if dp > 0 and dp < at:
-                at = dp
-        var stop = at + Int(md.total_compressed_size)
-        if start < 0 or at < start:
-            start = at
-        if stop > end:
-            end = stop
-    if start < 0:
-        return (0, 0)
-    return (start, end - start)
+    if len(footer) != size - footer_start:
+        return io.read_all(data_file.file_path)
+    sparse = True
+    return footer_only_buffer(size, footer_start, Span(footer))
 
 
 # ── statistics predicates ───────────────────────────────────────────────────
