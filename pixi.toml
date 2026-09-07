@@ -145,7 +145,7 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "e16ce8e1c9364b745d30b7fde094984b066818ea" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3ebcd44e261d905be0cc0ceae058013eeecbfaf0" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
@@ -161,7 +161,7 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "e16ce8e1c9364b745d30b7fde094984b066818ea" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3ebcd44e261d905be0cc0ceae058013eeecbfaf0" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
