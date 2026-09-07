@@ -1177,15 +1177,27 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     """Fetch the footer and only the surviving row groups, instead of the
     whole file. Worth it over the network, pointless on a local disk."""
     var num_workers: Int
-    """How many OS threads read data files at once.
+    """How many OS threads a scan may use, in total.
 
-    `1`, the default, reads every file on the calling thread and is what every
-    existing caller gets. `0` means one worker per core. Anything else is that
-    many workers. File scan tasks are shared-nothing — each decodes, casts,
-    deletes and filters into its own arena — so the only ordering that matters
-    is the merge afterwards, which is by task index either way. A scan with a
-    `limit` ignores this and stays sequential: stopping early is only
-    meaningful in order.
+    `1`, the default, reads on the calling thread and is what every existing
+    caller gets. `0` means one worker per core. Anything else is that many
+    workers.
+
+    This is a budget, not a file count. A scan spends it on two nested axes —
+    the planned data files, and the *(row group, leaf)* pairs inside one file
+    that `ParquetReader.num_workers` decodes — and `TableScan._worker_split`
+    divides it between them: files first, because file scan tasks are
+    shared-nothing (each decodes, casts, deletes and filters into its own
+    arena), and whatever the plan is too narrow to use is handed to the reader.
+    A query that touches one file therefore still uses the whole budget, on row
+    groups and columns, instead of the one core the file axis alone could give
+    it. The product of the two never exceeds this number.
+
+    Neither axis reorders anything: files merge by task index and row groups
+    assemble in file order, so the rows a scan returns and the order they come
+    in do not depend on what this is set to. A scan with a `limit` ignores the
+    file axis and stays sequential — stopping early is only meaningful in
+    order — but still reads each file it does visit with the full budget.
     """
 
     def __init__(out self):
@@ -1573,6 +1585,10 @@ def read_data_file(
     var reader = ParquetReader[AllCodecs](data^)
     reader.batch_size = options.batch_size
     reader.verify_crc = options.verify_crc
+    # The inner axis. `_worker_split` has already taken out whatever the file
+    # axis is using, so this is the remainder and the two cannot oversubscribe;
+    # a direct caller of `read_data_file` reads one file and gets all of it.
+    reader.num_workers = options.num_workers
 
     # ── column projection, in the spec's order ─────────────────────────────
     var plans = List[_ColumnPlan]()
