@@ -1049,6 +1049,10 @@ struct ResidualEvaluator(Copyable, Movable):
     var strict: Expr
     var inclusive: Expr
     var spec: PartitionSpec
+    var conjuncts: List[Int]
+    """The top-level `and` spine of `expr`, as node indices."""
+    var conjunct_strict: List[Expr]
+    """Each conjunct's own strict projection, one per entry of `conjuncts`."""
 
     def __init__(
         out self, row_filter: Expr, spec: PartitionSpec, schema: Schema
@@ -1056,22 +1060,97 @@ struct ResidualEvaluator(Copyable, Movable):
         var rewritten = rewrite_not(row_filter)
         self.strict = project_strict(rewritten, spec, schema)
         self.inclusive = project_inclusive(rewritten, spec, schema)
+        self.conjuncts = []
+        _collect_conjuncts(rewritten, rewritten.root, self.conjuncts)
+        self.conjunct_strict = []
+        # Projecting each conjunct on its own is what lets a residual shrink
+        # rather than only vanish. It is done once per manifest, against a
+        # spine that is rarely longer than a handful of terms, so the cost does
+        # not scale with the number of data files it then serves.
+        if len(self.conjuncts) > 1:
+            for k in range(len(self.conjuncts)):
+                var one = Expr()
+                one.root = _copy_subtree(rewritten, self.conjuncts[k], one)
+                self.conjunct_strict.append(project_strict(one, spec, schema))
         self.expr = rewritten^
         self.spec = spec.copy()
 
     def residual_for(self, partition: List[Datum]) raises -> Expr:
-        """The residual filter for one partition tuple."""
+        """The residual filter for one partition tuple.
+
+        A conjunct whose *own* strict projection holds for this partition is
+        satisfied by every row in it, so dropping it leaves the filter's
+        meaning unchanged — and with it goes the column the reader would
+        otherwise have decoded only to check it. On a month-partitioned table,
+        `pickup >= '2024-06-01' and pickup < '2024-07-01' and distance > 1`
+        reduces to `distance > 1`, and the timestamp column is never read: over
+        3.5M rows that is a 24.7 ms column decode this used to pay per file for
+        an answer the partition already gave. Reducing only when the *whole*
+        filter is strictly satisfied — which is what this did before — leaves
+        that on the table for every query that mixes a partition-aligned range
+        with a predicate on data.
+        """
         if _eval_partition(self.strict, self.strict.root, self.spec, partition):
             var t = Expr()
             t.root = t.constant(True)
             return t^
-        return self.expr.copy()
+        if len(self.conjuncts) < 2:
+            return self.expr.copy()
+        var kept = List[Int]()
+        for k in range(len(self.conjuncts)):
+            ref one = self.conjunct_strict[k]
+            if _eval_partition(one, one.root, self.spec, partition):
+                continue
+            kept.append(self.conjuncts[k])
+        if len(kept) == 0:
+            # Unreachable while the whole-filter test above is exact, but the
+            # empty conjunction is `true` and saying so costs nothing.
+            var t = Expr()
+            t.root = t.constant(True)
+            return t^
+        if len(kept) == len(self.conjuncts):
+            return self.expr.copy()
+        var out = Expr()
+        var root = _copy_subtree(self.expr, kept[0], out)
+        for k in range(1, len(kept)):
+            var side = _copy_subtree(self.expr, kept[k], out)
+            root = out.connective(OP_AND, root, side)
+        out.root = root
+        return out^
 
     def selects(self, partition: List[Datum]) raises -> Bool:
         """Whether the inclusive projection keeps this partition tuple."""
         return _eval_partition(
             self.inclusive, self.inclusive.root, self.spec, partition
         )
+
+
+def _collect_conjuncts(e: Expr, i: Int, mut out: List[Int]):
+    """The top-level `and` spine of `e`, flattened, in left-to-right order."""
+    if i < 0:
+        return
+    if e.nodes[i].op == OP_AND:
+        _collect_conjuncts(e, e.nodes[i].left, out)
+        _collect_conjuncts(e, e.nodes[i].right, out)
+        return
+    out.append(i)
+
+
+def _copy_subtree(src: Expr, i: Int, mut dst: Expr) -> Int:
+    """Copy one subtree into another arena; returns its root there.
+
+    Children are added before their parent because an arena index has to exist
+    before it can be referred to.
+    """
+    ref n = src.nodes[i]
+    var node = n.copy()
+    if n.op == OP_AND or n.op == OP_OR:
+        node.left = _copy_subtree(src, n.left, dst)
+        node.right = _copy_subtree(src, n.right, dst)
+    elif n.op == OP_NOT:
+        node.left = _copy_subtree(src, n.left, dst)
+        node.right = -1
+    return dst.add(node^)
 
 
 def _eval_partition(

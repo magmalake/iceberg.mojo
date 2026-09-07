@@ -10,6 +10,46 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Changed
+- **The residual is evaluated a vector at a time, and the rows it keeps are
+  compacted rather than copied run by run.** Carrying one trivially-true
+  predicate over 3.5M rows cost **+45.9 ms** and now costs nothing measurable
+  (−3.7 ms, inside the run-to-run spread), against pyarrow's +11.3 ms for the
+  same predicate — the ~15 ns/row of issue #14 against pyarrow's ~3. Four
+  things changed, all of them in the per-row work between the decode and the
+  answer, measured over the whole 79.5M-row NYC-taxi table single-threaded:
+  a comparison against a literal became a SIMD loop over the values buffer
+  with nulls cleared afterwards from the validity bitmap rather than branched
+  on per row (a three-predicate scan: 545 ms to 51 ms); `and`, `or` and `not`
+  combine sixteen rows per step; the count of surviving rows is a widening sum
+  instead of a branch per row (47 ms to 2.4 ms on *every* scan, filtered or
+  not); and `filter_array` now chooses between its run copy and a branch-free
+  compaction by selectivity, which is what a scattered equality predicate
+  wanted (q3 of the taxi suite: 259 ms to 55 ms). A selection vector is still
+  a `List[Bool]`; what changed is that nothing walks it one row at a time.
+  Nulls, NaN and every integer width are checked against the `Datum` evaluator
+  they replace over lengths that cross the vector/tail boundary in both
+  directions.
+- **A residual drops the conjuncts a partition already satisfies, not only the
+  ones that satisfy it whole.** `ResidualEvaluator` reduced to `true` when the
+  strict projection of the *entire* filter held and otherwise returned the
+  filter unchanged, so
+  `pickup >= '2024-06-01' and pickup < '2024-07-01' and distance > 1` on a
+  month-partitioned table kept its timestamp bounds inside June — and with
+  them the timestamp column, decoded on every such file for an answer the
+  partition tuple had already given. Each conjunct of the top-level `and`
+  spine is now projected on its own and dropped when the partition strictly
+  satisfies it: on the 3.5M-row June file that is a 24.7 ms column decode
+  removed per file. An `or` is one conjunct and is never taken apart, because
+  dropping the side a partition satisfies would lose the rows that matched
+  only the other one.
+
+  On the [taxibench](https://github.com/magmalake/taxibench.example) suite,
+  single-threaded, the two changes together take the total from 6192 ms to
+  **4123 ms** against PyIceberg 0.11.1's 4281 ms — from 0.69x to 1.04x — with
+  every answer unchanged. The five queries that filter on a data column move
+  from 0.46–0.78x to 0.67–1.00x; what is left in them is the Parquet decode.
+
 ## [0.7.0] - 2026-09-07
 
 ### Added

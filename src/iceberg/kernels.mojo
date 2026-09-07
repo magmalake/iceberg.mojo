@@ -23,6 +23,8 @@ read, and that cost about 70x.
 """
 
 from std.memory import bitcast
+from std.math import isnan
+from std.sys import size_of
 
 from parquet.arrow import (
     AT_BINARY,
@@ -618,6 +620,359 @@ def extract_datum(
     return Datum.integral(kind, int_at(a, i))
 
 
+# ── selection vectors ───────────────────────────────────────────────────────
+comptime SEL_LANES = 16
+"""How many rows one step of a selection-vector kernel handles.
+
+Every loop in this section is bound by the buffer it reads rather than by its
+arithmetic — a `>` over a `double` column at this width reads 128 bytes per
+step and runs at about 57 GB/s on an M4 — so the width is not tuned per
+operation. Sixteen is one 128-bit register of `List[Bool]` bytes, which is what
+the combine, count and run-scan kernels move.
+"""
+
+
+# A selection vector is read and written through its bytes. Mojo stores a
+# `Bool` as one byte and reads it back by truncating to the low bit, so every
+# byte-wise kernel below — `&`, `|`, `~`, the 0/1 sum, the all-zero and
+# all-ones tests — agrees with `Bool` semantics on *any* byte value, not only
+# on a canonical 0 or 1. That is what makes the reinterpret safe rather than
+# merely convenient.
+
+
+def sel_uninit(n: Int) -> List[Bool]:
+    """A selection vector of `n` rows, every one of them uninitialised.
+
+    Zeroing a vector that the kernel about to run overwrites in full is a
+    second pass over the same memory for nothing: at 0.23 ns/row it cost more
+    than the comparison it preceded, and a three-predicate scan of the taxi
+    table paid it three times. **Every caller must write all `n` elements** —
+    the leaf paths in `read.mojo` do, on both the vectorised branch and the
+    `Datum` fallback that follows a refusal.
+    """
+    var out = List[Bool](capacity=n)
+    out.resize(unsafe_uninit_length=n)
+    return out^
+
+
+def sel_count(keep: List[Bool]) -> Int:
+    """How many rows a selection vector keeps.
+
+    A branch per row cost 0.60 ns/row — 47 ms on every 79.5M-row scan of the
+    taxi table, filtered or not — for a number the loop that produced the
+    vector could have carried. Summing the low bits sixteen at a time costs
+    0.033 ns/row instead. The per-lane accumulator is 32-bit, which cannot
+    overflow: it sees one batch, and a batch would need 34 billion rows.
+    """
+    var n = len(keep)
+    var p = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var acc = SIMD[DType.int32, SEL_LANES](0)
+    var i = 0
+    while i + SEL_LANES <= n:
+        acc += (p.unsafe_load[width=SEL_LANES, alignment=1](i) & 1).cast[
+            DType.int32
+        ]()
+        i += SEL_LANES
+    var total = Int(acc.reduce_add())
+    while i < n:
+        total += Int(p[unsafe_offset=i] & 1)
+        i += 1
+    return total
+
+
+def sel_any(keep: List[Bool]) -> Bool:
+    """Whether any row survives. Stops at the first one that does."""
+    var n = len(keep)
+    var p = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = 0
+    while i + SEL_LANES <= n:
+        if (
+            p.unsafe_load[width=SEL_LANES, alignment=1](i) & 1
+        ).reduce_or() != 0:
+            return True
+        i += SEL_LANES
+    while i < n:
+        if (p[unsafe_offset=i] & 1) != 0:
+            return True
+        i += 1
+    return False
+
+
+def sel_and(mut left: List[Bool], right: List[Bool]):
+    """`left &= right`, row-wise."""
+    var n = len(left) if len(left) < len(right) else len(right)
+    var a = left.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var b = right.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = 0
+    while i + SEL_LANES <= n:
+        a.unsafe_store[alignment=1](
+            i,
+            a.unsafe_load[width=SEL_LANES, alignment=1](i)
+            & b.unsafe_load[width=SEL_LANES, alignment=1](i),
+        )
+        i += SEL_LANES
+    while i < n:
+        a[unsafe_offset=i] = a[unsafe_offset=i] & b[unsafe_offset=i]
+        i += 1
+
+
+def sel_or(mut left: List[Bool], right: List[Bool]):
+    """`left |= right`, row-wise."""
+    var n = len(left) if len(left) < len(right) else len(right)
+    var a = left.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var b = right.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = 0
+    while i + SEL_LANES <= n:
+        a.unsafe_store[alignment=1](
+            i,
+            a.unsafe_load[width=SEL_LANES, alignment=1](i)
+            | b.unsafe_load[width=SEL_LANES, alignment=1](i),
+        )
+        i += SEL_LANES
+    while i < n:
+        a[unsafe_offset=i] = a[unsafe_offset=i] | b[unsafe_offset=i]
+        i += 1
+
+
+def sel_not(mut keep: List[Bool]):
+    """`keep = not keep`, row-wise. Only the low bit of each byte carries."""
+    var n = len(keep)
+    var p = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = 0
+    while i + SEL_LANES <= n:
+        p.unsafe_store[alignment=1](
+            i, ~p.unsafe_load[width=SEL_LANES, alignment=1](i) & 1
+        )
+        i += SEL_LANES
+    while i < n:
+        p[unsafe_offset=i] = ~p[unsafe_offset=i] & 1
+        i += 1
+
+
+def sel_next_true(keep: List[Bool], start: Int) -> Int:
+    """The first kept row at or after `start`, or `len(keep)`.
+
+    Sixteen rows are tested at a time so that a highly selective filter walks
+    its own gaps at memory speed rather than one branch per row. On the taxi
+    suite's most selective query that turned a 79.5M-iteration scan per output
+    column into 5M vector tests.
+    """
+    var n = len(keep)
+    var p = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = start
+    while i + SEL_LANES <= n:
+        var v = p.unsafe_load[width=SEL_LANES, alignment=1](i) & 1
+        if v.reduce_or() != 0:
+            break
+        i += SEL_LANES
+    while i < n:
+        if (p[unsafe_offset=i] & 1) != 0:
+            return i
+        i += 1
+    return n
+
+
+def sel_next_false(keep: List[Bool], start: Int) -> Int:
+    """The first dropped row at or after `start`, or `len(keep)`."""
+    var n = len(keep)
+    var p = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var i = start
+    while i + SEL_LANES <= n:
+        var v = p.unsafe_load[width=SEL_LANES, alignment=1](i) & 1
+        if v.reduce_and() == 0:
+            break
+        i += SEL_LANES
+    while i < n:
+        if (p[unsafe_offset=i] & 1) == 0:
+            return i
+        i += 1
+    return n
+
+
+def sel_compare[
+    store: DType, compare: DType
+](
+    values: Span[UInt8, _],
+    n: Int,
+    lit: Scalar[compare],
+    lt: Bool,
+    eq: Bool,
+    gt: Bool,
+    mut out: List[Bool],
+):
+    """`out[r] = accept(cmp(values[r], lit))` over a fixed-width column.
+
+    `store` is how the column is laid out and `compare` is the width Iceberg
+    orders it at: a narrow integer widens to `int64` and a `float` widens to
+    `double`, which is what makes the comparison exact rather than an
+    approximation of the literal in the column's own width. The widening is a
+    register move, and the loop stays bound by the values buffer.
+
+    Iceberg orders NaN *above* every number, where IEEE makes it unordered, so
+    a NaN lane fails all three machine comparisons and is folded into the
+    greater-than case by hand. A NaN *literal* is not handled here — the caller
+    keeps the scalar path for that, because it inverts the rule.
+
+    Nulls are not this kernel's business: `sel_apply_validity` clears them
+    afterwards, which costs one byte read per eight rows instead of a branch
+    per row.
+    """
+    var src = values.unsafe_ptr().unsafe_bitcast[Scalar[store]]()
+    var dst = out.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var wide = SIMD[compare, SEL_LANES](lit)
+    var zero = SIMD[DType.uint8, SEL_LANES](0)
+    var on_lt = SIMD[DType.uint8, SEL_LANES](1 if lt else 0)
+    var on_eq = SIMD[DType.uint8, SEL_LANES](1 if eq else 0)
+    var on_gt = SIMD[DType.uint8, SEL_LANES](1 if gt else 0)
+    var i = 0
+    while i + SEL_LANES <= n:
+        var v = src.unsafe_load[width=SEL_LANES, alignment=1](i).cast[compare]()
+        var r = (
+            v.lt(wide).select(on_lt, zero)
+            | v.eq(wide).select(on_eq, zero)
+            | v.gt(wide).select(on_gt, zero)
+        )
+        comptime if compare.is_floating_point():
+            # `isnan`, and not `v.ne(v)`: Mojo 1.0.0's SIMD `ne` answers
+            # `False` for a NaN lane compared against itself, where `eq`
+            # correctly answers `False` too — the two do not complement each
+            # other on NaN. A kernel written the IEEE way silently dropped
+            # every NaN from a `!=` and a `>`.
+            r = r | isnan(v).select(on_gt, zero)
+        dst.unsafe_store[alignment=1](i, r)
+        i += SEL_LANES
+    while i < n:
+        var v = src.unsafe_load[alignment=1](i).cast[compare]()
+        var keep: Bool
+        if v < lit:
+            keep = lt
+        elif v == lit:
+            keep = eq
+        else:
+            # Greater, or — for a float — NaN, which Iceberg orders last.
+            keep = gt
+        dst[unsafe_offset=i] = UInt8(1) if keep else UInt8(0)
+        i += 1
+
+
+def sel_apply_validity(mut out: List[Bool], validity: Span[UInt8, _], n: Int):
+    """Drop the rows a comparison kernel judged without looking at nulls.
+
+    A null satisfies no comparison, so this is an unconditional clear rather
+    than a re-evaluation. An all-valid byte is skipped and an all-null byte
+    clears eight rows at once, which is why carrying nulls costs nothing on the
+    columns that have none and very little on the columns that do.
+    """
+    if len(validity) == 0:
+        return
+    var dst = out.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var bytes = (n + 7) // 8
+    for b in range(bytes):
+        var mask = validity[b] if b < len(validity) else UInt8(0)
+        if mask == 0xFF:
+            continue
+        var base = b * 8
+        var upto = 8 if base + 8 <= n else n - base
+        for k in range(upto):
+            if ((mask >> UInt8(k)) & 1) == 0:
+                dst[unsafe_offset=base + k] = 0
+
+
+comptime COMPACT_AT_ONE_IN = 32
+"""Above this selectivity `filter_array` compacts; below it, it copies runs.
+
+The two shapes cross over between 1% and 5% on the taxi table, measured on the
+same file set with the same projection: at 5.0% kept the compaction is 57.7 ms
+against the run copy's 110.8, and at 1.06% kept it is 73.4 against 41.9. What
+turns over is not the copying — the compaction moves far less — but the scan
+of the selection vector: the run copy exits its skip loop on the first kept row
+and is predicted perfectly, while the compaction takes an unpredictable branch
+once per sixteen rows whether or not anything survives them. One in 32 sits
+between the two measurements and is deliberately not tuned finer than that,
+because the curve is flat there.
+"""
+
+
+def sel_compact[
+    dtype: DType
+](
+    values: Span[UInt8, _],
+    keep: List[Bool],
+    n: Int,
+    n_keep: Int,
+    mut out: List[UInt8],
+):
+    """Copy the kept elements of a fixed-width buffer into `out`, in order.
+
+    The run-based copy above is the right shape for a range predicate over a
+    sorted column, where a run is thousands of rows and one `extend` moves it.
+    It is the wrong shape for an equality predicate over a scattered column:
+    `payment_type = 2` keeps 15% of the taxi table in runs averaging barely
+    more than one row, and the per-run bookkeeping — a capacity check and a
+    call — then costs about twenty times the eight bytes it moves.
+
+    So this loop does not look for runs at all. It stores every element
+    unconditionally and advances the write cursor only for the kept ones,
+    which is branch-free, and it skips sixteen rows at a time when none of them
+    survive, which is what keeps a highly selective filter cheap. The
+    speculative store is why `out` is allocated one element longer than the
+    answer: the cursor is written before it is advanced, so the last dropped
+    row would otherwise write one past the end. One element, and not one per
+    input row — sizing the buffer to the input instead cost a 26 MB allocation
+    per column per batch and made the most selective query in the taxi suite
+    2.5x slower than the run-based copy it replaced.
+    """
+    comptime w = size_of[Scalar[dtype]]()
+    out.resize(unsafe_uninit_length=w * (n_keep + 1))
+    var src = values.unsafe_ptr().unsafe_bitcast[Scalar[dtype]]()
+    var dst = out.unsafe_ptr().unsafe_bitcast[Scalar[dtype]]()
+    var flags = keep.unsafe_ptr().unsafe_bitcast[UInt8]()
+    var j = 0
+    var i = 0
+    while i + SEL_LANES <= n:
+        var block = flags.unsafe_load[width=SEL_LANES, alignment=1](i) & 1
+        if block.reduce_or() != 0:
+            comptime for k in range(SEL_LANES):
+                dst.unsafe_store[alignment=1](
+                    j, src.unsafe_load[alignment=1](i + k)
+                )
+                j += Int(block[k])
+        i += SEL_LANES
+    while i < n:
+        dst.unsafe_store[alignment=1](j, src.unsafe_load[alignment=1](i))
+        j += Int(flags[unsafe_offset=i] & 1)
+        i += 1
+    out.resize(unsafe_uninit_length=w * j)
+
+
+def sel_compact_width(
+    values: Span[UInt8, _],
+    keep: List[Bool],
+    n: Int,
+    n_keep: Int,
+    width: Int,
+    mut out: List[UInt8],
+) -> Bool:
+    """`sel_compact` for whichever of Arrow's fixed widths this column has.
+
+    Returns `False` for a width with no specialisation — only `decimal128` and
+    an odd `fixed(n)`, which keep the run-based copy.
+    """
+    if width == 8:
+        sel_compact[DType.uint64](values, keep, n, n_keep, out)
+        return True
+    if width == 4:
+        sel_compact[DType.uint32](values, keep, n, n_keep, out)
+        return True
+    if width == 2:
+        sel_compact[DType.uint16](values, keep, n, n_keep, out)
+        return True
+    if width == 1:
+        sel_compact[DType.uint8](values, keep, n, n_keep, out)
+        return True
+    return False
+
+
 # ── filter ──────────────────────────────────────────────────────────────────
 def filter_array(
     a: ArrayData, keep: List[Bool], n_keep: Int
@@ -649,16 +1004,27 @@ def filter_array(
     if not no_nulls:
         out.validity = List[UInt8](length=(n_keep + 7) // 8, fill=0)
     var n = len(keep)
+    if (
+        no_nulls
+        and width > 0
+        and a.type.id != AT_BOOL
+        and not is_var_width(a.type)
+        and n_keep * COMPACT_AT_ONE_IN >= n
+        and sel_compact_width(
+            Span(a.values), keep, n, n_keep, width, out.values
+        )
+    ):
+        # A fixed-width column with no nulls is nothing but its values buffer,
+        # so the compaction *is* the filter and there is no second pass.
+        return out^
     var j = 0
-    var i = 0
+    var i = sel_next_true(keep, 0)
     while i < n:
-        if not keep[i]:
-            i += 1
-            continue
-        # `[i, end)` is a maximal run of kept rows.
-        var end = i + 1
-        while end < n and keep[end]:
-            end += 1
+        # `[i, end)` is a maximal run of kept rows. Both ends are found
+        # sixteen rows at a time: at low selectivity the gaps between runs are
+        # most of the vector, and walking them one branch per row cost more
+        # than copying the rows that survive.
+        var end = sel_next_false(keep, i + 1)
         var count = end - i
         if not no_nulls:
             for r in range(i, end):
@@ -688,7 +1054,7 @@ def filter_array(
         elif width > 0:
             out.values.extend(Span(a.values)[width * i : width * end])
         j += count
-        i = end
+        i = sel_next_true(keep, end)
     if out.null_count == 0:
         # No kept row was null, so Arrow's "buffer absent" encoding says it.
         out.validity.clear()
