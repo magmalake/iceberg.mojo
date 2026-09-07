@@ -10,6 +10,16 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-07
+
+Filed under *Changed* because no API moved and every answer is identical, but
+the effect is not small: on the eight-query
+[taxibench](https://github.com/magmalake/taxibench.example) suite over 79.5M
+NYC-taxi rows, single-threaded, the total went from **0.70x the speed of
+PyIceberg 0.11.1 to 1.06x**, and the three queries that were furthest behind —
+q3 at 1014 ms, q4 at 1316 ms, q8 at 1688 ms — are now 599 ms, 840 ms and
+914 ms.
+
 ### Changed
 - **The residual is evaluated a vector at a time, and the rows it keeps are
   compacted rather than copied run by run.** Carrying one trivially-true
