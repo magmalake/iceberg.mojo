@@ -163,6 +163,8 @@ from iceberg.values import (
     iso_text,
     civil_from_days,
     days_from_civil,
+    MICROS_PER_DAY,
+    MICROS_PER_HOUR,
     datum_from_bytes_prim,
     datum_to_bytes,
     int64_to_be_twos,
@@ -181,12 +183,15 @@ from iceberg.expressions import (
     FieldSummary,
     ColumnMetrics,
     OP_EQ,
+    OP_LT,
     OP_LT_EQ,
+    OP_GT,
     OP_GT_EQ,
     OP_IN,
     OP_TRUE,
     OP_FALSE,
     OP_NOT_EQ,
+    OP_NOT_IN,
     op_name,
 )
 from iceberg.transforms import (
@@ -1301,6 +1306,371 @@ def test_strict_projection() raises:
     assert_equal(q.nodes[q.root].op, OP_FALSE)
 
 
+def _ts_spec(transform: String) raises -> PartitionSpec:
+    """A one-field spec over `ts`, the timestamp column of FILTER_SCHEMA."""
+    return spec_from(
+        '{"spec-id":0,"fields":[{"source-id":4,"field-id":1000,"transform":"'
+        + transform
+        + '","name":"p"}]}'
+    )
+
+
+def _strict_ts(dsl: String, transform: String) raises -> Expr:
+    var schema = Schema.parse(FILTER_SCHEMA)
+    return project_strict(
+        rewrite_not(bound_filter(dsl)), _ts_spec(transform), schema
+    )
+
+
+def test_strict_projection_month_boundaries() raises:
+    """A range whose ends land on partition boundaries projects strictly onto
+    the partition it covers, so the whole filter can be dropped.
+
+    Counting months from 1970-01 as zero, June 2024 is 653. The bound has to be
+    open, because the boundary's own partition holds values on both sides of an
+    interior boundary, so `>= x` transforms `x - 1` and `< x` transforms `x`.
+    """
+    var lo = _strict_ts('[">=","ts","2024-06-01T00:00:00"]', "month")
+    assert_equal(lo.nodes[lo.root].op, OP_GT)
+    assert_equal(lo.nodes[lo.root].lits[0].i, 652)
+    var hi = _strict_ts('["<","ts","2024-07-01T00:00:00"]', "month")
+    assert_equal(hi.nodes[hi.root].op, OP_LT)
+    assert_equal(hi.nodes[hi.root].lits[0].i, 654)
+    # `<=` at the last microsecond of June is the same half-line as `<` at the
+    # first of July, and has to project to the same bound.
+    var hi2 = _strict_ts('["<=","ts","2024-06-30T23:59:59.999999"]', "month")
+    assert_equal(hi2.nodes[hi2.root].op, OP_LT)
+    assert_equal(hi2.nodes[hi2.root].lits[0].i, 654)
+    var lo2 = _strict_ts('[">","ts","2024-05-31T23:59:59.999999"]', "month")
+    assert_equal(lo2.nodes[lo2.root].op, OP_GT)
+    assert_equal(lo2.nodes[lo2.root].lits[0].i, 652)
+    # Mid-month the conservatism is the point: June holds rows on both sides of
+    # the 15th, so no June partition can be claimed to lie wholly above it.
+    var mid = _strict_ts('[">=","ts","2024-06-15T00:00:00"]', "month")
+    assert_equal(mid.nodes[mid.root].op, OP_GT)
+    assert_equal(mid.nodes[mid.root].lits[0].i, 653)
+    var mid2 = _strict_ts('["<","ts","2024-06-15T00:00:00"]', "month")
+    assert_equal(mid2.nodes[mid2.root].op, OP_LT)
+    assert_equal(mid2.nodes[mid2.root].lits[0].i, 653)
+
+
+def test_inclusive_projection_unchanged_by_strict_boundaries() raises:
+    """The inclusive direction steps the other way and must not have moved: it
+    keeps every partition that could hold a match, boundary or not."""
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = _ts_spec("month")
+    var lo = project_inclusive(
+        rewrite_not(bound_filter('[">=","ts","2024-06-01T00:00:00"]')),
+        spec,
+        schema,
+    )
+    assert_equal(lo.nodes[lo.root].op, OP_GT_EQ)
+    assert_equal(lo.nodes[lo.root].lits[0].i, 653)
+    var hi = project_inclusive(
+        rewrite_not(bound_filter('["<","ts","2024-07-01T00:00:00"]')),
+        spec,
+        schema,
+    )
+    assert_equal(hi.nodes[hi.root].op, OP_LT_EQ)
+    assert_equal(hi.nodes[hi.root].lits[0].i, 653)
+
+
+def test_residual_month_aligned_range() raises:
+    """The shape of every query against a time-partitioned table: one whole
+    month. Its residual has to be `true`, and its neighbours' must not be."""
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = _ts_spec("month")
+    var aligned = ResidualEvaluator(
+        bound_filter(
+            '["and",[">=","ts","2024-06-01T00:00:00"],'
+            '["<","ts","2024-07-01T00:00:00"]]'
+        ),
+        spec,
+        schema,
+    )
+    var june = List[Datum]()
+    june.append(Datum.int_(653))
+    assert_true(aligned.selects(june), "June must survive partition pruning")
+    var res = aligned.residual_for(june)
+    assert_equal(
+        res.text(res.root),
+        '["true"]',
+        "a month-aligned range leaves nothing to check inside its own month",
+    )
+    # The months either side are pruned outright, so they never get a residual.
+    var may = List[Datum]()
+    may.append(Datum.int_(652))
+    var july = List[Datum]()
+    july.append(Datum.int_(654))
+    assert_false(aligned.selects(may))
+    assert_false(aligned.selects(july))
+    # Half a month keeps the filter: June holds rows on both sides of the 15th.
+    var partial = ResidualEvaluator(
+        bound_filter(
+            '["and",[">=","ts","2024-06-15T00:00:00"],'
+            '["<","ts","2024-07-01T00:00:00"]]'
+        ),
+        spec,
+        schema,
+    )
+    assert_true(partial.selects(june))
+    var res2 = partial.residual_for(june)
+    assert_false(
+        res2.is_true(res2.root),
+        "a mid-month bound cannot be decided by the partition value",
+    )
+    # A null partition value decides nothing either, whatever the bounds.
+    var unknown = List[Datum]()
+    unknown.append(Datum.none())
+    var res3 = aligned.residual_for(unknown)
+    assert_false(res3.is_true(res3.root))
+
+
+def test_strict_projection_truncate_boundaries() raises:
+    """`truncate` is order-preserving too and takes the same path, including
+    below zero, where the bucket of a value is found by flooring rather than by
+    truncating toward zero."""
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":6,"field-id":1000,'
+        '"transform":"truncate[10]","name":"c"}]}'
+    )
+    var r = ResidualEvaluator(
+        bound_filter('["and",[">=","cnt",20],["<","cnt",30]]'), spec, schema
+    )
+    var b20 = List[Datum]()
+    b20.append(Datum.int_(20))
+    var res = r.residual_for(b20)
+    assert_equal(res.text(res.root), '["true"]')
+    # Bucket 20 spans [20, 30), so a bound inside it cannot be dropped.
+    var r2 = ResidualEvaluator(
+        bound_filter('["and",[">=","cnt",25],["<","cnt",30]]'), spec, schema
+    )
+    var res2 = r2.residual_for(b20)
+    assert_false(res2.is_true(res2.root))
+    # Bucket -30 spans [-30, -20): `-31 // 10` has to floor to -4, not to -3,
+    # or the lower bound lands a bucket too high and the range is claimed for a
+    # partition that reaches below it.
+    var r3 = ResidualEvaluator(
+        bound_filter('["and",[">=","cnt",-30],["<","cnt",-20]]'), spec, schema
+    )
+    var bneg = List[Datum]()
+    bneg.append(Datum.int_(-30))
+    var res3 = r3.residual_for(bneg)
+    assert_equal(res3.text(res3.root), '["true"]')
+    var r4 = ResidualEvaluator(
+        bound_filter('["and",[">=","cnt",-25],["<","cnt",-20]]'), spec, schema
+    )
+    var res4 = r4.residual_for(bneg)
+    assert_false(res4.is_true(res4.root))
+
+
+def test_strict_projection_truncate_string_stays_open() raises:
+    """Strings have no adjacent value, so a `>=` bound cannot be restated as
+    the open bound the strict projection needs and stays one partition
+    conservative — where Java's `truncateArrayStrict` also stops."""
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":2,"field-id":1000,'
+        '"transform":"truncate[2]","name":"r"}]}'
+    )
+    var p = project_strict(
+        rewrite_not(bound_filter('[">=","region","eu"]')), spec, schema
+    )
+    assert_equal(p.nodes[p.root].op, OP_GT)
+    assert_equal(p.nodes[p.root].lits[0].s, "eu")
+    var r = ResidualEvaluator(
+        bound_filter('[">=","region","eu"]'), spec, schema
+    )
+    var eu = List[Datum]()
+    eu.append(Datum.string_("eu"))
+    var res = r.residual_for(eu)
+    assert_false(res.is_true(res.root))
+    # `<` still projects onto the transform of the literal itself, which is
+    # where the strict bound already was.
+    var q = project_strict(
+        rewrite_not(bound_filter('["<","region","us"]')), spec, schema
+    )
+    assert_equal(q.nodes[q.root].op, OP_LT)
+    assert_equal(q.nodes[q.root].lits[0].s, "us")
+
+
+def test_strict_projection_corrects_pre_epoch_time() raises:
+    """Iceberg 0.10.0 and earlier wrote pre-epoch partition values one unit
+    high, so at and below zero the strict lower bound is tightened by one.
+
+    `month(1969-06-01)` is -7. Naively `ts >= 1969-06-01` projects to
+    `> month(1969-05-31T23:59:59.999999)` = `> -8`, which -7 satisfies; a file
+    written by one of those versions could carry -7 while holding rows that
+    really belong to -8, so the bound is raised to `> -7` and nothing reduces.
+    """
+    var lo = _strict_ts('[">=","ts","1969-06-01T00:00:00"]', "month")
+    assert_equal(lo.nodes[lo.root].op, OP_GT)
+    assert_equal(lo.nodes[lo.root].lits[0].i, -7)
+    # The upper bound is unaffected: a value written high can only make a
+    # partition look further above the bound, never further below it.
+    var hi = _strict_ts('["<","ts","1969-07-01T00:00:00"]', "month")
+    assert_equal(hi.nodes[hi.root].op, OP_LT)
+    assert_equal(hi.nodes[hi.root].lits[0].i, -6)
+    # Nor is a modern bound, which is what makes the correction free in
+    # practice: every partition value above zero is trusted as written.
+    var modern = _strict_ts('[">=","ts","2024-06-01T00:00:00"]', "month")
+    assert_equal(modern.nodes[modern.root].lits[0].i, 652)
+    # `!=` has to exclude both the value the rows transform to and the one a
+    # legacy writer may have recorded for them.
+    var ne = _strict_ts('["!=","ts","1969-06-15T00:00:00"]', "month")
+    assert_equal(ne.nodes[ne.root].op, OP_NOT_IN)
+    assert_equal(len(ne.nodes[ne.root].lits), 2)
+    assert_equal(ne.nodes[ne.root].lits[0].i, -7)
+    assert_equal(ne.nodes[ne.root].lits[1].i, -6)
+
+
+comptime DATE_SCHEMA = String(
+    '{"type":"struct","schema-id":0,"fields":['
+    '{"id":1,"name":"dt","required":false,"type":"date"}]}'
+)
+
+
+def test_strict_projection_day_of_date_is_not_corrected() raises:
+    """`day` of a `date` column hands back the stored day count unchanged, so
+    the division that produced the pre-0.11 bug never ran and the bound is not
+    tightened — the same exception Java's `Dates.projectStrict` makes."""
+    var schema = Schema.parse(DATE_SCHEMA)
+    var spec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,'
+        '"transform":"day","name":"p"}]}'
+    )
+    var f = bind(parse_filter('[">=","dt","1969-06-01"]'), schema)
+    var p = project_strict(rewrite_not(f), spec, schema)
+    assert_equal(p.nodes[p.root].op, OP_GT)
+    assert_equal(p.nodes[p.root].lits[0].i, -215)
+    # `month` of the same column does divide, so it is corrected.
+    var mspec = spec_from(
+        '{"spec-id":0,"fields":[{"source-id":1,"field-id":1000,'
+        '"transform":"month","name":"p"}]}'
+    )
+    var q = project_strict(rewrite_not(f), mspec, schema)
+    assert_equal(q.nodes[q.root].lits[0].i, -7)
+
+
+def _bucket_span(kind: UInt8, p: Int64) raises -> List[Int64]:
+    """The first and last microsecond a time transform maps to partition `p`."""
+    if kind == T_HOUR:
+        return [p * MICROS_PER_HOUR, (p + 1) * MICROS_PER_HOUR - 1]
+    if kind == T_DAY:
+        return [p * MICROS_PER_DAY, (p + 1) * MICROS_PER_DAY - 1]
+    if kind == T_MONTH:
+        var a = days_from_civil(1970 + (p // 12), (p % 12) + 1, 1)
+        var q = p + 1
+        var b = days_from_civil(1970 + (q // 12), (q % 12) + 1, 1)
+        return [a * MICROS_PER_DAY, b * MICROS_PER_DAY - 1]
+    return [
+        days_from_civil(1970 + p, 1, 1) * MICROS_PER_DAY,
+        days_from_civil(1971 + p, 1, 1) * MICROS_PER_DAY - 1,
+    ]
+
+
+def _ts_predicate(op: UInt8, micros: Int64) raises -> Expr:
+    """`ts <op> <micros>`, bound by hand so the sweep can name instants that
+    have no tidy ISO spelling."""
+    var e = Expr()
+    var lits = List[Datum]()
+    lits.append(Datum.integral(P_TIMESTAMP, micros))
+    e.root = e.bound(op, 4, P_TIMESTAMP, lits^, String("ts"))
+    return e^
+
+
+def _holds(op: UInt8, x: Int64, lit: Int64) -> Bool:
+    if op == OP_LT:
+        return x < lit
+    if op == OP_LT_EQ:
+        return x <= lit
+    if op == OP_GT:
+        return x > lit
+    return x >= lit
+
+
+def test_strict_time_projection_never_overclaims() raises:
+    """The safety property under every residual: whenever the strict projection
+    accepts a partition, *every* instant that partition can hold must satisfy
+    the filter. Reducing a residual to `true` on a partition that fails this
+    would silently return rows the caller filtered out.
+
+    An off-by-one can only hide at the two ends of a bucket, so those are the
+    instants checked, over a window straddling the epoch — where floor division
+    and the pre-0.11 correction both bite — and over June 2024, the shape the
+    partition-aligned query in the issue has. The bounds swept include the
+    microsecond either side of each edge as well as the edge itself: a bucket is
+    an hour wide at its narrowest, so a bound that misses by a single unit is
+    only visible from within one unit of a boundary.
+    """
+    var kinds = [T_HOUR, T_DAY, T_MONTH, T_YEAR]
+    var names = [String("hour"), String("day"), String("month"), String("year")]
+    var ops = [OP_LT, OP_LT_EQ, OP_GT, OP_GT_EQ]
+    var schema = Schema.parse(FILTER_SCHEMA)
+    var june = parse_iso(P_TIMESTAMP, "2024-06-01T00:00:00")
+    var reduced = 0
+    for ki in range(len(kinds)):
+        var kind = kinds[ki]
+        var t = Transform(kind, 0, names[ki])
+        var spec = _ts_spec(names[ki])
+        var parts = List[Int64]()
+        for p in range(-3, 4):
+            parts.append(Int64(p))
+        var modern = t.apply(Datum.integral(P_TIMESTAMP, june)).i
+        for d in range(-2, 3):
+            parts.append(modern + Int64(d))
+        # Every bucket edge, the microsecond either side of it, and one
+        # interior instant, as candidate bounds.
+        var bounds = List[Int64]()
+        for pi in range(len(parts)):
+            var s = _bucket_span(kind, parts[pi])
+            bounds.append(s[0] - 1)
+            bounds.append(s[0])
+            bounds.append(s[0] + 1)
+            bounds.append(s[1] - 1)
+            bounds.append(s[1])
+            bounds.append(s[1] + 1)
+            bounds.append(s[0] + (s[1] - s[0]) // 2)
+        var reduced_here = 0
+        for oi in range(len(ops)):
+            for bi in range(len(bounds)):
+                var r = ResidualEvaluator(
+                    _ts_predicate(ops[oi], bounds[bi]), spec, schema
+                )
+                for pi in range(len(parts)):
+                    var span = _bucket_span(kind, parts[pi])
+                    var part = List[Datum]()
+                    part.append(t.apply(Datum.integral(P_TIMESTAMP, span[0])))
+                    var res = r.residual_for(part)
+                    if not res.is_true(res.root):
+                        continue
+                    reduced_here += 1
+                    for e in range(2):
+                        var x = span[e]
+                        assert_true(
+                            _holds(ops[oi], x, bounds[bi]),
+                            String(
+                                "strict ",
+                                names[ki],
+                                " projection dropped ",
+                                op_name(ops[oi]),
+                                " ",
+                                bounds[bi],
+                                " for partition ",
+                                parts[pi],
+                                ", which holds ",
+                                x,
+                            ),
+                        )
+        assert_true(
+            reduced_here > 0,
+            String("no ", names[ki], " bound ever reduced; the sweep is idle"),
+        )
+        reduced += reduced_here
+    print("    strict time projections reduced:", reduced)
+
+
 def summary(
     var lo: List[UInt8], var hi: List[UInt8], nulls: Bool
 ) -> FieldSummary:
@@ -1951,6 +2321,34 @@ def test_scan_residuals() raises:
     var t2 = scan.filter('[">","id",2]').plan_files()
     assert_true(len(t2) > 0)
     assert_true(t2[0].residual != '["true"]', "expected a surviving residual")
+    # A range whose ends land on partition boundaries reduces the same way, so
+    # the filter column never has to be read. This is the same filter the
+    # PyIceberg row oracle runs against day_part (plan 3), so a reduction that
+    # were wrong would show up there as rows that do not match the filter.
+    var day = fixture_scan("day_part")
+    var t3 = day.filter(
+        '["and",[">=","ts","2023-11-15T00:00:00"],'
+        '["<","ts","2023-11-18T00:00:00"]]'
+    ).plan_files()
+    assert_equal(len(t3), 3, "expected the three whole days in the range")
+    for k in range(len(t3)):
+        assert_equal(
+            t3[k].residual,
+            '["true"]',
+            "a day-aligned range guarantees every row of a day partition",
+        )
+    # Move one end into the middle of a day and that day's file keeps the
+    # filter, while the two whole days behind it still shed it.
+    var t4 = day.filter(
+        '["and",[">=","ts","2023-11-15T00:00:00"],'
+        '["<","ts","2023-11-17T12:00:00"]]'
+    ).plan_files()
+    assert_equal(len(t4), 3, "the same three days are still in range")
+    var kept = 0
+    for k in range(len(t4)):
+        if t4[k].residual != '["true"]':
+            kept += 1
+    assert_equal(kept, 1, "only the partly-covered day should keep a residual")
 
 
 # ══ catalogs ════════════════════════════════════════════════════════════════
