@@ -651,9 +651,9 @@ def _project_ordered(
     """Projection for order-preserving transforms (truncate and the time ones).
 
     Because `a <= b` implies `T(a) <= T(b)`, a bound on the value gives a bound
-    on the partition value. `<` and `>` become `<=` and `>=` on the transform of
-    the adjacent value: many values share one partition value, so the strict
-    end of the range cannot survive.
+    on the partition value. Which bound depends on the direction of the
+    projection, and the two directions step the literal opposite ways before
+    transforming it — see `_boundary_step`.
     """
     ref n = e.nodes[i]
     ref t = pf.transform
@@ -679,13 +679,7 @@ def _project_ordered(
         return -1
     if len(n.lits) == 0:
         return -1
-    # `<` and `>` are evaluated at the adjacent value so the projected bound
-    # can be inclusive; `<=`, `>=`, `=` and `!=` project the literal itself.
-    var literal = n.lits[0].copy()
-    if n.op == OP_LT:
-        literal = _step(n.lits[0], -1)
-    elif n.op == OP_GT:
-        literal = _step(n.lits[0], 1)
+    var literal = _step(n.lits[0], _boundary_step(n.op, inclusive))
     var value = t.apply(literal)
     var kind = value.kind
     var op = n.op
@@ -695,16 +689,90 @@ def _project_ordered(
         op = OP_GT_EQ if inclusive else OP_GT
     elif n.op != OP_EQ and n.op != OP_NOT_EQ:
         return -1
+    if not inclusive and _time_values_may_be_high(t, n.prim) and value.valid:
+        # Iceberg 0.10.0 and earlier transformed pre-epoch instants one unit
+        # high — `day(1969-12-31T10:00)` was written as 0 rather than -1 — so a
+        # file from back then can carry a partition value above the one its own
+        # rows transform to. Only the strict projection is endangered by that,
+        # and only at its lower end: claiming a partition lies wholly above a
+        # bound is wrong if the value it was written with overstates it. Tighten
+        # by one unit wherever a written-high value could still be reached,
+        # which is everywhere at or below zero. `year`, `month` and `hour` on
+        # any source and `day` on a timestamp all divide, so all four could be
+        # written high; `day` on a `date` column is the identity and could not.
+        # Java does exactly this in `ProjectionUtil.fixStrictTimeProjection`.
+        if op == OP_GT and value.i <= 0:
+            value = Datum.integral(kind, value.i + 1)
+        elif op == OP_NOT_EQ and value.i < 0:
+            # "Not this partition" has to exclude the value the rows really
+            # transform to and the one a legacy writer may have recorded.
+            var vs = List[Datum]()
+            vs.append(Datum.integral(kind, value.i))
+            vs.append(Datum.integral(kind, value.i + 1))
+            return out.bound(OP_NOT_IN, pf.field_id, kind, vs^)
     var lits = List[Datum]()
     lits.append(value^)
     return out.bound(op, pf.field_id, kind, lits^)
 
 
+def _boundary_step(op: UInt8, inclusive: Bool) -> Int64:
+    """How far to move a comparison's literal before transforming it.
+
+    A half-line over the source values projects onto a half-line over the
+    partition values, but the projection flips whether the bound is closed, so
+    the two directions have to restate it one source value apart.
+
+    Inclusively the projected bound must be *closed*: every value sharing the
+    boundary's partition might match, so that partition has to be kept. `v < x`
+    is restated as `v <= x-1` and projects to `T(v) <= T(x-1)`; `v > x` mirrors
+    it. `<=` and `>=` are closed already and are transformed where they stand.
+
+    Strictly the projected bound must be *open*: the boundary's partition also
+    holds values on the wrong side of it, so it has to be dropped. `v <= x` only
+    guarantees a whole partition matches when that partition is below `T(x+1)`,
+    so it projects to `T(v) < T(x+1)`; `v >= x` mirrors it. `<` and `>` are open
+    already. This is the difference between Java's
+    `ProjectionUtil.truncateLong` and `truncateLongStrict`, and it is what lets
+    a range whose ends land on partition boundaries reduce away entirely: under
+    `month(ts)`, `ts >= '2024-06-01'` strictly projects to
+    `month > month('2024-05-31T23:59:59.999999')`, which the June partition
+    satisfies, rather than to `month > month('2024-06-01')`, which it cannot.
+    """
+    if inclusive:
+        if op == OP_LT:
+            return -1
+        return 1 if op == OP_GT else 0
+    if op == OP_LT_EQ:
+        return 1
+    return -1 if op == OP_GT_EQ else 0
+
+
+def _time_values_may_be_high(t: Transform, source_prim: UInt8) -> Bool:
+    """Whether this transform is one a pre-0.11 writer could have got wrong.
+
+    The bug was in the division that maps an instant onto its bucket, so it
+    reached every time transform except `day` of a `date`, where the partition
+    value is the stored day itself.
+    """
+    return t.is_time() and not (t.kind == T_DAY and source_prim == P_DATE)
+
+
 def _step(d: Datum, by: Int64) raises -> Datum:
-    """The adjacent value, for turning `<` into `<=` on the transform."""
-    if is_integer_like(d.kind):
-        return Datum.integral(d.kind, d.i + by)
-    return d.copy()
+    """The value one step along, for restating a bound as closed or open.
+
+    Only the primitives carried as a 64-bit integer have a well-defined adjacent
+    value. Strings, binaries, decimals and floats are returned unchanged, which
+    leaves the strict projection one partition tighter and the inclusive one
+    partition looser than it could be — conservative in both directions, and the
+    same place Java's `truncateArrayStrict` stops. Saturating at the ends of the
+    range is safe for the same reason: at `Int64.MIN` a strict `>=` then claims
+    one partition too few, and an inclusive `<` keeps one too many.
+    """
+    if by == 0 or not is_integer_like(d.kind):
+        return d.copy()
+    if (by > 0 and d.i == Int64.MAX) or (by < 0 and d.i == Int64.MIN):
+        return d.copy()
+    return Datum.integral(d.kind, d.i + by)
 
 
 def _contains_datum(l: List[Datum], v: Datum) raises -> Bool:
