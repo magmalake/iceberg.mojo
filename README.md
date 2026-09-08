@@ -608,6 +608,24 @@ one from the conda `postgresql` package; no Docker).
 
 ## Performance
 
+**For an end-to-end measurement, see
+[taxibench.example](https://github.com/magmalake/taxibench.example)**: eight
+analytical queries over 79,478,796 NYC taxi trips as an Iceberg table, answered
+by this library and by PyIceberg 0.11.1, with every answer diffed between the
+two before any timing is quoted. It reports p50 with p90 beside it, runs each
+query in its own process, and names the thread count on both sides — pyarrow
+reads Parquet multi-threaded by default and does not announce it.
+
+At 0.7.2 that suite totals **3164.8 ms against PyIceberg's 4247.5 ms** on one
+thread and **901.9 ms against 1514.1 ms** across ten, ahead on every query in
+both legs. It is also where 0.7.0 through 0.7.2 came from: profiling it found
+the four gaps those releases closed — no intra-file parallelism, no
+metadata-only `count()`, a residual evaluated a row at a time, and a scan that
+read whole files to decode four columns of nineteen.
+
+The rest of this section is the in-repo microbenchmark, which measures one
+library against one fixture rather than a whole query.
+
 `pixi run bench` builds a one-million-row table over four data files and times
 whole scans — metadata, plan, Parquet decode, casts, deletes, filter — then
 runs the same scans through PyIceberg. Both sides take the **best of three,
