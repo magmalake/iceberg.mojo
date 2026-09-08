@@ -10,6 +10,24 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-08
+
+Follows its dependencies. parquet-mojo 0.9.1 moved the Arrow layer into
+arrow-mlake-mojo — `ArrayData`, `ArrayArena`, `RecordBatch` and the C Data
+Interface — and threads-mojo 0.5.0 moved its atomics onto `std.atomic`. Neither
+changes an import path here, and **no source file in this library changed**:
+203 tests pass exactly as before.
+
+What did change is the include list, and only for builds from **source paths**.
+It is now per toolchain — `$ICEBERG_INCLUDES` is set in
+`[feature.nightly.activation.env]` and `[feature.stable.activation.env]` rather
+than once — because threads-mojo keeps the one line that differs between Mojo
+1.0.0 and nightly in a compat directory the include path selects, and pixi
+documents no ordering between activation variables, so building one out of
+another would be a guess. `-I ../arrow-mlake.mojo/src` joins the list for the
+same reason a `-I` list has to name every package it resolves. Consumers of the
+published tin need nothing.
+
 ## [0.7.2] - 2026-09-07
 
 Pins parquet-mojo 0.8.0, whose `open_projected` / `needed_byte_ranges` this
