@@ -57,6 +57,13 @@ jobs:
           repository: magmalake/parquet.mojo
           path: parquet.mojo
 
+      # parquet.mojo re-exports the Arrow layer from here, so its own sources
+      # do not resolve without it on the include path.
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/arrow-mlake.mojo
+          path: arrow-mlake.mojo
+
       - uses: actions/checkout@v4
         with:
           repository: magmalake/roaring.mojo
@@ -198,6 +205,13 @@ jobs:
         with:
           repository: magmalake/parquet.mojo
           path: parquet.mojo
+
+      # parquet.mojo re-exports the Arrow layer from here, so its own sources
+      # do not resolve without it on the include path.
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/arrow-mlake.mojo
+          path: arrow-mlake.mojo
 
       - uses: actions/checkout@v4
         with:
