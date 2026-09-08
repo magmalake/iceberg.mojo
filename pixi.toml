@@ -60,10 +60,18 @@ python = ">=3.10,<3.14"
 # the `mojolint` executable into every environment next to mojo-lsp-server.
 lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "3fa66644756c1de7aece83e5a89375323b6e0ce7" }
 
-[activation.env]
+# parquet-mojo 0.9.x keeps the Arrow layer in arrow-mlake-mojo, and threads-mojo
+# 0.5.x keeps the one line that differs between Mojo 1.0.0 and nightly in a
+# compat directory picked by the include path. So the list is per toolchain now:
+# pixi documents no ordering between activation variables, so building one out
+# of another would be a guess.
+[feature.nightly.activation.env]
 # sqlite.mojo's package directory is `sqlite/` at its repo root, not `src/`;
 # postgres.mojo's is `src/postgres`, so it takes the usual `/src`.
-ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/nightly -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+
+[feature.stable.activation.env]
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/stable -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
 
 [tasks]
 # Builds the test binary, brings up the REST mock (and MinIO and a throwaway
@@ -145,10 +153,11 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3ebcd44e261d905be0cc0ceae058013eeecbfaf0" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
-threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }
 thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "f4c3bdddd0c06bbad0c49c2b05c7afc30e7aa67a" }
 sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "2364a6e895277e8520b60e5666a0491bd7871bb1" }
 
@@ -161,9 +170,10 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3ebcd44e261d905be0cc0ceae058013eeecbfaf0" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
+parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
-threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "772dd842d4222aeae48e4eda9766ff2edec1bdff" }
+threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }
 thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "f4c3bdddd0c06bbad0c49c2b05c7afc30e7aa67a" }
 sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "2364a6e895277e8520b60e5666a0491bd7871bb1" }
