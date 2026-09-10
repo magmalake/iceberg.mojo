@@ -1248,6 +1248,30 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     itself. Fetching by *column chunk* does pay, so a scan now does it
     unconditionally and this flag selects nothing. It stays so that a caller
     setting it still compiles."""
+    var split_size: Int
+    """Target bytes per scan task, or `0` to leave one task per data file.
+
+    A data file records `split_offsets` at write time — the byte offset of
+    every row group — so a planner can divide one file into several tasks
+    without opening it. Setting this groups those offsets into runs of roughly
+    this many bytes and emits a task per run, each carrying the `start` and
+    `length` of its byte range.
+
+    Why it matters: without splitting, the unit of parallelism is the file, so
+    one 2 GB file is one task and a scan over it runs on a single worker no
+    matter how many are free. That is the straggler that decides a query's
+    wall clock. With it, the same file becomes as many tasks as it has room
+    for, and they distribute like any others.
+
+    Only whole row groups are ever assigned, so a split never lands mid-group
+    and no row is read twice or missed. A file whose `split_offsets` the
+    writer omitted stays one task, which is the safe reading of "I do not know
+    where the boundaries are".
+
+    128 MiB is the usual choice elsewhere; `0` here keeps existing callers
+    byte-for-byte unchanged.
+    """
+
     var num_workers: Int
     """How many OS threads a scan may use, in total.
 
@@ -1279,6 +1303,7 @@ struct ScanOptions(Copyable, Defaultable, Movable):
         self.prune = True
         self.lazy = False
         self.num_workers = 1
+        self.split_size = 0
 
 
 # ── deletes ─────────────────────────────────────────────────────────────────
@@ -1583,8 +1608,14 @@ def read_data_file(
     residual_dsl: String,
     case_sensitive: Bool,
     options: ScanOptions,
+    start: Int64 = 0,
+    length: Int64 = 0,
 ) raises -> List[ScanResult]:
     """One data file's surviving rows, as Arrow batches.
+
+    `start` and `length` name a byte range of the file, as a split scan task
+    carries. `length == 0` means the whole file, which is what an unsplit task
+    and every direct caller get.
 
     `projected` is a list of field ids, which may name whole columns or
     fields nested inside them. Ids that share a top-level column come back as
@@ -1664,8 +1695,31 @@ def read_data_file(
     # file whenever anything about the footer is unexpected, so the second
     # step is an optimisation and never a correctness condition.
     var sparse = False
-    var footer_only = _load_footer(io, data_file, sparse)
+    var footer_only: List[UInt8]
+    if length > 0:
+        # A split task reads the whole file rather than taking the sparse
+        # footer path. `needed_byte_ranges` does not yet account for a
+        # narrowed row-group selection, so the fetch and the decode disagree
+        # and decoding walks into bytes that were never filled in.
+        #
+        # Correctness first: the sparse path is an optimisation, and skipping
+        # it costs split tasks a whole-file read. Unsplit scans -- every
+        # existing caller -- are untouched. Teaching `needed_byte_ranges`
+        # about the selection is the fix that makes splitting pay on remote
+        # storage, and is worth doing before this is used in anger there.
+        footer_only = io.read_all(data_file.file_path)
+    else:
+        footer_only = _load_footer(io, data_file, sparse)
     var reader = ParquetReader[AllCodecs](footer_only^)
+
+    # Honour the task's byte range, if it has one. `split_offsets[i]` is the
+    # file offset of row group `i`, so a task covering [start, start+length)
+    # owns exactly the groups whose offset falls inside it. Assigning by the
+    # group's *start* is what makes the split a partition: every group belongs
+    # to exactly one task, so no row is read twice and none is skipped.
+    #
+    # A zero length means "the whole file", which is what an unsplit task
+    # carries and what a direct caller of read_data_file gets.
     reader.batch_size = options.batch_size
     reader.verify_crc = options.verify_crc
     # The inner axis. `_worker_split` has already taken out whatever the file
@@ -1821,6 +1875,7 @@ def read_data_file(
         plans.append(plan^)
 
     reader.select_fields(file_fields)
+
     if sparse:
         # `needed_byte_ranges` is asked *after* `select_fields`, so what is
         # fetched is exactly what the reader will decode rather than a guess
@@ -1860,8 +1915,27 @@ def read_data_file(
             break
     var need_positions = has_position_deletes or _wants_positions(meta_columns)
 
+    # The row groups this task owns. `split_offsets[i]` is the file offset of
+    # row group `i`, so a task covering [start, start+length) takes exactly
+    # the groups whose offset falls inside it. Assigning by the group's
+    # *start* is what makes a split a partition: every group belongs to one
+    # task, so no row is read twice and none is skipped.
+    #
+    # This narrows the list the read loop below iterates, which is the only
+    # thing that decides what gets decoded — the loop re-selects one group at
+    # a time, so a `select_row_groups` here would be overwritten.
+    #
+    # `length == 0` means the whole file: an unsplit task, and every direct
+    # caller.
+    var split_task = length > 0 and len(data_file.split_offsets) > 0
     var groups = List[Int]()
     for g in range(reader.num_row_groups()):
+        if split_task:
+            if g >= len(data_file.split_offsets):
+                continue
+            var off = data_file.split_offsets[g]
+            if off < start or off >= start + length:
+                continue
         groups.append(g)
     if options.prune and len(file_fields) > 0:
         var preds = _predicates_for(residual, residual.root, reader, schema)

@@ -123,6 +123,72 @@ struct _PendingDelete(Copyable, Movable):
     var spec_unpartitioned: Bool
 
 
+def _emit_tasks(
+    mut tasks: List[FileScanTask],
+    data_file: DataFile,
+    var deletes: List[DataFile],
+    residual: String,
+    spec_id: Int,
+    sequence_number: Int64,
+    split_size: Int,
+) raises:
+    """Append one task per split of `data_file`, or one for the whole file.
+
+    A data file records `split_offsets` at write time — the byte offset of
+    every row group — so this divides a file without opening it. Offsets are
+    grouped into runs of about `split_size` bytes and each run becomes a task
+    carrying its own `start` and `length`.
+
+    Splitting on recorded boundaries is what keeps the result a partition:
+    every row group falls in exactly one range, so no row is read twice and
+    none is skipped. `read_data_file` assigns a group to the task whose range
+    contains the group's *start*, which is the other half of that agreement.
+
+    Falls back to a single whole-file task when splitting is off, when the
+    writer recorded no offsets, or when the file has one row group — in each
+    case there is nothing to divide, and inventing a boundary would mean
+    guessing where a row group begins.
+    """
+    ref offsets = data_file.split_offsets
+    if split_size <= 0 or len(offsets) < 2:
+        tasks.append(
+            FileScanTask(
+                data_file.copy(),
+                deletes^,
+                residual,
+                0,
+                data_file.file_size_in_bytes,
+                spec_id,
+                sequence_number,
+            )
+        )
+        return
+
+    var file_end = data_file.file_size_in_bytes
+    var i = 0
+    while i < len(offsets):
+        var start = offsets[i]
+        # Take row groups until the run is at least split_size, so a run is
+        # never empty and a group larger than split_size becomes its own task
+        # rather than being broken up.
+        var j = i + 1
+        while j < len(offsets) and offsets[j] - start < Int64(split_size):
+            j += 1
+        var end = file_end if j >= len(offsets) else offsets[j]
+        tasks.append(
+            FileScanTask(
+                data_file.copy(),
+                deletes.copy(),
+                residual,
+                start,
+                end - start,
+                spec_id,
+                sequence_number,
+            )
+        )
+        i = j
+
+
 def _worker_split(num_workers: Int, n_files: Int) -> Tuple[Int, Int]:
     """A scan's thread budget, divided into files-at-once and threads-per-file.
 
@@ -374,6 +440,8 @@ def _scan_one_file(i: Int, ctx: OpaquePtr) -> None:
             c[].tasks[i].residual,
             c[].case_sensitive,
             c[].options,
+            c[].tasks[i].start,
+            c[].tasks[i].length,
         )
     except e:
         c[].errors[i] = String(e)
@@ -384,6 +452,15 @@ struct TableScan(Copyable, Movable):
 
     var metadata: TableMetadata
     var io: FileIO
+    var split_size: Int
+    """Target bytes per task, or `0` for one task per data file.
+
+    Set from `ScanOptions.split_size` when a scan reads; carried on the scan
+    so `plan_files()` divides the same way a read would, which is what lets a
+    planner hand the split out (to Flight endpoints, say) and have a worker
+    reproduce it.
+    """
+
     var snapshot_id: Int64
     var has_snapshot: Bool
     var filter_dsl: String
@@ -394,6 +471,7 @@ struct TableScan(Copyable, Movable):
         self.metadata = metadata^
         self.io = io^
         self.snapshot_id = 0
+        self.split_size = 0
         self.has_snapshot = False
         self.filter_dsl = '["true"]'
         self.selected = []
@@ -404,6 +482,19 @@ struct TableScan(Copyable, Movable):
         return Self(metadata^, FileIO.local())
 
     # ── configuration ──────────────────────────────────────────────────────
+    def with_split_size(self, bytes: Int) -> Self:
+        """Divide data files into tasks of about `bytes` each; `0` disables.
+
+        Uses the `split_offsets` a writer recorded, so no file is opened to
+        decide where the boundaries are. Set this before `plan_files()` if you
+        are handing the plan out — a worker reproducing one task must split
+        the same way the planner did, and the split is a property of the scan
+        rather than of the read.
+        """
+        var s = self.copy()
+        s.split_size = bytes
+        return s^
+
     def use_snapshot(self, id: Int64) raises -> Self:
         var s = self.copy()
         _ = self.metadata.snapshot_by_id(id)
@@ -643,16 +734,14 @@ struct TableScan(Copyable, Movable):
                 var applicable = _deletes_for(
                     e.data_file, e.sequence_number, m.partition_spec_id, deletes
                 )
-                tasks.append(
-                    FileScanTask(
-                        e.data_file.copy(),
-                        applicable^,
-                        res.text(res.root),
-                        0,
-                        e.data_file.file_size_in_bytes,
-                        m.partition_spec_id,
-                        e.sequence_number,
-                    )
+                _emit_tasks(
+                    tasks,
+                    e.data_file,
+                    applicable^,
+                    res.text(res.root),
+                    m.partition_spec_id,
+                    e.sequence_number,
+                    self.split_size,
                 )
         return tasks^
 
@@ -744,6 +833,8 @@ struct TableScan(Copyable, Movable):
                         tasks[k].residual,
                         self.case_sensitive,
                         opts,
+                        tasks[k].start,
+                        tasks[k].length,
                     )
                 )
             return out^
@@ -802,6 +893,8 @@ struct TableScan(Copyable, Movable):
                     tasks[k].residual,
                     self.case_sensitive,
                     opts,
+                    tasks[k].start,
+                    tasks[k].length,
                 )
                 for j in range(len(parts)):
                     out.append(parts[j])
@@ -869,6 +962,8 @@ struct TableScan(Copyable, Movable):
                     tasks[k].residual,
                     self.case_sensitive,
                     opts,
+                    tasks[k].start,
+                    tasks[k].length,
                 )
                 seen += _drain_into(parts^, out)
                 left = options.limit - seen
