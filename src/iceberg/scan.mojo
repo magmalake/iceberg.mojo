@@ -886,6 +886,57 @@ struct TableScan(Copyable, Movable):
             _ = _drain_into(rev.pop(), out)
         return out^
 
+    def to_batches_for_paths(
+        self,
+        paths: List[String],
+        options: ScanOptions = ScanOptions(),
+    ) raises -> List[RecordBatch]:
+        """The rows of just these data files, as this scan would return them.
+
+        `to_batches` reads the whole plan. This reads the part of it named by
+        `paths`, which is what lets the plan be split across processes: one
+        planner hands out `plan_files()`, and each worker asks only for the
+        files it was given.
+
+        The filter is on the *planned* tasks, not on the table, so everything
+        the plan decided still applies to the files that survive it —
+        partition pruning, the residual, and the delete files attached to each
+        task. A worker therefore returns exactly the rows the whole-table scan
+        would have returned for those files, which is what makes the union of
+        workers equal the whole.
+
+        Paths that the plan does not contain are ignored rather than raising:
+        a snapshot can be replaced between planning and reading, and a worker
+        holding a stale ticket should come back empty rather than fail the
+        query. A caller that needs to know can compare lengths.
+        """
+        var schema = self.current_schema()
+        var split = self._split_selection()
+        var ids = split[0].copy()
+        var meta_columns = split[1].copy()
+        var mapping = self.name_mapping()
+
+        var wanted = List[FileScanTask]()
+        for task in self.plan_files():
+            for i in range(len(paths)):
+                if task.data_file.file_path == paths[i]:
+                    wanted.append(task.copy())
+                    break
+
+        var out = List[RecordBatch]()
+        if len(wanted) == 0:
+            return out^
+        var all = self._read_files(
+            wanted^, schema, ids, meta_columns, mapping, options
+        )
+        var n = len(all)
+        var rev = List[List[ScanResult]]()
+        for _ in range(n):
+            rev.append(all.pop())
+        for _ in range(n):
+            _ = _drain_into(rev.pop(), out)
+        return out^
+
     def to_batch_reader(
         self, options: ScanOptions = ScanOptions()
     ) raises -> BatchReader:
