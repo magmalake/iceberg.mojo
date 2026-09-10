@@ -124,8 +124,24 @@ modular = ">=26.6.0.dev2026082605,<27"
 mojo-compiler = "==1.0.0"
 
 [environments]
-default = ["nightly"]
+# `default` is Mojo 1.0.0, the same as `stable`, because the published tins
+# this depends on — postgres-mojo, sqlite-mojo, objectstore-mojo — ship
+# `.mojoc` files compiled with 1.0.0, and a precompiled Mojo package refuses
+# to load against a different compiler version:
+#
+#   Precompiled file 'postgres.mojoc' version 1.0.0 is older than compiler
+#   version 1.1.0.dev…
+#
+# So a nightly default was not a default anyone could use: `pixi run test`
+# failed to parse while CI, which runs `-e stable`, was green. Pointing
+# `default` at the toolchain the dependencies were built with means the
+# obvious command works and matches what CI checks.
+#
+# `nightly` stays available by name for anyone testing against a newer
+# compiler; it will only build once those tins are republished.
+default = ["stable"]
 stable = ["stable"]
+nightly = ["nightly"]
 
 # ── pixi-build: consumable as a pixi source dependency ──────────────────────
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.

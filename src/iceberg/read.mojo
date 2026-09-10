@@ -1595,6 +1595,32 @@ def _filter_column(
     return ColumnTree(out^, r)
 
 
+def _split_row_groups(
+    data_file: DataFile, start: Int64, length: Int64
+) raises -> List[Int]:
+    """The row groups a scan task's byte range owns, or empty for "all".
+
+    `split_offsets[i]` is the file offset of row group `i`, so a task covering
+    [start, start+length) takes exactly the groups whose offset falls inside
+    it. Assigning a group by its *start* is what makes a split a partition:
+    every group belongs to one task, so no row is read twice and none is
+    skipped.
+
+    Empty means the whole file — an unsplit task, a writer that recorded no
+    offsets, or any direct caller — and is deliberately not the same as "no
+    groups": a task that owned nothing would return no rows, which is a
+    different statement.
+    """
+    var groups = List[Int]()
+    if length <= 0 or len(data_file.split_offsets) == 0:
+        return groups^
+    for i in range(len(data_file.split_offsets)):
+        var off = data_file.split_offsets[i]
+        if off >= start and off < start + length:
+            groups.append(i)
+    return groups^
+
+
 def read_data_file(
     io: FileIO,
     data_file: DataFile,
@@ -1695,21 +1721,7 @@ def read_data_file(
     # file whenever anything about the footer is unexpected, so the second
     # step is an optimisation and never a correctness condition.
     var sparse = False
-    var footer_only: List[UInt8]
-    if length > 0:
-        # A split task reads the whole file rather than taking the sparse
-        # footer path. `needed_byte_ranges` does not yet account for a
-        # narrowed row-group selection, so the fetch and the decode disagree
-        # and decoding walks into bytes that were never filled in.
-        #
-        # Correctness first: the sparse path is an optimisation, and skipping
-        # it costs split tasks a whole-file read. Unsplit scans -- every
-        # existing caller -- are untouched. Teaching `needed_byte_ranges`
-        # about the selection is the fix that makes splitting pay on remote
-        # storage, and is worth doing before this is used in anger there.
-        footer_only = io.read_all(data_file.file_path)
-    else:
-        footer_only = _load_footer(io, data_file, sparse)
+    var footer_only = _load_footer(io, data_file, sparse)
     var reader = ParquetReader[AllCodecs](footer_only^)
 
     # Honour the task's byte range, if it has one. `split_offsets[i]` is the
@@ -1876,6 +1888,19 @@ def read_data_file(
 
     reader.select_fields(file_fields)
 
+    # Narrow to the task's row groups *before* asking what to fetch.
+    # `needed_byte_ranges` walks the current selection, so a split task pulls
+    # only the bytes of the groups it owns — which is the point of splitting on
+    # object storage, where the alternative is every worker downloading the
+    # whole file.
+    #
+    # This has to happen before the `sparse` block below: the fetch and the
+    # decode read the same selection, and if they disagree, decoding walks
+    # into bytes that were never filled in.
+    var task_groups = _split_row_groups(data_file, start, length)
+    if len(task_groups) > 0:
+        reader.select_row_groups(task_groups.copy())
+
     if sparse:
         # `needed_byte_ranges` is asked *after* `select_fields`, so what is
         # fetched is exactly what the reader will decode rather than a guess
@@ -1927,16 +1952,12 @@ def read_data_file(
     #
     # `length == 0` means the whole file: an unsplit task, and every direct
     # caller.
-    var split_task = length > 0 and len(data_file.split_offsets) > 0
     var groups = List[Int]()
-    for g in range(reader.num_row_groups()):
-        if split_task:
-            if g >= len(data_file.split_offsets):
-                continue
-            var off = data_file.split_offsets[g]
-            if off < start or off >= start + length:
-                continue
-        groups.append(g)
+    if len(task_groups) > 0:
+        groups = task_groups.copy()
+    else:
+        for g in range(reader.num_row_groups()):
+            groups.append(g)
     if options.prune and len(file_fields) > 0:
         var preds = _predicates_for(residual, residual.root, reader, schema)
         if len(preds) > 0:
