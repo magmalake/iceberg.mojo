@@ -1596,7 +1596,7 @@ def _filter_column(
 
 
 def _split_row_groups(
-    data_file: DataFile, start: Int64, length: Int64
+    data_file: DataFile, start: Int64, length: Int64, n_row_groups: Int
 ) raises -> List[Int]:
     """The row groups a scan task's byte range owns, or empty for "all".
 
@@ -1614,6 +1614,35 @@ def _split_row_groups(
     var groups = List[Int]()
     if length <= 0 or len(data_file.split_offsets) == 0:
         return groups^
+
+    # A task covering the whole file is not a split, whatever its start and
+    # length say — planning gives an undivided task `start = 0` and
+    # `length = file_size`. Returning "all groups" here rather than filtering
+    # keeps an unsplit read on exactly the path it was on before splitting
+    # existed, which is worth more than the branch it saves: the filter below
+    # indexes by `split_offsets` position, so a writer that recorded fewer
+    # offsets than the file has row groups would silently drop the rest.
+    if start <= 0 and start + length >= data_file.file_size_in_bytes:
+        return groups^
+
+    # For a genuine split the offsets must describe every row group, or the
+    # tasks cannot partition the file: a group past the last recorded offset
+    # belongs to no range and its rows would vanish. Refuse rather than return
+    # a quietly short answer — a wrong row count is far harder to notice than
+    # a failed scan.
+    if len(data_file.split_offsets) != n_row_groups:
+        raise Error(
+            String(
+                "iceberg: cannot split '",
+                data_file.file_path,
+                "': it records ",
+                len(data_file.split_offsets),
+                " split offsets for ",
+                n_row_groups,
+                " row groups, so a split would drop rows",
+            )
+        )
+
     for i in range(len(data_file.split_offsets)):
         var off = data_file.split_offsets[i]
         if off >= start and off < start + length:
@@ -1897,7 +1926,9 @@ def read_data_file(
     # This has to happen before the `sparse` block below: the fetch and the
     # decode read the same selection, and if they disagree, decoding walks
     # into bytes that were never filled in.
-    var task_groups = _split_row_groups(data_file, start, length)
+    var task_groups = _split_row_groups(
+        data_file, start, length, reader.num_row_groups()
+    )
     if len(task_groups) > 0:
         reader.select_row_groups(task_groups.copy())
 
