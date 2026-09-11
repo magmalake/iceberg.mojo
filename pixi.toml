@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.7.3"
+version = "0.7.5"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -68,10 +68,10 @@ lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "3fa6664
 [feature.nightly.activation.env]
 # sqlite.mojo's package directory is `sqlite/` at its repo root, not `src/`;
 # postgres.mojo's is `src/postgres`, so it takes the usual `/src`.
-ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/nightly -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/nightly -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
 
 [feature.stable.activation.env]
-ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/stable -I ../hashes.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/stable -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
 
 [tasks]
 # Builds the test binary, brings up the REST mock (and MinIO and a throwaway
@@ -147,7 +147,7 @@ nightly = ["nightly"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.7.3"
+version = "0.7.5"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -165,12 +165,15 @@ extra-args = ["-I", "$PREFIX/lib/mojo"]
 # ever resolve in this checkout.
 [package.host-dependencies]
 mojo-compiler = "==1.0.0"
+deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "5eda47ba9135bb3dbe80fef522e7067ec4bd76a3" }
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627ee4263c756f679369c1b3f3ca5f7c" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd" }
+# iceberg reads and writes ZSTD, so it wants the full codec set. This is the
+# tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }
@@ -182,12 +185,15 @@ mojo-compiler = "==1.0.0"
 
 [package.run-dependencies]
 mojo-compiler = ">=1.0.0,<2"
+deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "5eda47ba9135bb3dbe80fef522e7067ec4bd76a3" }
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "589f3893627ee4263c756f679369c1b3f3ca5f7c" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "6d56cd46c56273051f166d33f50fdf194a8dcd3e" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "36ec6c5ca1cef06c970db67710e072fd64849be7" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "31e7f6a38f31891eba9de14a24848e7ccf7096be" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
-parquet-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd" }
+# iceberg reads and writes ZSTD, so it wants the full codec set. This is the
+# tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "3e4b36ed7bf6900311121268098781919afcb3dd", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }

@@ -39,6 +39,11 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
+          repository: magmalake/deflate.mojo
+          path: deflate.mojo
+
+      - uses: actions/checkout@v4
+        with:
           repository: magmalake/avro.mojo
           path: avro.mojo
 
@@ -185,6 +190,11 @@ jobs:
         with:
           repository: magmalake/hashes.mojo
           path: hashes.mojo
+
+      - uses: actions/checkout@v4
+        with:
+          repository: magmalake/deflate.mojo
+          path: deflate.mojo
 
       - uses: actions/checkout@v4
         with:

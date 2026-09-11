@@ -20,7 +20,7 @@ from std.collections import Dict
 
 from parquet import ParquetReader, ParquetWriter, RecordBatch, WriterOptions
 from parquet.arrow import ArrayArena, ArrayData, ArrowType
-from parquet.ext_full import AllCodecs
+from parquet_full import AllCodecs
 from parquet.stats import (
     SV_BOOL,
     SV_BYTES,

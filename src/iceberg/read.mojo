@@ -91,7 +91,7 @@ from parquet.arrow import (
     load_f32,
     load_i32,
 )
-from parquet.ext_full import AllCodecs
+from parquet_full import AllCodecs
 
 from .expressions import (
     Expr,
