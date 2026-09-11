@@ -10,7 +10,16 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
-## [0.7.5] - 2026-09-11
+## [0.7.6] - 2026-09-11
+
+Re-pin only. `parquet-full-mojo` moves to 0.1.2 at parquet.mojo's `c328c850`,
+the commit the registry publishes both `parquet-mojo` 0.11.1 and
+`parquet-full-mojo` 0.1.2 from.
+
+This matters for consumers rather than for this repository: a package
+dependency pinned at a commit the registry did not publish gives
+`pixi shelf add iceberg-mojo` two source records for one package. 0.7.5 was
+merged but never published, so nothing was released with the stale pin.
 
 Follows the magmalake dependency reshuffle. No change to any Iceberg API or
 on-disk behaviour.
@@ -21,7 +30,7 @@ on-disk behaviour.
   rather than `avro.deflate`, which no longer exists. Avro itself is unchanged
   and still required — manifests and manifest lists are Avro files.
 - Depends on **`parquet-full-mojo`** instead of `parquet-mojo`, following
-  parquet-mojo 0.11.0, which split the codecs needing a C library into their
+  parquet-mojo 0.11.1, which split the codecs needing a C library into their
   own tin. Iceberg reads and writes ZSTD, so it takes the full set; the tin
   lives in `parquet.mojo`'s `full/` subdirectory and pulls `parquet-mojo` with
   it. Nothing is lost — the dependency is now named for what it needs.
