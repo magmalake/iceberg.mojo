@@ -10,6 +10,15 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-09-11
+
+Re-pin only: `avro-mojo` moves to 0.4.1. 0.4.0 could not be built as a package
+at all — it gained a sibling dependency without the `extra-args` that put the
+host prefix on the Mojo import path — so `pixi shelf add iceberg-mojo` failed
+on `unable to locate module 'deflate'`. 0.7.6 is unusable for that reason and
+should be skipped.
+
+
 ## [0.7.6] - 2026-09-11
 
 Re-pin only. `parquet-full-mojo` moves to 0.1.2 at parquet.mojo's `c328c850`,
