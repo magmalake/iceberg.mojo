@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.7.5"
+version = "0.7.6"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -147,7 +147,7 @@ nightly = ["nightly"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.7.5"
+version = "0.7.6"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -173,7 +173,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "88222ee89748903f902579b304c22f546d319685", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c328c8503ccb4167d21b7eca40787c1824acf85a", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }
@@ -193,7 +193,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "b0b75107907983a87903b421d1b4b10cbff1c9f0" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "88222ee89748903f902579b304c22f546d319685", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c328c8503ccb4167d21b7eca40787c1824acf85a", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "8e19bf4b471a67b78a9f6503c955d3ea221b3a0a" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "3bc237cd6bd1a6dd87bf34aa27b1cb9780f7026f" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "96c874a79aa2d09f1cc624529e61cd5e6d958bf9" }
