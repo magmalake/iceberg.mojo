@@ -11,13 +11,13 @@ newest metadata file is found by listing the directory and taking the highest
 version prefix, which is the same rule the reference implementations use.
 
 Gzipped metadata (`*.gz.metadata.json`) is supported: gzip is a nine-byte
-header, a raw deflate stream and an eight-byte trailer, and avro.mojo already
-carries a deflate decoder, so no extra dependency is needed.
+header, a raw deflate stream and an eight-byte trailer, and the header and
+trailer are parsed here — `deflate.mojo` decodes the stream between them.
 """
 
 from std.collections import Dict
 
-from avro.deflate import inflate
+from deflate import inflate
 from parquet import RecordBatch
 
 from ..append import (

@@ -10,6 +10,26 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-09-11
+
+Follows the magmalake dependency reshuffle. No change to any Iceberg API or
+on-disk behaviour.
+
+- Raw DEFLATE moved out of `avro.mojo` into its own tin,
+  [deflate.mojo](https://github.com/magmalake/deflate.mojo). Gzipped metadata
+  (`*.gz.metadata.json`) in `FilesystemCatalog` decodes through `deflate-mojo`
+  rather than `avro.deflate`, which no longer exists. Avro itself is unchanged
+  and still required — manifests and manifest lists are Avro files.
+- Depends on **`parquet-full-mojo`** instead of `parquet-mojo`, following
+  parquet-mojo 0.11.0, which split the codecs needing a C library into their
+  own tin. Iceberg reads and writes ZSTD, so it takes the full set; the tin
+  lives in `parquet.mojo`'s `full/` subdirectory and pulls `parquet-mojo` with
+  it. Nothing is lost — the dependency is now named for what it needs.
+- `from parquet.ext_full import AllCodecs` became
+  `from parquet_full import AllCodecs` in `read.mojo` and `write.mojo`.
+- Building from **source paths** needs `-I ../deflate.mojo/src` and
+  `-I ../parquet.mojo/full/src`.
+
 ## [0.7.3] - 2026-09-08
 
 Follows its dependencies. parquet-mojo 0.9.1 moved the Arrow layer into
