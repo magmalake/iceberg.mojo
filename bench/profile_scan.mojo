@@ -28,7 +28,7 @@ from std.os import getenv
 from std.time import perf_counter_ns
 
 from parquet import ParquetReader
-from parquet.ext_full import AllCodecs
+from parquet_full import AllCodecs
 
 from iceberg.catalog.filesystem import Table
 from iceberg.io import FileIO
