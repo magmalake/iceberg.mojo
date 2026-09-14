@@ -93,6 +93,10 @@ profile = { cmd = "mkdir -p build && mojo build bench/profile_scan.mojo $ICEBERG
 # The Arrow C Data Interface, from a nested scan into pyarrow. macOS wants
 # .dylib and Linux .so; the shared-library task reads $SHLIB_EXT.
 carrow-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_scan.mojo $ICEBERG_INCLUDES -o build/libibcarrow$SHLIB_EXT" }
+# The same interface a batch at a time, over one scan split: the local
+# counterpart of the Flight server's DoGet, for a consumer in this process.
+# See tools/carrow_stream_scan.mojo.
+carrow-scan-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_stream_scan.mojo $ICEBERG_INCLUDES -o build/libibscan$SHLIB_EXT" }
 # Writes ten tables with this library and has PyIceberg and DuckDB read them
 # back — then lets PyIceberg append to two of them and reads the result here.
 # Needs `uv`, which builds the venv; CI runs it as a fifth job.
