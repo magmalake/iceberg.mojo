@@ -65,13 +65,25 @@ def _split_commas(s: String) -> List[String]:
 
 
 def _scan(
-    table_dir: String, split_size: Int, columns: List[String]
+    table_dir: String,
+    split_size: Int,
+    columns: List[String],
+    filter_dsl: String,
 ) raises -> TableScan:
-    """An empty `columns` selects every column, as a bare scan does."""
+    """An empty `columns` selects every column, as a bare scan does.
+
+    An empty `filter_dsl` is no predicate. A non-empty one is the filter DSL
+    `TableScan.filter` takes — a JSON s-expression, `["gt", "trip_distance",
+    10]` — and it must be given to the plan and to every read of that plan's
+    tickets alike: planning uses it to prune manifests and files, and the read
+    needs the same predicate to leave the same rows behind.
+    """
     var io = FileIO.local()
     var meta_path = find_latest_metadata(io, table_dir)
     var metadata = TableMetadata.parse(_read_file(meta_path))
     var scan = TableScan(metadata^, io^).with_split_size(split_size)
+    if filter_dsl.byte_length() != 0:
+        scan = scan.filter(filter_dsl)
     if len(columns) == 0:
         return scan^
     return scan.select(columns.copy())
@@ -139,24 +151,39 @@ def _batch_root(mut batch: RecordBatch) raises -> Int:
 def ib_plan_splits(
     table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
     split_size: Int64,
+    filter_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    snapshot_id: Int64,
     dest: UnsafePointer[UInt8, MutUntrackedOrigin],
     dest_len: Int64,
 ) abi("C") -> Int64:
     """The scan plan as newline-separated tickets; returns the byte length.
+
+    `filter_ptr` is the filter DSL, empty for no predicate. It belongs here
+    rather than only on the read because this is where it saves the most: a
+    predicate over a partition column drops whole manifests and whole files
+    before a ticket is ever minted, so a consumer that pushes one down gets a
+    shorter task list rather than the same tasks returning fewer rows.
 
     Two-call protocol, which is what a C caller with no allocator of ours can
     use: ask with `dest_len` 0 to learn the size, allocate, ask again. Nothing
     is written unless the whole blob fits, so a short buffer is never a
     partial answer. Returns -1 on any error.
 
-    The snapshot is resolved once here and written into every ticket, so a plan
-    describes one version of the table even if a commit lands before the
-    tickets are redeemed — the same reason the Flight server pins it.
+    `snapshot_id` is the version to plan against, or `0` for the current one.
+    Passing it matters once a consumer plans more than once for the same
+    dataset — which is what pushing a predicate down means, since the task list
+    depends on the predicate. The snapshot goes into every ticket either way,
+    so a plan describes one version of the table even if a commit lands before
+    the tickets are redeemed; naming it keeps two plans of the same dataset on
+    the same version as well.
     """
     try:
         var table_dir = String(unsafe_from_utf8_ptr=table_dir_ptr)
-        var scan = _scan(table_dir, Int(split_size), List[String]())
-        var snapshot = scan.snapshot().snapshot_id
+        var filter_dsl = String(unsafe_from_utf8_ptr=filter_ptr)
+        var scan = _scan(table_dir, Int(split_size), List[String](), filter_dsl)
+        var snapshot = snapshot_id
+        if snapshot == 0:
+            snapshot = scan.snapshot().snapshot_id
 
         var blob = String("")
         for task in scan.use_snapshot(snapshot).plan_files():
@@ -175,17 +202,46 @@ def ib_plan_splits(
         return -1
 
 
+@export("ib_snapshot")
+def ib_snapshot(
+    table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+) abi("C") -> Int64:
+    """The table's current snapshot id; 0 if it has none, -1 on error.
+
+    A consumer that plans more than once — one plan per predicate pushed down —
+    resolves this at the start and hands it back to every `ib_plan_splits`, so
+    the plans it makes over the life of one dataset all describe one version of
+    the table. It reads the metadata file and nothing else.
+    """
+    try:
+        var table_dir = String(unsafe_from_utf8_ptr=table_dir_ptr)
+        var scan = _scan(table_dir, 0, List[String](), String(""))
+        if not scan.has_any_snapshot():
+            return 0
+        return scan.snapshot().snapshot_id
+    except:
+        return -1
+
+
 @export("ib_scan_split")
 def ib_scan_split(
     table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
     ticket_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
     split_size: Int64,
     columns_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    filter_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
 ) abi("C") -> Int:
     """One ticket's rows as an `ArrowArrayStream`; returns its address, 0 on
     error.
 
     `columns_ptr` is a comma-separated projection; empty reads every column.
+    `filter_ptr` is the filter DSL, empty for no predicate; it must be the one
+    the plan was made with, for the same reason `split_size` must be.
+
+    A predicate that survives to here still pays: the residual drops row groups
+    and pages on the statistics in the Parquet footer before anything is
+    decoded, and what it cannot drop it applies row by row. A consumer that
+    filters afterwards instead decodes every page and materialises every row.
 
     `split_size` must match the one the plan was made with: the read re-plans
     and then selects the task at that offset, so a different division has no
@@ -209,13 +265,12 @@ def ib_scan_split(
         paths.append(parsed[3])
 
         var columns = _split_commas(String(unsafe_from_utf8_ptr=columns_ptr))
-        var scan = _scan(table_dir, Int(split_size), columns).use_snapshot(
-            parsed[0]
-        )
+        var filter_dsl = String(unsafe_from_utf8_ptr=filter_ptr)
+        var scan = _scan(
+            table_dir, Int(split_size), columns, filter_dsl
+        ).use_snapshot(parsed[0])
         var t1 = perf_counter_ns()
-        var batches = scan.to_batches_for_splits(
-            paths^, starts^, ScanOptions()
-        )
+        var batches = scan.to_batches_for_splits(paths^, starts^, ScanOptions())
         var t2 = perf_counter_ns()
         if len(batches) == 0:
             return 0
@@ -261,7 +316,7 @@ def ib_schema(
     try:
         var table_dir = String(unsafe_from_utf8_ptr=table_dir_ptr)
         var columns = _split_commas(String(unsafe_from_utf8_ptr=columns_ptr))
-        var scan = _scan(table_dir, Int(split_size), columns)
+        var scan = _scan(table_dir, Int(split_size), columns, String(""))
         var snapshot = scan.snapshot().snapshot_id
 
         var tasks = scan.use_snapshot(snapshot).plan_files()
@@ -276,7 +331,7 @@ def ib_schema(
         var options = ScanOptions()
         options.limit = 1
         var batches = (
-            _scan(table_dir, Int(split_size), columns)
+            _scan(table_dir, Int(split_size), columns, String(""))
             .use_snapshot(snapshot)
             .to_batches_for_splits(paths^, starts^, options)
         )
