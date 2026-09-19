@@ -99,7 +99,10 @@ carrow-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carro
 # The producer half of a cross-process Arrow handover: publishes a split's
 # buffers into a shared mapping and prints where they landed. See
 # tools/shm_publish.mojo.
-shm-publish = { cmd = "mkdir -p build && mojo build tools/shm_publish.mojo $ICEBERG_INCLUDES -o build/ib-shm-publish" }
+shm-publish = { cmd = "mkdir -p build && mojo build tools/shm_publish.mojo -I tools $ICEBERG_INCLUDES -o build/ib-shm-publish" }
+# The consumer half, in Mojo: maps what the publisher points at and folds it
+# without a copy. See tools/shm_consume.mojo.
+shm-consume = { cmd = "mkdir -p build && mojo build tools/shm_consume.mojo -I tools $ICEBERG_INCLUDES -o build/ib-shm-consume" }
 carrow-scan-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_stream_scan.mojo $ICEBERG_INCLUDES -o build/libibscan$SHLIB_EXT" }
 # Writes ten tables with this library and has PyIceberg and DuckDB read them
 # back — then lets PyIceberg append to two of them and reads the result here.

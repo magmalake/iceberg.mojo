@@ -38,6 +38,8 @@ writing something the consumer would misread.
 """
 
 from std.ffi import external_call
+
+from stdin_lines import StdinLines
 from std.os import getenv
 from std.sys import argv
 from std.time import perf_counter_ns
@@ -138,11 +140,12 @@ def main() raises:
     # workers both write `batch-0` and whichever consumer reads second finds
     # a file the first one has already unlinked.
     var pid = Int(external_call["getpid", Int32]())
+    var stdin = StdinLines()
     var seq = 0
     while True:
         var line: String
         try:
-            line = input("")
+            line = stdin.next_line()
         except:
             break  # EOF: the consumer is done with us
         if line.byte_length() == 0:
