@@ -23,7 +23,13 @@ It prints one JSON line on startup naming the tickets, then one line per
 ticket it is given:
 
     {"tickets": ["<snapshot>|<start>|<length>|<path>", ...]}
-    {"batches": [{"path": "...", "columns": [...], "bytes": N}, ...]}
+
+and then, per ticket, one line per batch as it lands followed by an end
+marker — so a consumer reads the first batch while the second is still being
+written:
+
+    {"batch": {"path": "...", "columns": [...], "bytes": N}}
+    {"end": true}
 
 `columns` describes each buffer by **offset** into the mapping, because that
 is what survives the trip — the mapping lands at a different address in the
@@ -32,9 +38,15 @@ writing something the consumer would misread.
 """
 
 from std.ffi import external_call
+from std.os import getenv
 from std.sys import argv
+from std.time import perf_counter_ns
 
-from arrow_mlake.carrow_shared import export_shared
+from arrow_mlake.carrow_shared import (
+    export_shared_into,
+    shared_size,
+)
+from arrow_mlake.memory_shim import open_split_region
 from iceberg.catalog.filesystem import find_latest_metadata
 from iceberg.io import FileIO
 from iceberg.metadata import TableMetadata
@@ -136,6 +148,11 @@ def main() raises:
         if line.byte_length() == 0:
             continue
 
+        # SHM_TIMING=1 splits a ticket into the scan and the publish. A
+        # consumer measuring this from another language has no other way to
+        # see which half it is waiting for.
+        var timing = getenv("SHM_TIMING", "") != ""
+        var t0 = perf_counter_ns()
         var parsed = _parse_ticket(line)
         var paths: List[String] = [parsed[2]]
         var starts: List[Int64] = [parsed[1]]
@@ -147,20 +164,57 @@ def main() raises:
             paths^, starts^, ScanOptions()
         )
 
-        var out = String('{"batches":[')
+        var t1 = perf_counter_ns()
+        var export_ns = 0
+
+        # One mapping for the whole split, sized up front, with each batch
+        # written into it in turn. A mapping per batch paid create, size, map,
+        # unmap and unlink four times over, which measured larger than the
+        # copy itself.
+        var total = 0
+        var all_names = List[List[String]]()
         for b in range(len(batches)):
             ref batch = batches[b]
+            total += shared_size(batch.arena, batch.roots)
             var names = List[String]()
             for c in range(len(batch.roots)):
                 names.append(batch.arena.nodes[batch.roots[c]].name)
-            var path = (
-                out_dir + "/batch-" + String(pid) + "-" + String(seq) + ".arrow"
+            all_names.append(names^)
+
+        var path = (
+            out_dir + "/split-" + String(pid) + "-" + String(seq) + ".arrow"
+        )
+        seq += 1
+        var bump = open_split_region(path, total)
+
+        # Still one line per batch as it lands, so the consumer folds batch 1
+        # while this writes batch 2 — they just share a file now, and the
+        # offsets in each manifest are from the region's base.
+        for b in range(len(batches)):
+            ref batch = batches[b]
+            var e0 = perf_counter_ns()
+            var manifest = export_shared_into(
+                bump, batch.arena, batch.roots, all_names[b]
             )
-            seq += 1
-            var manifest = export_shared(batch.arena, batch.roots, names, path)
-            if b:
-                out += ","
-            # Splice the path in beside the columns the manifest describes.
-            out += '{"path":"' + path + '",' + manifest[byte=1:]
-        out += "]}"
-        print(out, flush=True)
+            export_ns += perf_counter_ns() - e0
+            print(
+                '{"batch":{"path":"' + path + '",' + manifest[byte=1:] + "}",
+                flush=True,
+            )
+        bump^.close()
+        print('{"end":true}', flush=True)
+        if timing:
+            # A message of its own, so a consumer that does not care about
+            # timing skips it the way it skips anything it does not know.
+            print(
+                String(
+                    '{"timing":{"scan_ms":',
+                    (t1 - t0) // 1000000,
+                    ',"publish_ms":',
+                    export_ns // 1000000,
+                    ',"batches":',
+                    len(batches),
+                    "}}",
+                ),
+                flush=True,
+            )
