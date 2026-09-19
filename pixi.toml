@@ -68,10 +68,10 @@ lint-mojo = { git = "https://github.com/magmalake/lint.mojo.git", rev = "3fa6664
 [feature.nightly.activation.env]
 # sqlite.mojo's package directory is `sqlite/` at its repo root, not `src/`;
 # postgres.mojo's is `src/postgres`, so it takes the usual `/src`.
-ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/nightly -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/nightly -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../memory-region.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
 
 [feature.stable.activation.env]
-ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/stable -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
+ICEBERG_INCLUDES = "-I src -I ../threads.mojo/src -I ../threads.mojo/compat/stable -I ../hashes.mojo/src -I ../deflate.mojo/src -I ../avro.mojo/src -I ../thrift.mojo/src -I ../snappy.mojo/src -I ../parquet.mojo/src -I ../parquet.mojo/full/src -I ../arrow-mlake.mojo/src -I ../memory-region.mojo/src -I ../roaring.mojo/src -I ../objectstore.mojo/src -I ../zstd.mojo/src -I ../lz4.mojo/src -I ../brotli.mojo/src -I ../sqlite.mojo -I ../postgres.mojo/src"
 
 [tasks]
 # Builds the test binary, brings up the REST mock (and MinIO and a throwaway
@@ -96,6 +96,10 @@ carrow-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carro
 # The same interface a batch at a time, over one scan split: the local
 # counterpart of the Flight server's DoGet, for a consumer in this process.
 # See tools/carrow_stream_scan.mojo.
+# The producer half of a cross-process Arrow handover: publishes a split's
+# buffers into a shared mapping and prints where they landed. See
+# tools/shm_publish.mojo.
+shm-publish = { cmd = "mkdir -p build && mojo build tools/shm_publish.mojo $ICEBERG_INCLUDES -o build/ib-shm-publish" }
 carrow-scan-lib = { cmd = "mkdir -p build && mojo build --emit shared-lib tools/carrow_stream_scan.mojo $ICEBERG_INCLUDES -o build/libibscan$SHLIB_EXT" }
 # Writes ten tables with this library and has PyIceberg and DuckDB read them
 # back — then lets PyIceberg append to two of them and reads the result here.
