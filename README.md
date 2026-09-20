@@ -179,8 +179,8 @@ self-checked — the expected values come from them, never from this code. See
 | **(x″)** Delete and overwrite on a nested table | itself, cell by cell, before and after | ✅ a v3 **deletion vector** and a **copy-on-write rewrite** over struct + list + map columns leave every surviving row byte-identical; `overwrite`, `identity(addr.city)` and `bucket[4](addr.zip)` all round-trip |
 | **(y)** A nested scan over the **Arrow C Data Interface** | `pyarrow.Array._import_from_c` | ✅ **20 columns** across 4 tables imported into pyarrow and equal to PyIceberg's own read — structs, lists and maps with their children |
 | **(x)** `expire_snapshots` | itself, file by file | ✅ a dry run that touches nothing and never names a live file; an expiry that removes exactly what a copy-on-write delete orphaned; `keep_last` and an age cut; a superseded Puffin file removed while the live one stays |
-| Tests | | **166 passing**, 0 skipped, identical on `stable` (Mojo 1.0.0) and `default` (nightly); the SQL-catalog tests run twice, on sqlite and on PostgreSQL |
-| CI | | 5 jobs: {stable, nightly} × {ubuntu, macOS} each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **36 tables** we wrote and importing a nested scan into pyarrow |
+| Tests | | **203 passing**, 0 skipped, on `stable` (Mojo 1.1.0), which is also what `default` resolves to; the SQL-catalog tests run twice, on sqlite and on PostgreSQL |
+| CI | | 3 jobs: `stable` × {ubuntu, macOS}, each running the REST mock and MinIO, plus a write-interop job running PyIceberg and DuckDB against **36 tables** we wrote and importing a nested scan into pyarrow |
 
 ### The one plan disagreement, and why it is not a bug
 
@@ -996,9 +996,9 @@ Consume it with:
 ```
 
 Sibling tins are consumed by **source path**, not as pixi packages:
-pixi-build-mojo emits a precompiled artifact built with `mojo-compiler` 1.0.0,
-and the nightly compiler refuses to load it. Source paths satisfy both
-environments. The four FFI tins (objectstore, zstd, lz4, brotli) are *also*
+pixi-build-mojo emits a precompiled artifact built with the pinned
+`mojo-compiler` (1.1.0), and any other compiler — a newer nightly included —
+refuses to load it. Source paths satisfy both environments. The four FFI tins (objectstore, zstd, lz4, brotli) are *also*
 pixi git source dependencies, which is what installs their C shims into the
 environment; a consumer needs the same. sqlite.mojo and postgres.mojo (the SQL
 catalog's two backing stores) are the same shape — a git dependency purely so

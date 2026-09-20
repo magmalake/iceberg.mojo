@@ -72,9 +72,9 @@ def ib_export_scan_column(
             unsafe_from_address=raw[1]
         )
         for i in range(80):
-            arr_out[unsafe_offset=i] = a[i]
+            arr_out[unsafe_offset=i] = a[unsafe_offset=i]
         for i in range(72):
-            sch_out[unsafe_offset=i] = s[i]
+            sch_out[unsafe_offset=i] = s[unsafe_offset=i]
         return Int32(batch.num_columns())
     except:
         return -1
