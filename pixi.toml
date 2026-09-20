@@ -180,7 +180,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "6362f467e63b8422cf4f70d72931429fb2f21342" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c328c8503ccb4167d21b7eca40787c1824acf85a", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c4b0510f9bd4ca6930781cedc4d86c11cf1d4153", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "3c527d9bfa8df89f2303e777eb8699caf2a53da0" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "47bead6fc972fbc3d44218e844ef046d3f4528a4" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "e8790abf928c96073a5457462558cad9cb52656d" }
@@ -200,7 +200,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "6362f467e63b8422cf4f70d72931429fb2f21342" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c328c8503ccb4167d21b7eca40787c1824acf85a", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c4b0510f9bd4ca6930781cedc4d86c11cf1d4153", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "3c527d9bfa8df89f2303e777eb8699caf2a53da0" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "47bead6fc972fbc3d44218e844ef046d3f4528a4" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "e8790abf928c96073a5457462558cad9cb52656d" }
