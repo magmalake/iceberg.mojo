@@ -6068,10 +6068,27 @@ def test_expire_snapshots_keeps_what_it_is_told_to() raises:
     assert_equal(len(none.expired), 0)
     table.refresh()
     assert_equal(len(table.metadata.snapshots), 2)
-    # And an age cut that reaches exactly one of them.
-    var at = table.metadata.snapshots[1].timestamp_ms
-    var one = table.expire_snapshots(at, 1, False)
-    assert_equal(len(one.expired), 1)
+    # And an age cut that reaches the older of the two — one past its
+    # timestamp, not at the newer one's.
+    #
+    # This read `snapshots[1].timestamp_ms`, which assumed the two commits
+    # landed in different milliseconds. They often do not on a loaded
+    # machine, and `choose_expired` compares `timestamp_ms < older_than_ms`
+    # strictly, so on a tie the cut reached neither snapshot and zero expired
+    # instead of one. That is the flake.
+    #
+    # `oldest + 1` reaches the older snapshot whatever the clock did. When the
+    # timestamps do differ it is still the newer one's own timestamp that
+    # spares it, exactly as before; when they tie, `keep_last = 1` is the
+    # floor that stops the sweep after one — which is the other half of what
+    # this test is named for. Either way exactly one goes, for a documented
+    # reason rather than an accident of timing.
+    var oldest = table.metadata.snapshots[0].timestamp_ms
+    for k in range(1, len(table.metadata.snapshots)):
+        if table.metadata.snapshots[k].timestamp_ms < oldest:
+            oldest = table.metadata.snapshots[k].timestamp_ms
+    var one = table.expire_snapshots(oldest + 1, 1, False)
+    assert_equal(len(one.expired), 1, "the older snapshot, and only it")
     table.refresh()
     assert_equal(len(table.metadata.snapshots), 1)
     assert_equal(table.scan().to_table().num_rows(), 18)
