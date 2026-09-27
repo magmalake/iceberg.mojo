@@ -10,6 +10,26 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-26
+
+### Added
+
+- One scan split can be exported as an Arrow C `ArrowArrayStream` (#36).
+- The scan library takes a predicate, and a snapshot to plan against (#39).
+
+### Changed
+
+- Built with Mojo 1.1.0. `mojo-compiler` is pinned `==1.1.0` for the package
+  build and required `>=1.1.0,<2` at run time, and the `nightly` environment
+  tracks Mojo 1.2.0.dev. The published 0.7.7 was built with 1.0.0, whose
+  precompiled `.mojoc` a 1.1.0 compiler refuses.
+- The codec tins and `objectstore-mojo` (and its shim) re-locked to current
+  revisions; `zstd-mojo` had been pinned at its first commit.
+
+### Fixed
+
+- `expire_snapshots`' test no longer depends on clock resolution (#42).
+
 ## [0.7.7] - 2026-09-11
 
 Re-pin only: `avro-mojo` moves to 0.4.1. 0.4.0 could not be built as a package
