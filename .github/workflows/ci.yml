@@ -110,22 +110,11 @@ jobs:
           path: brotli.mojo
 
       # MinIO is the only S3 server that actually verifies SigV4 signatures,
-      # which is what makes the s3:// end-to-end test worth running. One static
-      # binary, so no service container; tests/run_tests.sh skips the S3 tests
-      # with a printed reason if this step does not produce one.
-      - name: Fetch MinIO
-        continue-on-error: true
-        run: |
-          mkdir -p iceberg.mojo/build
-          case "$(uname -s)/$(uname -m)" in
-            Linux/x86_64)  URL=https://dl.min.io/server/minio/release/linux-amd64/minio ;;
-            Linux/aarch64) URL=https://dl.min.io/server/minio/release/linux-arm64/minio ;;
-            Darwin/arm64)  URL=https://dl.min.io/server/minio/release/darwin-arm64/minio ;;
-            Darwin/x86_64) URL=https://dl.min.io/server/minio/release/darwin-amd64/minio ;;
-            *) echo "no MinIO build for this platform"; exit 0 ;;
-          esac
-          curl -sSLf -o iceberg.mojo/build/minio "$URL" && chmod +x iceberg.mojo/build/minio
-          ./iceberg.mojo/build/minio --version
+      # which is what makes the s3:// end-to-end test worth running. It is no
+      # longer fetched here: `minio-server` is a dependency in pixi.toml, so
+      # setup-pixi installs it and `minio` lands on PATH, which is what
+      # tests/run_tests.sh already looks for. See the comment on that
+      # dependency for why the download had to go.
 
       - uses: prefix-dev/setup-pixi@v0.10.2
         with:

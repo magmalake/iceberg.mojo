@@ -55,6 +55,24 @@ postgresql = ">=16,<19"
 psycopg = ">=3.2"
 # The REST-catalog mock server and the fixture/oracle tooling.
 python = ">=3.10,<3.14"
+# MinIO for the S3/MinIO end-to-end scans, as a package rather than a
+# download. CI used to curl the binary from dl.min.io, which now answers 410
+# for every platform and every release: the open-source server is archived
+# and the files are gone for good. The fetch step was `continue-on-error`, so
+# nothing failed — the S3 tests just started skipping, silently, on both
+# runners.
+#
+# conda-forge carries `RELEASE.2025-10-15T17-29-55Z`, the last community
+# release and the one these tests were written against, for linux-64 and
+# osx-arm64. It lands as `minio` on PATH, which is already what
+# tests/run_tests.sh looks for after $MINIO_BINARY and build/minio.
+#
+# It will not receive updates, which is acceptable for a fixture that binds
+# 127.0.0.1 with well-known test credentials and holds only throwaway
+# fixtures. Having no SigV4-verifying server at all is not — and that is
+# where CI had drifted.
+minio-server = ">=2025.10.15"
+
 # Added by `pixi shelf add lint-mojo`: the linter comes from GitHub as a pixi
 # source dependency pinned at the revision mojoshelf published, and builds
 # the `mojolint` executable into every environment next to mojo-lsp-server.
