@@ -8,7 +8,7 @@ on:
 jobs:
   test:
     # Stable only. Every FFI sibling below is a pixi git source dependency,
-    # and its source build drops a `.mojoc` compiled with 1.0.0 into the
+    # and its source build drops a `.mojoc` compiled with 1.1.0 into the
     # environment; a nightly compiler refuses to load it. The `default`
     # (nightly) environment stays in pixi.toml for local use with a matching
     # compiler.
