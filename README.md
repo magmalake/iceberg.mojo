@@ -1014,7 +1014,7 @@ parser.
 ### Working on this repo instead
 
 ```sh
-pixi run test              # 166 tests; starts the REST mock, MinIO and
+pixi run test              # starts the REST mock, MinIO and
                            # a throwaway PostgreSQL server
 pixi run -e stable test
 pixi run cli               # builds build/iceberg-mojo
