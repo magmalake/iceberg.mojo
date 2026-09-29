@@ -23,13 +23,17 @@ from stdin_lines import StdinLines
 from std.time import perf_counter_ns
 
 from iceberg.json import JSON_OBJECT, Json, parse_json
-from memory_region import map_shared
+from memory_region import SharedMapping
 
 
 def main() raises:
     var rows = 0
     var total = Float64(0)
     var mapped = 0
+    # The mapping for the file being read. A split's batches arrive one after
+    # another naming the same file, so it is mapped once and reused; the next
+    # file replaces it, and the replaced one unmaps as it goes.
+    var current: Optional[SharedMapping] = None
     # SHM_FOLD=0 maps and counts without touching the values. The difference
     # between the two is what folding costs, which is the consumer's own
     # business — a scalar loop here, eight parallel tasks in an engine — and
@@ -55,9 +59,10 @@ def main() raises:
         var path = doc.as_string(doc.get(batch, "path"))
         # One map per file: a split's batches share it, and the offsets in
         # each manifest are from the region's base rather than the batch's.
-        var region = map_shared(path)
-        var base = region[0]
-        mapped += 1
+        if not current or current.value().path != path:
+            current = SharedMapping(path^)
+            mapped += 1
+        ref region = current.value()
 
         var columns = doc.get(batch, "columns")
         for c in range(doc.size(columns)):
@@ -71,12 +76,12 @@ def main() raises:
             if doc.kind(values) != JSON_OBJECT:
                 continue
             var offset = Int(doc.as_int(doc.get(values, "offset")))
-            var p = Pointer[Float64, ImmUntrackedOrigin](
-                unsafe_from_address=base + offset
-            )
+            # Checked against the mapping: an offset or length the manifest
+            # got wrong raises here instead of reading past the end.
+            var column_values = region.span[DType.float64](offset, n)
             if fold:
-                for i in range(n):
-                    total += p[unsafe_offset=i]
+                for x in column_values:
+                    total += x
             else:
                 # Touch one value per 16 KiB page: the mapping is only real
                 # once its pages are, and a count that never faults them in
@@ -84,7 +89,7 @@ def main() raises:
                 var stride = 2048
                 var i = 0
                 while i < n:
-                    total += p[unsafe_offset=i]
+                    total += column_values[i]
                     i += stride
             rows += n
 
