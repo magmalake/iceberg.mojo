@@ -4584,7 +4584,7 @@ def nested_write_batch(
         else:
             props.add('{"keys":["k"],"values":[' + String(i) + "]}")
     return batch_of_columns(
-        [ids^.build_tree(), addr^.build(), tags^.build(), props^.build()]
+        [ids.build_tree(), addr.build(), tags.build(), props.build()]
     )
 
 
@@ -5653,7 +5653,7 @@ def test_delete_mode_defaults_to_copy_on_write() raises:
 
 
 def test_merge_on_read_delete_writes_deletion_vectors() raises:
-    """v3 merge-on-read: one Puffin vector per data file that lost a row.
+    """Format v3 merge-on-read: one Puffin vector per data file that lost a row.
 
     Four `eu` rows (ids 0, 5, 10, 15) spread over the three files, so no file
     is emptied and all three get a vector.
@@ -5720,7 +5720,7 @@ def test_merge_on_read_delete_writes_deletion_vectors() raises:
 
 
 def test_merge_on_read_delete_writes_position_deletes() raises:
-    """v2 merge-on-read: a Parquet file of (file_path, pos), sorted."""
+    """Format v2 merge-on-read: a Parquet file of (file_path, pos), sorted."""
     var table = delete_table("del_mor_v2", "unpartitioned", 2)
     var removed = table.delete_where(
         String('["=","region","eu"]'), MODE_MERGE_ON_READ
@@ -5834,8 +5834,8 @@ def test_delete_everything_leaves_an_empty_table() raises:
 
 
 def test_delete_preserves_row_lineage() raises:
-    """v3: a merge-on-read delete moves no row, so every surviving `_row_id`
-    is the one the append assigned."""
+    """Format v3: a merge-on-read delete moves no row, so every surviving
+    `_row_id` is the one the append assigned."""
     var table = delete_table("del_lineage", "unpartitioned", 3)
     var before = (
         table.scan().select([String("id"), String("_row_id")]).to_table()
