@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.8.0"
+version = "0.8.1"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -38,13 +38,13 @@ libcurl = ">=8,<9"
 # It matters here and not for the other siblings because the stable toolchain
 # resolves `sqlite` to this package's installed .mojopkg rather than to the
 # `-I ../sqlite.mojo` source checkout.
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "c21b3927ff4a40ce14412acaa07f89b4276b73fb" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "de4d936342ec72032540b98b86d5cc80a5c21c2f" }
 libsqlite = ">=3.45,<4"
 sqlite = ">=3.45,<4"
 # postgres.mojo, the SQL catalog's other backend, on the same terms: the git
 # dependency is what installs libpq's dependency closure, while
 # ICEBERG_INCLUDES points the compiler at ../postgres.mojo/src.
-postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "3c527d9bfa8df89f2303e777eb8699caf2a53da0" }
+postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "ce89d38a8f3b561ea203d1f9beb2a111bbf2c584" }
 libpq = ">=16,<19"
 # The full server (initdb, pg_ctl, pg_isready, createdb) is only used by the
 # tests and the Postgres parity gate: scripts/pg-server.sh starts a throwaway
@@ -179,7 +179,7 @@ nightly = ["nightly"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.8.0"
+version = "0.8.1"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -197,37 +197,37 @@ extra-args = ["-I", "$PREFIX/lib/mojo"]
 # ever resolve in this checkout.
 [package.host-dependencies]
 mojo-compiler = "==1.1.0"
-deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "beba3ff1a20c29f2e1148cd9a291c56183dc8156" }
-avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0412badda7bf909d40b52f557bfcbe1cf5027c2a" }
-hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "3a449781100d00fb237a17475f008324c6e25c20" }
-lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "9bba013885b33039d5fd49e120bba151310a824a" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "7a1880f5dca2a0656e586c0c19702d485aa256dd" }
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "6362f467e63b8422cf4f70d72931429fb2f21342" }
+deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "4dd67b6c53780ab9d4c8ce6333b434ce178969cd" }
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "708c30a9aead2a4fc3ac4031032c7fecc9fa1fa8" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "875a5581aa35f1dd61c7879f16166be7bfb136f1" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "6b882077b8260aaf9a483a2e0359e22365f8b165" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "66252b4b090391fd34ebef9cfe08c315ce629fcf" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "43c6da47c6cf86b8e3134adc49609f87aaa21c47" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c4b0510f9bd4ca6930781cedc4d86c11cf1d4153", subdirectory = "full" }
-postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "3c527d9bfa8df89f2303e777eb8699caf2a53da0" }
-roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "47bead6fc972fbc3d44218e844ef046d3f4528a4" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "51bd413406fabf0501db4f5e38daad1b11ec4643", subdirectory = "full" }
+postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "ce89d38a8f3b561ea203d1f9beb2a111bbf2c584" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "5dbae9a4a3a3e410dcaa125e9beb616eac02ede1" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "e8790abf928c96073a5457462558cad9cb52656d" }
-thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "af4f6a014288a915ec4f0d2a44a910ee05605ad7" }
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "c21b3927ff4a40ce14412acaa07f89b4276b73fb" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "b4a887b437cccb9565c5defc72f9d2dc23752103" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "de4d936342ec72032540b98b86d5cc80a5c21c2f" }
 
 [package.build-dependencies]
 mojo-compiler = "==1.1.0"
 
 [package.run-dependencies]
 mojo-compiler = ">=1.1.0,<2"
-deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "beba3ff1a20c29f2e1148cd9a291c56183dc8156" }
-avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "0412badda7bf909d40b52f557bfcbe1cf5027c2a" }
-hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "3a449781100d00fb237a17475f008324c6e25c20" }
-lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "9bba013885b33039d5fd49e120bba151310a824a" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "7a1880f5dca2a0656e586c0c19702d485aa256dd" }
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "6362f467e63b8422cf4f70d72931429fb2f21342" }
+deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "4dd67b6c53780ab9d4c8ce6333b434ce178969cd" }
+avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "708c30a9aead2a4fc3ac4031032c7fecc9fa1fa8" }
+hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "875a5581aa35f1dd61c7879f16166be7bfb136f1" }
+lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "6b882077b8260aaf9a483a2e0359e22365f8b165" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "66252b4b090391fd34ebef9cfe08c315ce629fcf" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "43c6da47c6cf86b8e3134adc49609f87aaa21c47" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c4b0510f9bd4ca6930781cedc4d86c11cf1d4153", subdirectory = "full" }
-postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "3c527d9bfa8df89f2303e777eb8699caf2a53da0" }
-roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "47bead6fc972fbc3d44218e844ef046d3f4528a4" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "51bd413406fabf0501db4f5e38daad1b11ec4643", subdirectory = "full" }
+postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "ce89d38a8f3b561ea203d1f9beb2a111bbf2c584" }
+roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "5dbae9a4a3a3e410dcaa125e9beb616eac02ede1" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "e8790abf928c96073a5457462558cad9cb52656d" }
-thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "af4f6a014288a915ec4f0d2a44a910ee05605ad7" }
-sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "c21b3927ff4a40ce14412acaa07f89b4276b73fb" }
+thrift-mojo = { git = "https://github.com/magmalake/thrift.mojo", rev = "b4a887b437cccb9565c5defc72f9d2dc23752103" }
+sqlite-mojo = { git = "https://github.com/magmalake/sqlite.mojo", rev = "de4d936342ec72032540b98b86d5cc80a5c21c2f" }
