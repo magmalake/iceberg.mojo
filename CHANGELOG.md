@@ -10,6 +10,18 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-19
+
+### Fixed
+
+- `pixi shelf add iceberg-mojo` failed to solve with "encountered duplicate
+  records for zstd-shim-…_source.conda". The package dependencies pinned
+  avro, deflate, hashes, lz4, objectstore, arrow-mlake, postgres, roaring,
+  thrift, sqlite and parquet-full at commits from before their 1.1.0 releases,
+  while the registry adds the published commits. Every sibling is now pinned
+  at the rev the registry published; parquet-full moves to 0.1.4, which had the
+  same problem. No source changes.
+
 ## [0.8.0] - 2026-09-26
 
 ### Added
