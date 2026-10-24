@@ -97,43 +97,45 @@ comptime OP_NOT_STARTS_WITH: UInt8 = 18
 
 
 def op_name(op: UInt8) -> String:
-    if op == OP_TRUE:
-        return "true"
-    if op == OP_FALSE:
-        return "false"
-    if op == OP_AND:
-        return "and"
-    if op == OP_OR:
-        return "or"
-    if op == OP_NOT:
-        return "not"
-    if op == OP_IS_NULL:
-        return "is-null"
-    if op == OP_NOT_NULL:
-        return "not-null"
-    if op == OP_IS_NAN:
-        return "is-nan"
-    if op == OP_NOT_NAN:
-        return "not-nan"
-    if op == OP_LT:
-        return "<"
-    if op == OP_LT_EQ:
-        return "<="
-    if op == OP_GT:
-        return ">"
-    if op == OP_GT_EQ:
-        return ">="
-    if op == OP_EQ:
-        return "="
-    if op == OP_NOT_EQ:
-        return "!="
-    if op == OP_IN:
-        return "in"
-    if op == OP_NOT_IN:
-        return "not-in"
-    if op == OP_STARTS_WITH:
-        return "starts-with"
-    return "not-starts-with"
+    match op:
+        case == OP_TRUE:
+            return "true"
+        case == OP_FALSE:
+            return "false"
+        case == OP_AND:
+            return "and"
+        case == OP_OR:
+            return "or"
+        case == OP_NOT:
+            return "not"
+        case == OP_IS_NULL:
+            return "is-null"
+        case == OP_NOT_NULL:
+            return "not-null"
+        case == OP_IS_NAN:
+            return "is-nan"
+        case == OP_NOT_NAN:
+            return "not-nan"
+        case == OP_LT:
+            return "<"
+        case == OP_LT_EQ:
+            return "<="
+        case == OP_GT:
+            return ">"
+        case == OP_GT_EQ:
+            return ">="
+        case == OP_EQ:
+            return "="
+        case == OP_NOT_EQ:
+            return "!="
+        case == OP_IN:
+            return "in"
+        case == OP_NOT_IN:
+            return "not-in"
+        case == OP_STARTS_WITH:
+            return "starts-with"
+        case _:
+            return "not-starts-with"
 
 
 def negate_op(op: UInt8) raises -> UInt8:
@@ -330,35 +332,37 @@ def _parse_node(doc: Json, i: Int, mut e: Expr) raises -> Int:
 
 
 def _predicate_op(s: String) raises -> UInt8:
-    if s == "=" or s == "==" or s == "eq":
-        return OP_EQ
-    if s == "!=" or s == "<>" or s == "ne":
-        return OP_NOT_EQ
-    if s == "<" or s == "lt":
-        return OP_LT
-    if s == "<=" or s == "lteq":
-        return OP_LT_EQ
-    if s == ">" or s == "gt":
-        return OP_GT
-    if s == ">=" or s == "gteq":
-        return OP_GT_EQ
-    if s == "is-null" or s == "isnull":
-        return OP_IS_NULL
-    if s == "not-null" or s == "notnull":
-        return OP_NOT_NULL
-    if s == "is-nan" or s == "isnan":
-        return OP_IS_NAN
-    if s == "not-nan" or s == "notnan":
-        return OP_NOT_NAN
-    if s == "in":
-        return OP_IN
-    if s == "not-in" or s == "notin":
-        return OP_NOT_IN
-    if s == "starts-with" or s == "startswith":
-        return OP_STARTS_WITH
-    if s == "not-starts-with" or s == "notstartswith":
-        return OP_NOT_STARTS_WITH
-    raise Error("iceberg: unknown filter operator '" + s + "'")
+    match s:
+        case "=" | "==" | "eq":
+            return OP_EQ
+        case "!=" | "<>" | "ne":
+            return OP_NOT_EQ
+        case "<" | "lt":
+            return OP_LT
+        case "<=" | "lteq":
+            return OP_LT_EQ
+        case ">" | "gt":
+            return OP_GT
+        case ">=" | "gteq":
+            return OP_GT_EQ
+        case "is-null" | "isnull":
+            return OP_IS_NULL
+        case "not-null" | "notnull":
+            return OP_NOT_NULL
+        case "is-nan" | "isnan":
+            return OP_IS_NAN
+        case "not-nan" | "notnan":
+            return OP_NOT_NAN
+        case "in":
+            return OP_IN
+        case "not-in" | "notin":
+            return OP_NOT_IN
+        case "starts-with" | "startswith":
+            return OP_STARTS_WITH
+        case "not-starts-with" | "notstartswith":
+            return OP_NOT_STARTS_WITH
+        case _:
+            raise Error("iceberg: unknown filter operator '" + s + "'")
 
 
 # ── literal typing ──────────────────────────────────────────────────────────

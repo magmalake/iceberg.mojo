@@ -52,47 +52,49 @@ comptime DEFAULT_EDGE_ALGORITHM = String("spherical")
 
 
 def primitive_name(kind: UInt8) -> String:
-    if kind == P_BOOLEAN:
-        return "boolean"
-    if kind == P_INT:
-        return "int"
-    if kind == P_LONG:
-        return "long"
-    if kind == P_FLOAT:
-        return "float"
-    if kind == P_DOUBLE:
-        return "double"
-    if kind == P_DATE:
-        return "date"
-    if kind == P_TIME:
-        return "time"
-    if kind == P_TIMESTAMP:
-        return "timestamp"
-    if kind == P_TIMESTAMPTZ:
-        return "timestamptz"
-    if kind == P_TIMESTAMP_NS:
-        return "timestamp_ns"
-    if kind == P_TIMESTAMPTZ_NS:
-        return "timestamptz_ns"
-    if kind == P_STRING:
-        return "string"
-    if kind == P_UUID:
-        return "uuid"
-    if kind == P_FIXED:
-        return "fixed"
-    if kind == P_BINARY:
-        return "binary"
-    if kind == P_DECIMAL:
-        return "decimal"
-    if kind == P_UNKNOWN:
-        return "unknown"
-    if kind == P_VARIANT:
-        return "variant"
-    if kind == P_GEOMETRY:
-        return "geometry"
-    if kind == P_GEOGRAPHY:
-        return "geography"
-    return "unrecognized"
+    match kind:
+        case == P_BOOLEAN:
+            return "boolean"
+        case == P_INT:
+            return "int"
+        case == P_LONG:
+            return "long"
+        case == P_FLOAT:
+            return "float"
+        case == P_DOUBLE:
+            return "double"
+        case == P_DATE:
+            return "date"
+        case == P_TIME:
+            return "time"
+        case == P_TIMESTAMP:
+            return "timestamp"
+        case == P_TIMESTAMPTZ:
+            return "timestamptz"
+        case == P_TIMESTAMP_NS:
+            return "timestamp_ns"
+        case == P_TIMESTAMPTZ_NS:
+            return "timestamptz_ns"
+        case == P_STRING:
+            return "string"
+        case == P_UUID:
+            return "uuid"
+        case == P_FIXED:
+            return "fixed"
+        case == P_BINARY:
+            return "binary"
+        case == P_DECIMAL:
+            return "decimal"
+        case == P_UNKNOWN:
+            return "unknown"
+        case == P_VARIANT:
+            return "variant"
+        case == P_GEOMETRY:
+            return "geometry"
+        case == P_GEOGRAPHY:
+            return "geography"
+        case _:
+            return "unrecognized"
 
 
 def is_integer_like(kind: UInt8) -> Bool:
@@ -414,72 +416,73 @@ struct TypeStore(Copyable, Movable):
     def parse_primitive(mut self, s: String) raises -> Int:
         """Parse a primitive spelling. Unknown spellings are kept, not rejected.
         """
-        if s == "boolean":
-            return self.primitive(P_BOOLEAN)
-        if s == "int":
-            return self.primitive(P_INT)
-        if s == "long":
-            return self.primitive(P_LONG)
-        if s == "float":
-            return self.primitive(P_FLOAT)
-        if s == "double":
-            return self.primitive(P_DOUBLE)
-        if s == "date":
-            return self.primitive(P_DATE)
-        if s == "time":
-            return self.primitive(P_TIME)
-        if s == "timestamp":
-            return self.primitive(P_TIMESTAMP)
-        if s == "timestamptz":
-            return self.primitive(P_TIMESTAMPTZ)
-        if s == "timestamp_ns":
-            return self.primitive(P_TIMESTAMP_NS)
-        if s == "timestamptz_ns":
-            return self.primitive(P_TIMESTAMPTZ_NS)
-        if s == "string":
-            return self.primitive(P_STRING)
-        if s == "uuid":
-            return self.primitive(P_UUID)
-        if s == "binary":
-            return self.primitive(P_BINARY)
-        if s == "unknown":
-            return self.primitive(P_UNKNOWN)
-        if s == "variant":
-            return self.primitive(P_VARIANT)
-        if s.startswith("decimal"):
-            var p = _parse_two_ints(s, "decimal")
-            return self.decimal(p[0], p[1])
-        if s.startswith("fixed"):
-            return self.fixed(_parse_one_int(s))
-        if s == "geometry":
-            var n = TypeNode.prim_(P_GEOMETRY)
-            n.crs = DEFAULT_CRS
-            return self.add(n^)
-        if s.startswith("geometry("):
-            var n = TypeNode.prim_(P_GEOMETRY)
-            n.crs = String(substr(s, 9, s.byte_length() - 1).strip())
-            return self.add(n^)
-        if s == "geography":
-            var n = TypeNode.prim_(P_GEOGRAPHY)
-            n.crs = DEFAULT_CRS
-            n.algorithm = DEFAULT_EDGE_ALGORITHM
-            return self.add(n^)
-        if s.startswith("geography("):
-            var inner = substr(s, 10, s.byte_length() - 1)
-            var n = TypeNode.prim_(P_GEOGRAPHY)
-            var comma = inner.find(",")
-            if comma < 0:
-                n.crs = String(inner.strip())
-                n.algorithm = DEFAULT_EDGE_ALGORITHM
-            else:
-                n.crs = String(substr(inner, 0, comma).strip())
-                n.algorithm = String(
-                    substr(inner, comma + 1, inner.byte_length()).strip()
-                )
-            return self.add(n^)
-        var un = TypeNode.prim_(P_UNRECOGNIZED)
-        un.raw = s
-        return self.add(un^)
+        match s:
+            case "boolean":
+                return self.primitive(P_BOOLEAN)
+            case "int":
+                return self.primitive(P_INT)
+            case "long":
+                return self.primitive(P_LONG)
+            case "float":
+                return self.primitive(P_FLOAT)
+            case "double":
+                return self.primitive(P_DOUBLE)
+            case "date":
+                return self.primitive(P_DATE)
+            case "time":
+                return self.primitive(P_TIME)
+            case "timestamp":
+                return self.primitive(P_TIMESTAMP)
+            case "timestamptz":
+                return self.primitive(P_TIMESTAMPTZ)
+            case "timestamp_ns":
+                return self.primitive(P_TIMESTAMP_NS)
+            case "timestamptz_ns":
+                return self.primitive(P_TIMESTAMPTZ_NS)
+            case "string":
+                return self.primitive(P_STRING)
+            case "uuid":
+                return self.primitive(P_UUID)
+            case "binary":
+                return self.primitive(P_BINARY)
+            case "unknown":
+                return self.primitive(P_UNKNOWN)
+            case "variant":
+                return self.primitive(P_VARIANT)
+            case _:
+                if s.startswith("decimal"):
+                    var p = _parse_two_ints(s, "decimal")
+                    return self.decimal(p[0], p[1])
+                if s.startswith("fixed"):
+                    return self.fixed(_parse_one_int(s))
+                if s == "geometry":
+                    var n = TypeNode.prim_(P_GEOMETRY)
+                    n.crs = DEFAULT_CRS
+                    return self.add(n^)
+                if s.startswith("geometry("):
+                    var n = TypeNode.prim_(P_GEOMETRY)
+                    n.crs = String(substr(s, 9, s.byte_length() - 1).strip())
+                    return self.add(n^)
+                if s == "geography":
+                    var n = TypeNode.prim_(P_GEOGRAPHY)
+                    n.crs = DEFAULT_CRS
+                    n.algorithm = DEFAULT_EDGE_ALGORITHM
+                    return self.add(n^)
+                if s.startswith("geography("):
+                    var inner = substr(s, 10, s.byte_length() - 1)
+                    var n = TypeNode.prim_(P_GEOGRAPHY)
+                    var comma = inner.find(",")
+                    if comma < 0:
+                        n.crs = String(inner.strip())
+                        n.algorithm = DEFAULT_EDGE_ALGORITHM
+                    else:
+                        n.crs = String(substr(inner, 0, comma).strip())
+                        var rest = substr(inner, comma + 1, inner.byte_length())
+                        n.algorithm = String(rest.strip())
+                    return self.add(n^)
+                var un = TypeNode.prim_(P_UNRECOGNIZED)
+                un.raw = s
+                return self.add(un^)
 
     def type_json(self, i: Int) -> String:
         """Serialize a type back to its Iceberg JSON form."""

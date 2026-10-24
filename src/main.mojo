@@ -134,68 +134,70 @@ def main() raises:
     var k = first_option
     while k < len(args):
         var a = String(args[k])
-        if a == "--filter" and k + 1 < len(args):
-            filter_dsl = String(args[k + 1])
-            k += 2
-        elif a == "--select" and k + 1 < len(args):
-            selected = split_commas(String(args[k + 1]))
-            k += 2
-        elif a == "--snapshot" and k + 1 < len(args):
-            snapshot_id = Int64(Int(String(args[k + 1])))
-            has_snapshot = True
-            k += 2
-        elif a == "--ref" and k + 1 < len(args):
-            ref_name = String(args[k + 1])
-            k += 2
-        elif a == "--as-of" and k + 1 < len(args):
-            as_of = Int64(Int(String(args[k + 1])))
-            has_as_of = True
-            k += 2
-        elif a == "--rebase" and k + 1 < len(args):
-            var spec = String(args[k + 1])
-            var eq = spec.find("=")
-            if eq < 0:
-                raise Error("--rebase needs FROM=TO")
-            io.rebase(
-                substr(spec, 0, eq), substr(spec, eq + 1, spec.byte_length())
-            )
-            k += 2
-        elif a == "--limit" and k + 1 < len(args):
-            limit = Int(String(args[k + 1]))
-            k += 2
-        elif a == "--format" and k + 1 < len(args):
-            format = String(args[k + 1])
-            k += 2
-        elif a == "--lazy":
-            lazy = True
-            k += 1
-        elif a == "--property" and k + 1 < len(args):
-            var kv = String(args[k + 1])
-            var eq = kv.find("=")
-            if eq < 0:
-                raise Error("--property needs K=V")
-            io.set(substr(kv, 0, eq), substr(kv, eq + 1, kv.byte_length()))
-            k += 2
-        elif a == "--rest" and k + 1 < len(args):
-            rest_uri = String(args[k + 1])
-            k += 2
-        elif a == "--sql" and k + 1 < len(args):
-            sql_uri = String(args[k + 1])
-            k += 2
-        elif a == "--table" and k + 1 < len(args):
-            rest_table = String(args[k + 1])
-            k += 2
-        elif a == "--token" and k + 1 < len(args):
-            token = String(args[k + 1])
-            k += 2
-        elif a == "--warehouse" and k + 1 < len(args):
-            warehouse = String(args[k + 1])
-            k += 2
-        elif a == "--no-vend":
-            vend = False
-            k += 1
-        else:
-            raise Error("unknown option '" + a + "'")
+        match a:
+            case "--filter" if k + 1 < len(args):
+                filter_dsl = String(args[k + 1])
+                k += 2
+            case "--select" if k + 1 < len(args):
+                selected = split_commas(String(args[k + 1]))
+                k += 2
+            case "--snapshot" if k + 1 < len(args):
+                snapshot_id = Int64(Int(String(args[k + 1])))
+                has_snapshot = True
+                k += 2
+            case "--ref" if k + 1 < len(args):
+                ref_name = String(args[k + 1])
+                k += 2
+            case "--as-of" if k + 1 < len(args):
+                as_of = Int64(Int(String(args[k + 1])))
+                has_as_of = True
+                k += 2
+            case "--rebase" if k + 1 < len(args):
+                var spec = String(args[k + 1])
+                var eq = spec.find("=")
+                if eq < 0:
+                    raise Error("--rebase needs FROM=TO")
+                io.rebase(
+                    substr(spec, 0, eq),
+                    substr(spec, eq + 1, spec.byte_length()),
+                )
+                k += 2
+            case "--limit" if k + 1 < len(args):
+                limit = Int(String(args[k + 1]))
+                k += 2
+            case "--format" if k + 1 < len(args):
+                format = String(args[k + 1])
+                k += 2
+            case "--lazy":
+                lazy = True
+                k += 1
+            case "--property" if k + 1 < len(args):
+                var kv = String(args[k + 1])
+                var eq = kv.find("=")
+                if eq < 0:
+                    raise Error("--property needs K=V")
+                io.set(substr(kv, 0, eq), substr(kv, eq + 1, kv.byte_length()))
+                k += 2
+            case "--rest" if k + 1 < len(args):
+                rest_uri = String(args[k + 1])
+                k += 2
+            case "--sql" if k + 1 < len(args):
+                sql_uri = String(args[k + 1])
+                k += 2
+            case "--table" if k + 1 < len(args):
+                rest_table = String(args[k + 1])
+                k += 2
+            case "--token" if k + 1 < len(args):
+                token = String(args[k + 1])
+                k += 2
+            case "--warehouse" if k + 1 < len(args):
+                warehouse = String(args[k + 1])
+                k += 2
+            case "--no-vend":
+                vend = False
+                k += 1
+            case _:
+                raise Error("unknown option '" + a + "'")
 
     var table = _open(
         location, rest_uri, rest_table, token, warehouse, vend, sql_uri, io^
