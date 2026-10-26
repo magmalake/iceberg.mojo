@@ -10,6 +10,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-24
+
+### Changed
+
+- Built with Mojo 1.2.0, against the layer-1 tins' 1.2.0
+  releases. The published 0.8.1 was built with 1.1.0, whose
+  precompiled `.mojoc` a 1.2.0 compiler refuses.
+
 ## [0.8.1] - 2026-10-19
 
 ### Fixed
