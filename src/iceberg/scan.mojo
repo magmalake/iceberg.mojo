@@ -1005,32 +1005,13 @@ struct TableScan(Copyable, Movable):
         holding a stale ticket should come back empty rather than fail the
         query. A caller that needs to know can compare lengths.
         """
-        var schema = self.current_schema()
-        var split = self._split_selection()
-        var ids = split[0].copy()
-        var meta_columns = split[1].copy()
-        var mapping = self.name_mapping()
-
         var wanted = List[FileScanTask]()
         for task in self.plan_files():
             for i in range(len(paths)):
                 if task.data_file.file_path == paths[i]:
                     wanted.append(task.copy())
                     break
-
-        var out = List[RecordBatch]()
-        if len(wanted) == 0:
-            return out^
-        var all = self._read_files(
-            wanted^, schema, ids, meta_columns, mapping, options
-        )
-        var n = len(all)
-        var rev = List[List[ScanResult]]()
-        for _ in range(n):
-            rev.append(all.pop())
-        for _ in range(n):
-            _ = _drain_into(rev.pop(), out)
-        return out^
+        return self.to_batches_for_tasks(wanted^, options)
 
     def to_batches_for_splits(
         self,
@@ -1064,9 +1045,29 @@ struct TableScan(Copyable, Movable):
                 ):
                     wanted.append(task.copy())
                     break
+        return self.to_batches_for_tasks(wanted^, options)
 
+    def to_batches_for_tasks(
+        self,
+        var tasks: List[FileScanTask],
+        options: ScanOptions = ScanOptions(),
+    ) raises -> List[RecordBatch]:
+        """The rows of tasks that were already planned, without planning again.
+
+        `to_batches_for_paths` and `to_batches_for_splits` re-plan and then
+        select, which reads the manifest list and every manifest the filter
+        keeps. That's cheap next to a local warehouse and expensive next to
+        object storage, where a worker handed one file would make a request per
+        manifest before reading it. A planner that ships the `FileScanTask`s
+        themselves lets the worker go straight to the data.
+
+        The scan supplies what the tasks don't carry: the schema, the
+        projection, the name mapping, the partition specs and case
+        sensitivity. It should be configured as the planner's was, with the
+        same filter and selection; the residual comes from each task.
+        """
         var out = List[RecordBatch]()
-        if len(wanted) == 0:
+        if len(tasks) == 0:
             return out^
         var schema = self.current_schema()
         var split = self._split_selection()
@@ -1074,7 +1075,7 @@ struct TableScan(Copyable, Movable):
         var meta_columns = split[1].copy()
         var mapping = self.name_mapping()
         var all = self._read_files(
-            wanted^, schema, ids, meta_columns, mapping, options
+            tasks^, schema, ids, meta_columns, mapping, options
         )
         var n = len(all)
         var rev = List[List[ScanResult]]()
