@@ -2270,6 +2270,24 @@ def test_plan_files_delete_association() raises:
     assert_equal(with_deletes, want, "delete association count")
 
 
+def test_to_batches_for_tasks_reads_without_replanning() raises:
+    """Planned tasks read one at a time give the whole scan's rows, deletes
+    applied."""
+    var scan = fixture_scan("deletes_v2").filter('["true"]')
+    var want = 0
+    for b in scan.to_batches():
+        want += b.num_rows
+    var got = 0
+    var tasks = scan.plan_files()
+    for k in range(len(tasks)):
+        var one: List[FileScanTask] = [tasks[k].copy()]
+        for b in scan.to_batches_for_tasks(one^):
+            got += b.num_rows
+    assert_true(len(tasks) > 1)
+    assert_equal(got, want)
+    assert_equal(len(scan.to_batches_for_tasks(List[FileScanTask]())), 0)
+
+
 def test_plan_files_json_shape() raises:
     """The emitted JSON matches the bridge's, field for field."""
     var scan = fixture_scan("ident_part")
