@@ -1314,7 +1314,14 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     time, since it may stop after any file.
     """
 
+    var overlap_io: Bool
+    """With one decoding thread, fetch the next `files_at_once` files on a
+    second thread while the current ones decode. On by default: the waits
+    for object storage then overlap the decoding instead of adding to it, as
+    pyarrow's I/O pool does beside its CPU thread."""
+
     def __init__(out self):
+        self.overlap_io = True
         self.batch_size = 1 << 20
         self.limit = -1
         self.verify_crc = False

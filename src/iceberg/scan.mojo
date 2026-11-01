@@ -1255,6 +1255,160 @@ struct TableScan(Copyable, Movable):
         return out^
 
 
+def _open_group(
+    io: FileIO,
+    tasks: List[FileScanTask],
+    specs: List[PartitionSpec],
+    schema: Schema,
+    projected: List[Int],
+    meta_columns: List[String],
+    mapping: NameMapping,
+    case_sensitive: Bool,
+    options: ScanOptions,
+    lo: Int,
+    hi: Int,
+) raises -> List[OpenDataFile]:
+    """Tasks `lo` to `hi` opened and filled, ready to decode: their footers
+    in one round of requests, then all their chunks in the next."""
+    var locations = List[String]()
+    var tails = List[List[ByteRange]]()
+    for k in range(lo, hi):
+        ref df = tasks[k].data_file
+        var size = Int(df.file_size_in_bytes)
+        locations.append(df.file_path)
+        var want = List[ByteRange]()
+        if size >= 12:
+            var n = min(size, FOOTER_PREFETCH)
+            want.append(ByteRange(size - n, n))
+        tails.append(want^)
+    var got = io.read_ranges_many(locations, tails)
+    var opened = List[OpenDataFile](capacity=hi - lo)
+    for k in range(lo, hi):
+        var tail = List[UInt8]()
+        if len(got[k - lo]) > 0:
+            swap(tail, got[k - lo][0])
+        opened.append(
+            open_data_file(
+                io,
+                tasks[k].data_file,
+                tasks[k].delete_files,
+                tasks[k].data_sequence_number,
+                specs[k],
+                schema,
+                projected,
+                meta_columns,
+                mapping,
+                tasks[k].residual,
+                case_sensitive,
+                options,
+                tasks[k].start,
+                tasks[k].length,
+                tail^,
+            )
+        )
+    var needs = List[List[ByteRange]](capacity=hi - lo)
+    for i in range(len(opened)):
+        needs.append(opened[i].needed())
+    var chunks = io.read_ranges_many(locations, needs)
+    for i in range(len(opened)):
+        if len(needs[i]) > 0:
+            opened[i].fill(needs[i], chunks[i])
+    return opened^
+
+
+def _decode_group(
+    mut opened: List[OpenDataFile],
+    schema: Schema,
+    meta_columns: List[String],
+    options: ScanOptions,
+    mut out: List[List[ScanResult]],
+) raises:
+    """Decodes an opened group in task order, appending each file's batches."""
+    var decoded = List[List[ScanResult]](capacity=len(opened))
+    while len(opened) > 0:
+        var f = opened.pop()
+        decoded.append(f.decode(schema, meta_columns, options))
+    while len(decoded) > 0:
+        out.append(decoded.pop())
+
+
+struct _Overlap(Movable):
+    """One round of an overlapped read: slot 0 decodes the group already
+    fetched while slot 1 fetches and opens the next one."""
+
+    var io: FileIO
+    var tasks: List[FileScanTask]
+    var specs: List[PartitionSpec]
+    var schema: Schema
+    var projected: List[Int]
+    var meta_columns: List[String]
+    var mapping: NameMapping
+    var case_sensitive: Bool
+    var options: ScanOptions
+    var groups: List[List[OpenDataFile]]
+    """[0] the group slot 0 decodes, [1] the one slot 1 fetches into: each
+    slot writes only its own."""
+    var next_lo: Int
+    var next_hi: Int
+    var out: List[List[ScanResult]]
+    var failures: List[String]
+    """One per slot: each slot writes only its own, as two may fail at once."""
+
+    def __init__(
+        out self,
+        io: FileIO,
+        tasks: List[FileScanTask],
+        specs: List[PartitionSpec],
+        schema: Schema,
+        projected: List[Int],
+        meta_columns: List[String],
+        mapping: NameMapping,
+        case_sensitive: Bool,
+        options: ScanOptions,
+    ):
+        self.io = io.copy()
+        self.tasks = tasks.copy()
+        self.specs = specs.copy()
+        self.schema = schema.copy()
+        self.projected = projected.copy()
+        self.meta_columns = meta_columns.copy()
+        self.mapping = mapping.copy()
+        self.case_sensitive = case_sensitive
+        self.options = options.copy()
+        self.groups = [List[OpenDataFile](), List[OpenDataFile]()]
+        self.next_lo = 0
+        self.next_hi = 0
+        self.out = List[List[ScanResult]]()
+        self.failures = [String(), String()]
+
+
+def _overlap_round(slot: Int, mut s: _Overlap):
+    """`parallel_for`'s body: it can't raise, so a failure is kept in the
+    slot's own `s.failures` entry for the caller to raise once both slots are
+    done."""
+    try:
+        if slot == 0:
+            _decode_group(
+                s.groups[0], s.schema, s.meta_columns, s.options, s.out
+            )
+        elif s.next_hi > s.next_lo:
+            s.groups[1] = _open_group(
+                s.io,
+                s.tasks,
+                s.specs,
+                s.schema,
+                s.projected,
+                s.meta_columns,
+                s.mapping,
+                s.case_sensitive,
+                s.options,
+                s.next_lo,
+                s.next_hi,
+            )
+    except e:
+        s.failures[slot] = String(e)
+
+
 def _read_data_files(
     io: FileIO,
     tasks: List[FileScanTask],
@@ -1268,68 +1422,77 @@ def _read_data_files(
 ) raises -> List[List[ScanResult]]:
     """Every task's batches, one slot per task, in task order, reading
     `options.files_at_once` files together: their footers in one round of
-    requests, their chunks in the next, then each decoded in turn."""
+    requests, their chunks in the next, then each decoded in turn.
+
+    With `options.overlap_io`, the next group is fetched on a second thread
+    while this one decodes, so on one decoding thread the waits for object
+    storage and the decoding add up to the larger of the two rather than
+    their sum. Only the fetching thread makes requests while it runs."""
     var out = List[List[ScanResult]](capacity=len(tasks))
     var group = max(options.files_at_once, 1)
     if options.limit >= 0:
         group = 1
-    var lo = 0
-    while lo < len(tasks):
-        var hi = min(lo + group, len(tasks))
-        # The footers: every file's last FOOTER_PREFETCH bytes.
-        var locations = List[String]()
-        var tails = List[List[ByteRange]]()
-        for k in range(lo, hi):
-            ref df = tasks[k].data_file
-            var size = Int(df.file_size_in_bytes)
-            locations.append(df.file_path)
-            var want = List[ByteRange]()
-            if size >= 12:
-                var n = min(size, FOOTER_PREFETCH)
-                want.append(ByteRange(size - n, n))
-            tails.append(want^)
-        var got = io.read_ranges_many(locations, tails)
-        var opened = List[OpenDataFile](capacity=hi - lo)
-        for k in range(lo, hi):
-            var tail = List[UInt8]()
-            if len(got[k - lo]) > 0:
-                swap(tail, got[k - lo][0])
-            opened.append(
-                open_data_file(
-                    io,
-                    tasks[k].data_file,
-                    tasks[k].delete_files,
-                    tasks[k].data_sequence_number,
-                    specs[k],
-                    schema,
-                    projected,
-                    meta_columns,
-                    mapping,
-                    tasks[k].residual,
-                    case_sensitive,
-                    options,
-                    tasks[k].start,
-                    tasks[k].length,
-                    tail^,
-                )
+    var n = len(tasks)
+    if not options.overlap_io or n <= group:
+        var lo = 0
+        while lo < n:
+            var hi = min(lo + group, n)
+            var opened = _open_group(
+                io,
+                tasks,
+                specs,
+                schema,
+                projected,
+                meta_columns,
+                mapping,
+                case_sensitive,
+                options,
+                lo,
+                hi,
             )
-        # The chunks every opened file still needs, in one round.
-        var needs = List[List[ByteRange]](capacity=hi - lo)
-        for i in range(len(opened)):
-            needs.append(opened[i].needed())
-        var chunks = io.read_ranges_many(locations, needs)
-        for i in range(len(opened)):
-            if len(needs[i]) > 0:
-                opened[i].fill(needs[i], chunks[i])
-        # Decoded in task order; popping from the end would reverse it.
-        var decoded = List[List[ScanResult]](capacity=len(opened))
-        while len(opened) > 0:
-            var f = opened.pop()
-            decoded.append(f.decode(schema, meta_columns, options))
-        while len(decoded) > 0:
-            out.append(decoded.pop())
-        lo = hi
-    return out^
+            _decode_group(opened, schema, meta_columns, options, out)
+            lo = hi
+        return out^
+    var s = _Overlap(
+        io,
+        tasks,
+        specs,
+        schema,
+        projected,
+        meta_columns,
+        mapping,
+        case_sensitive,
+        options,
+    )
+    s.groups[0] = _open_group(
+        io,
+        tasks,
+        specs,
+        schema,
+        projected,
+        meta_columns,
+        mapping,
+        case_sensitive,
+        options,
+        0,
+        group,
+    )
+    var lo = group
+    while True:
+        s.next_lo = lo
+        s.next_hi = min(lo + group, n)
+        parallel_for[_overlap_round](2, s, 2)
+        for ref f in s.failures:
+            if f:
+                raise Error(f)
+        if s.next_hi <= s.next_lo:
+            break
+        s.groups.swap_elements(0, 1)
+        s.groups[1] = List[OpenDataFile]()
+        lo = s.next_hi
+    var result = List[List[ScanResult]]()
+    swap(result, s.out)
+    return result^
 
 
 struct BatchReader(Movable):
