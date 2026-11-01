@@ -2916,6 +2916,47 @@ def test_s3_plans_reuse_manifests() raises:
         _ = len(first)
 
 
+def _overlap_options(group: Int, overlap: Bool) -> ScanOptions:
+    var o = ScanOptions()
+    o.files_at_once = group
+    o.overlap_io = overlap
+    return o^
+
+
+def test_overlapped_reads_return_the_same_rows() raises:
+    """Fetching the next files on a second thread while the current ones
+    decode changes nothing about the rows or their order: one file at a
+    time and two at a time, with and without the overlap, over every
+    fixture table."""
+    var tables = fixture_table_names()
+    var checked = 0
+    for k in range(len(tables)):
+        var want = encoded_rows(
+            fixture_scan(tables[k]).to_table(_overlap_options(1, False))
+        )
+        for group in [1, 2]:
+            var got = encoded_rows(
+                fixture_scan(tables[k]).to_table(_overlap_options(group, True))
+            )
+            assert_equal(_diff(got, want), "", tables[k])
+            assert_equal(len(got), len(want), tables[k])
+            checked += 1
+    print("    overlapped reads:", checked, "comparisons")
+
+
+def test_s3_overlapped_reads() raises:
+    """The same over S3, where the fetching thread makes the requests."""
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_overlapped_reads: no ICEBERG_TEST_S3")
+        return
+    for name in [String("unpartitioned"), String("ident_part"), String("deletes_v2")]:
+        var want = encoded_rows(fixture_scan(name).to_table())
+        var t = Table.load(_s3_warehouse() + "/" + name, s3_io())
+        for _ in range(3):
+            var got = encoded_rows(t.scan().to_table(_overlap_options(1, True)))
+            assert_equal(_diff(got, want), "", name)
+
+
 def test_s3_catalog_listing() raises:
     if _s3_warehouse() == "":
         print("SKIP test_s3_catalog_listing: no ICEBERG_TEST_S3")
