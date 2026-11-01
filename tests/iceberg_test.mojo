@@ -6546,16 +6546,20 @@ def test_streaming_reads_one_wave_ahead_and_no_further() raises:
     Peak RSS is a measurement, not an assertion, but what makes it hold is
     structural and can be asserted: when the caller has taken a batch, the
     reader has read at most one wave of files, and it never runs ahead of the
-    wave it is handing out. `bucket_part` plans six files, so a default scan
-    has five it must not have touched yet.
+    wave it is handing out. `bucket_part` plans six files, so a scan reading
+    one file at a time has five it must not have touched yet.
     """
     var scan = fixture_scan("bucket_part")
-    var reader = scan.to_batch_reader()
+    # One worker reads `files_at_once` files together, eight by default.
+    assert_equal(scan.to_batch_reader().wave, 8)
+    var one = ScanOptions()
+    one.files_at_once = 1
+    var reader = scan.to_batch_reader(one)
     assert_true(
         reader.num_tasks() >= 4,
         String("bucket_part planned only ", reader.num_tasks(), " files"),
     )
-    assert_equal(reader.wave, 1, "one worker reads one file at a time")
+    assert_equal(reader.wave, 1, "files_at_once = 1 reads one at a time")
     var batches = 0
     while True:
         var got = reader.next_batch()

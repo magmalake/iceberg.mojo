@@ -1302,6 +1302,18 @@ struct ScanOptions(Copyable, Defaultable, Movable):
     order — but still reads each file it does visit with the full budget.
     """
 
+    var files_at_once: Int
+    """Data files a sequential scan reads together, `1` for one at a time.
+
+    On object storage a file costs two rounds of requests, its footer and
+    then its column chunks, and a scan reading one file after another waits
+    through both for every file. Reading this many together fetches their
+    footers in one round and their chunks in the next, then decodes them in
+    order, so the rows and their order don't change. It holds this many
+    files' chunks in memory at once. A scan with a `limit` reads one at a
+    time, since it may stop after any file.
+    """
+
     def __init__(out self):
         self.batch_size = 1 << 20
         self.limit = -1
@@ -1310,6 +1322,7 @@ struct ScanOptions(Copyable, Defaultable, Movable):
         self.lazy = False
         self.num_workers = 1
         self.split_size = 0
+        self.files_at_once = 8
 
 
 # ── deletes ─────────────────────────────────────────────────────────────────
@@ -1656,7 +1669,370 @@ def _split_row_groups(
     return groups^
 
 
-def read_data_file(
+struct OpenDataFile(Movable):
+    """A data file between `open_data_file` and `decode`."""
+
+    var data_file: DataFile
+    var reader: ParquetReader[AllCodecs]
+    var sparse: Bool
+    """The reader holds the footer alone: `needed()` has to be filled."""
+    var residual: Expr
+    var trivial: Bool
+    var equality: List[_EqualityDeletes]
+    var read_ids: List[Int]
+    var n_projected: Int
+    var plans: List[_ColumnPlan]
+    var file_fields: List[Int]
+    var leaves: List[_LeafPlan]
+    var task_groups: List[Int]
+    var deleted: List[Bool]
+
+    def __init__(
+        out self,
+        var data_file: DataFile,
+        var reader: ParquetReader[AllCodecs],
+        sparse: Bool,
+        var residual: Expr,
+        trivial: Bool,
+        var equality: List[_EqualityDeletes],
+        var read_ids: List[Int],
+        n_projected: Int,
+        var plans: List[_ColumnPlan],
+        var file_fields: List[Int],
+        var leaves: List[_LeafPlan],
+        var task_groups: List[Int],
+        var deleted: List[Bool],
+    ):
+        self.data_file = data_file^
+        self.reader = reader^
+        self.sparse = sparse
+        self.residual = residual^
+        self.trivial = trivial
+        self.equality = equality^
+        self.read_ids = read_ids^
+        self.n_projected = n_projected
+        self.plans = plans^
+        self.file_fields = file_fields^
+        self.leaves = leaves^
+        self.task_groups = task_groups^
+        self.deleted = deleted^
+
+    def needed(self) raises -> List[ByteRange]:
+        """The byte ranges to fetch and `fill` before `decode`: exactly what
+        the selection decodes, or nothing when the whole file is here."""
+        var out = List[ByteRange]()
+        if not self.sparse:
+            return out^
+        # `needed_byte_ranges` is asked *after* `select_fields`, so what is
+        # fetched is exactly what the reader will decode rather than a guess
+        # that has to be kept in step with the plan.
+        var ranges = self.reader.needed_byte_ranges()
+        for k in range(len(ranges)):
+            out.append(ByteRange(ranges[k][0], ranges[k][1]))
+        return out^
+
+    def fill(mut self, ranges: List[ByteRange], bufs: List[List[UInt8]]) raises:
+        """Writes the fetched `needed()` ranges into the reader."""
+        for k in range(len(ranges)):
+            self.reader.fill_range(ranges[k].offset, Span(bufs[k]))
+        self.sparse = False
+
+    def decode(
+        mut self,
+        schema: Schema,
+        meta_columns: List[String],
+        options: ScanOptions,
+    ) raises -> List[ScanResult]:
+        """The file's surviving rows, as Arrow batches."""
+        ref reader = self.reader
+        ref residual = self.residual
+        var trivial = self.trivial
+        ref equality = self.equality
+        ref read_ids = self.read_ids
+        var n_projected = self.n_projected
+        ref plans = self.plans
+        ref file_fields = self.file_fields
+        ref leaves = self.leaves
+        ref task_groups = self.task_groups
+        ref deleted = self.deleted
+
+        # Which columns need a materialised array: everything projected, plus the
+        # key columns of any equality delete and the owner of any struct leaf.
+        var need_array = List[Bool](length=len(read_ids), fill=False)
+        for k in range(n_projected):
+            need_array[k] = True
+        for k in range(len(equality)):
+            for j in range(len(equality[k].ids)):
+                var at = _index_of(read_ids, equality[k].ids[j])
+                if at >= 0:
+                    need_array[at] = True
+        for k in range(len(leaves)):
+            need_array[leaves[k].slot] = True
+
+        # ── deletes and pruning ────────────────────────────────────────────────
+        var has_position_deletes = False
+        for k in range(len(deleted)):
+            if deleted[k]:
+                has_position_deletes = True
+                break
+        var need_positions = has_position_deletes or _wants_positions(
+            meta_columns
+        )
+
+        # The row groups this task owns. `split_offsets[i]` is the file offset of
+        # row group `i`, so a task covering [start, start+length) takes exactly
+        # the groups whose offset falls inside it. Assigning by the group's
+        # *start* is what makes a split a partition: every group belongs to one
+        # task, so no row is read twice and none is skipped.
+        #
+        # This narrows the list the read loop below iterates, which is the only
+        # thing that decides what gets decoded — the loop re-selects one group at
+        # a time, so a `select_row_groups` here would be overwritten.
+        #
+        # `length == 0` means the whole file: an unsplit task, and every direct
+        # caller.
+        var groups = List[Int]()
+        if len(task_groups) > 0:
+            groups = task_groups.copy()
+        else:
+            for g in range(reader.num_row_groups()):
+                groups.append(g)
+        if options.prune and len(file_fields) > 0:
+            var preds = _predicates_for(residual, residual.root, reader, schema)
+            if len(preds) > 0:
+                _ = reader.prune_row_groups(preds)
+                groups = reader._row_groups.copy()
+
+        var starts = List[Int64]()
+        var at_row: Int64 = 0
+        for g in range(reader.num_row_groups()):
+            starts.append(at_row)
+            at_row += reader.meta.row_groups[g].num_rows
+
+        # ── read ───────────────────────────────────────────────────────────────
+        var out = List[ScanResult]()
+        var kept_total = 0
+        for gi in range(len(groups)):
+            var g = groups[gi]
+            reader.select_row_groups([g])
+            if options.prune and not need_positions and len(file_fields) > 0:
+                var preds = _predicates_for(
+                    residual, residual.root, reader, schema
+                )
+                if len(preds) > 0:
+                    _ = reader.prune_pages(preds)
+            var pos = starts[g]
+            while reader.has_next():
+                var batch = reader.read_batch()
+                var n = batch.num_rows
+                var base = pos
+                pos += Int64(n)
+                var decoded = _take_column_trees(batch^)
+                # Consumed in `batch_index` order, which is the order the
+                # `SRC_FILE` plans were built in, so each decoded buffer is moved
+                # into its cast exactly once and never copied.
+                var pending = List[ColumnTree]()
+                for _ in range(len(decoded)):
+                    pending.append(decoded.pop())
+
+                # Cast every column that was read to the table's current type.
+                var arrays = List[ColumnTree]()
+                for c in range(len(read_ids)):
+                    ref p = plans[c]
+                    if p.source == SRC_FILE:
+                        arrays.append(
+                            cast_column(
+                                pending.pop(),
+                                p.read.store,
+                                p.read.type,
+                                p.name,
+                                p.field_id,
+                                p.nullable,
+                            )
+                        )
+                    elif need_array[c]:
+                        if p.is_nested():
+                            var arena = ArrayArena()
+                            var r = default_tree(
+                                arena, p.read.store, p.field, n
+                            )
+                            arrays.append(ColumnTree(arena^, r))
+                        else:
+                            arrays.append(
+                                ColumnTree(
+                                    constant_array(
+                                        p.name,
+                                        p.field_id,
+                                        p.kind,
+                                        p.precision,
+                                        p.scale,
+                                        p.length,
+                                        p.constant,
+                                        n,
+                                    )
+                                )
+                            )
+                    else:
+                        var arena = ArrayArena()
+                        var r = empty_tree(
+                            arena,
+                            p.read.store,
+                            p.read.type,
+                            p.name,
+                            p.field_id,
+                            p.nullable,
+                        )
+                        arrays.append(ColumnTree(arena^, r))
+
+                # ── selection ──────────────────────────────────────────────────
+                var leaf_arrays = List[ArrayData]()
+                if not trivial:
+                    for k in range(len(leaves)):
+                        ref lp = leaves[k]
+                        leaf_arrays.append(
+                            flatten_leaf(
+                                arrays[lp.slot].arena,
+                                arrays[lp.slot].root,
+                                lp.path,
+                            )
+                        )
+                # The residual already produces one bool per row, so when nothing
+                # else has an opinion it *is* the selection vector — a batch of a
+                # million rows does not need a second million-entry list and a
+                # second pass to say the same thing.
+                var keep: List[Bool]
+                if trivial:
+                    keep = List[Bool](length=n, fill=True)
+                else:
+                    keep = _selection(
+                        residual,
+                        residual.root,
+                        arrays,
+                        plans,
+                        read_ids,
+                        leaves,
+                        leaf_arrays,
+                        n,
+                    )
+                var all_kept: Bool
+                if has_position_deletes:
+                    for r in range(n):
+                        var p_at = Int(base) + r
+                        if p_at < len(deleted) and deleted[p_at]:
+                            keep[r] = False
+                for e in range(len(equality)):
+                    ref eq = equality[e]
+                    var slots = List[Int]()
+                    for j in range(len(eq.ids)):
+                        slots.append(_index_of(read_ids, eq.ids[j]))
+                    for r in range(n):
+                        if not keep[r]:
+                            continue
+                        var key = List[UInt8]()
+                        for j in range(len(slots)):
+                            ref a = arrays[slots[j]].arena.nodes[
+                                arrays[slots[j]].root
+                            ]
+                            append_key(key, a, r)
+                        if eq.contains(key):
+                            keep[r] = False
+
+                var n_keep = sel_count(keep)
+                all_kept = n_keep == n
+                if options.limit >= 0 and kept_total + n_keep > options.limit:
+                    var room = options.limit - kept_total
+                    var seen = 0
+                    for r in range(n):
+                        if not keep[r]:
+                            continue
+                        if seen >= room:
+                            keep[r] = False
+                            all_kept = False
+                        seen += 1
+                    n_keep = room
+                if n_keep == 0:
+                    if options.limit >= 0 and kept_total >= options.limit:
+                        return out^
+                    continue
+
+                # ── the surviving rows ─────────────────────────────────────────
+                var rest = List[ColumnTree]()
+                for _ in range(len(arrays)):
+                    rest.append(arrays.pop())
+                var cols = List[ScanColumn]()
+                for c in range(n_projected):
+                    ref p = plans[c]
+                    var raw = rest.pop()
+                    var t = raw^ if all_kept else _filter_column(
+                        raw, keep, n_keep
+                    )
+                    if p.reproject:
+                        t = cast_column(
+                            t^,
+                            p.out.store,
+                            p.out.type,
+                            p.name,
+                            p.field_id,
+                            p.nullable,
+                        )
+                    cols.append(
+                        ScanColumn(
+                            p.name,
+                            p.field_id,
+                            p.kind,
+                            p.precision,
+                            p.scale,
+                            p.length,
+                            p.out.copy(),
+                            t^,
+                        )
+                    )
+                if len(meta_columns) > 0:
+                    var positions = List[Int64]()
+                    if need_positions:
+                        for r in range(n):
+                            if keep[r]:
+                                positions.append(base + Int64(r))
+                    for c in range(len(read_ids), len(plans)):
+                        ref p = plans[c]
+                        var a: ArrayData
+                        if p.source == SRC_POS:
+                            a = int64_array(p.name, positions)
+                        elif p.source == SRC_ROW_ID:
+                            var ids = List[Int64](capacity=len(positions))
+                            for j in range(len(positions)):
+                                ids.append(p.constant.i + positions[j])
+                            a = int64_array(p.name, ids)
+                        else:
+                            a = constant_array(
+                                p.name,
+                                p.field_id,
+                                p.kind,
+                                p.precision,
+                                p.scale,
+                                p.length,
+                                p.constant,
+                                n_keep,
+                            )
+                        cols.append(
+                            ScanColumn(
+                                p.name,
+                                p.field_id,
+                                p.kind,
+                                p.precision,
+                                p.scale,
+                                p.length,
+                                a^,
+                            )
+                        )
+                out.append(ScanResult(cols^))
+                kept_total += n_keep
+                if options.limit >= 0 and kept_total >= options.limit:
+                    return out^
+        return out^
+
+
+def open_data_file(
     io: FileIO,
     data_file: DataFile,
     delete_files: List[DataFile],
@@ -1671,18 +2047,17 @@ def read_data_file(
     options: ScanOptions,
     start: Int64 = 0,
     length: Int64 = 0,
-) raises -> List[ScanResult]:
-    """One data file's surviving rows, as Arrow batches.
+    var tail: List[UInt8] = List[UInt8](),
+) raises -> OpenDataFile:
+    """One data file opened for reading: its footer parsed, the projection
+    resolved against it, its deletes read, and the bytes the read needs
+    named but, when `sparse`, not fetched yet.
 
-    `start` and `length` name a byte range of the file, as a split scan task
-    carries. `length == 0` means the whole file, which is what an unsplit task
-    and every direct caller get.
-
-    `projected` is a list of field ids, which may name whole columns or
-    fields nested inside them. Ids that share a top-level column come back as
-    one column whose type has been pruned to exactly what was asked for, and
-    the Parquet read is pruned with it: `["a.b", "c"]` decodes the leaves
-    under `a.b` and `c`, and nothing else.
+    `read_data_file` is `open_data_file`, then fetching `needed()`, then
+    `decode`. A scan reading several files opens them all first, so their
+    footers (passed in as `tail`, the file's last `FOOTER_PREFETCH` bytes)
+    and then their chunks can each be fetched in one round of requests.
+    The arguments are `read_data_file`'s.
     """
     if data_file.file_format.lower() != "parquet":
         raise Error(
@@ -1756,7 +2131,7 @@ def read_data_file(
     # file whenever anything about the footer is unexpected, so the second
     # step is an optimisation and never a correctness condition.
     var sparse = False
-    var footer_only = _load_footer(io, data_file, sparse)
+    var footer_only = _load_footer(io, data_file, sparse, tail^)
     var reader = ParquetReader[AllCodecs](footer_only^)
 
     # Honour the task's byte range, if it has one. `split_offsets[i]` is the
@@ -1938,290 +2313,76 @@ def read_data_file(
     if len(task_groups) > 0:
         reader.select_row_groups(task_groups.copy())
 
-    if sparse:
-        # `needed_byte_ranges` is asked *after* `select_fields`, so what is
-        # fetched is exactly what the reader will decode rather than a guess
-        # that has to be kept in step with the plan above.
-        #
-        # All of them in one call: on object storage the nearby ones are
-        # coalesced and the rest fetched at once, not one after another.
-        var ranges = reader.needed_byte_ranges()
-        var spans = List[ByteRange](capacity=len(ranges))
-        for k in range(len(ranges)):
-            spans.append(ByteRange(ranges[k][0], ranges[k][1]))
-        var got = io.read_ranges(data_file.file_path, spans)
-        for k in range(len(ranges)):
-            reader.fill_range(ranges[k][0], Span(got[k]))
-
-    # Which columns need a materialised array: everything projected, plus the
-    # key columns of any equality delete and the owner of any struct leaf.
-    var need_array = List[Bool](length=len(read_ids), fill=False)
-    for k in range(n_projected):
-        need_array[k] = True
-    for k in range(len(equality)):
-        for j in range(len(equality[k].ids)):
-            var at = _index_of(read_ids, equality[k].ids[j])
-            if at >= 0:
-                need_array[at] = True
-    for k in range(len(leaves)):
-        need_array[leaves[k].slot] = True
-
-    # ── deletes and pruning ────────────────────────────────────────────────
     var deleted = _position_delete_bitmap(
         io, data_file.file_path, data_file.record_count, delete_files, options
     )
-    var has_position_deletes = False
-    for k in range(len(deleted)):
-        if deleted[k]:
-            has_position_deletes = True
-            break
-    var need_positions = has_position_deletes or _wants_positions(meta_columns)
+    return OpenDataFile(
+        data_file.copy(),
+        reader^,
+        sparse,
+        residual^,
+        trivial,
+        equality^,
+        read_ids^,
+        n_projected,
+        plans^,
+        file_fields^,
+        leaves^,
+        task_groups^,
+        deleted^,
+    )
 
-    # The row groups this task owns. `split_offsets[i]` is the file offset of
-    # row group `i`, so a task covering [start, start+length) takes exactly
-    # the groups whose offset falls inside it. Assigning by the group's
-    # *start* is what makes a split a partition: every group belongs to one
-    # task, so no row is read twice and none is skipped.
-    #
-    # This narrows the list the read loop below iterates, which is the only
-    # thing that decides what gets decoded — the loop re-selects one group at
-    # a time, so a `select_row_groups` here would be overwritten.
-    #
-    # `length == 0` means the whole file: an unsplit task, and every direct
-    # caller.
-    var groups = List[Int]()
-    if len(task_groups) > 0:
-        groups = task_groups.copy()
-    else:
-        for g in range(reader.num_row_groups()):
-            groups.append(g)
-    if options.prune and len(file_fields) > 0:
-        var preds = _predicates_for(residual, residual.root, reader, schema)
-        if len(preds) > 0:
-            _ = reader.prune_row_groups(preds)
-            groups = reader._row_groups.copy()
 
-    var starts = List[Int64]()
-    var at_row: Int64 = 0
-    for g in range(reader.num_row_groups()):
-        starts.append(at_row)
-        at_row += reader.meta.row_groups[g].num_rows
+def read_data_file(
+    io: FileIO,
+    data_file: DataFile,
+    delete_files: List[DataFile],
+    data_sequence_number: Int64,
+    spec: PartitionSpec,
+    schema: Schema,
+    projected: List[Int],
+    meta_columns: List[String],
+    mapping: NameMapping,
+    residual_dsl: String,
+    case_sensitive: Bool,
+    options: ScanOptions,
+    start: Int64 = 0,
+    length: Int64 = 0,
+) raises -> List[ScanResult]:
+    """One data file's surviving rows, as Arrow batches.
 
-    # ── read ───────────────────────────────────────────────────────────────
-    var out = List[ScanResult]()
-    var kept_total = 0
-    for gi in range(len(groups)):
-        var g = groups[gi]
-        reader.select_row_groups([g])
-        if options.prune and not need_positions and len(file_fields) > 0:
-            var preds = _predicates_for(residual, residual.root, reader, schema)
-            if len(preds) > 0:
-                _ = reader.prune_pages(preds)
-        var pos = starts[g]
-        while reader.has_next():
-            var batch = reader.read_batch()
-            var n = batch.num_rows
-            var base = pos
-            pos += Int64(n)
-            var decoded = _take_column_trees(batch^)
-            # Consumed in `batch_index` order, which is the order the
-            # `SRC_FILE` plans were built in, so each decoded buffer is moved
-            # into its cast exactly once and never copied.
-            var pending = List[ColumnTree]()
-            for _ in range(len(decoded)):
-                pending.append(decoded.pop())
+    `start` and `length` name a byte range of the file, as a split scan task
+    carries. `length == 0` means the whole file, which is what an unsplit task
+    and every direct caller get.
 
-            # Cast every column that was read to the table's current type.
-            var arrays = List[ColumnTree]()
-            for c in range(len(read_ids)):
-                ref p = plans[c]
-                if p.source == SRC_FILE:
-                    arrays.append(
-                        cast_column(
-                            pending.pop(),
-                            p.read.store,
-                            p.read.type,
-                            p.name,
-                            p.field_id,
-                            p.nullable,
-                        )
-                    )
-                elif need_array[c]:
-                    if p.is_nested():
-                        var arena = ArrayArena()
-                        var r = default_tree(arena, p.read.store, p.field, n)
-                        arrays.append(ColumnTree(arena^, r))
-                    else:
-                        arrays.append(
-                            ColumnTree(
-                                constant_array(
-                                    p.name,
-                                    p.field_id,
-                                    p.kind,
-                                    p.precision,
-                                    p.scale,
-                                    p.length,
-                                    p.constant,
-                                    n,
-                                )
-                            )
-                        )
-                else:
-                    var arena = ArrayArena()
-                    var r = empty_tree(
-                        arena,
-                        p.read.store,
-                        p.read.type,
-                        p.name,
-                        p.field_id,
-                        p.nullable,
-                    )
-                    arrays.append(ColumnTree(arena^, r))
-
-            # ── selection ──────────────────────────────────────────────────
-            var leaf_arrays = List[ArrayData]()
-            if not trivial:
-                for k in range(len(leaves)):
-                    ref lp = leaves[k]
-                    leaf_arrays.append(
-                        flatten_leaf(
-                            arrays[lp.slot].arena,
-                            arrays[lp.slot].root,
-                            lp.path,
-                        )
-                    )
-            # The residual already produces one bool per row, so when nothing
-            # else has an opinion it *is* the selection vector — a batch of a
-            # million rows does not need a second million-entry list and a
-            # second pass to say the same thing.
-            var keep: List[Bool]
-            if trivial:
-                keep = List[Bool](length=n, fill=True)
-            else:
-                keep = _selection(
-                    residual,
-                    residual.root,
-                    arrays,
-                    plans,
-                    read_ids,
-                    leaves,
-                    leaf_arrays,
-                    n,
-                )
-            var all_kept: Bool
-            if has_position_deletes:
-                for r in range(n):
-                    var p_at = Int(base) + r
-                    if p_at < len(deleted) and deleted[p_at]:
-                        keep[r] = False
-            for e in range(len(equality)):
-                ref eq = equality[e]
-                var slots = List[Int]()
-                for j in range(len(eq.ids)):
-                    slots.append(_index_of(read_ids, eq.ids[j]))
-                for r in range(n):
-                    if not keep[r]:
-                        continue
-                    var key = List[UInt8]()
-                    for j in range(len(slots)):
-                        ref a = arrays[slots[j]].arena.nodes[
-                            arrays[slots[j]].root
-                        ]
-                        append_key(key, a, r)
-                    if eq.contains(key):
-                        keep[r] = False
-
-            var n_keep = sel_count(keep)
-            all_kept = n_keep == n
-            if options.limit >= 0 and kept_total + n_keep > options.limit:
-                var room = options.limit - kept_total
-                var seen = 0
-                for r in range(n):
-                    if not keep[r]:
-                        continue
-                    if seen >= room:
-                        keep[r] = False
-                        all_kept = False
-                    seen += 1
-                n_keep = room
-            if n_keep == 0:
-                if options.limit >= 0 and kept_total >= options.limit:
-                    return out^
-                continue
-
-            # ── the surviving rows ─────────────────────────────────────────
-            var rest = List[ColumnTree]()
-            for _ in range(len(arrays)):
-                rest.append(arrays.pop())
-            var cols = List[ScanColumn]()
-            for c in range(n_projected):
-                ref p = plans[c]
-                var raw = rest.pop()
-                var t = raw^ if all_kept else _filter_column(raw, keep, n_keep)
-                if p.reproject:
-                    t = cast_column(
-                        t^,
-                        p.out.store,
-                        p.out.type,
-                        p.name,
-                        p.field_id,
-                        p.nullable,
-                    )
-                cols.append(
-                    ScanColumn(
-                        p.name,
-                        p.field_id,
-                        p.kind,
-                        p.precision,
-                        p.scale,
-                        p.length,
-                        p.out.copy(),
-                        t^,
-                    )
-                )
-            if len(meta_columns) > 0:
-                var positions = List[Int64]()
-                if need_positions:
-                    for r in range(n):
-                        if keep[r]:
-                            positions.append(base + Int64(r))
-                for c in range(len(read_ids), len(plans)):
-                    ref p = plans[c]
-                    var a: ArrayData
-                    if p.source == SRC_POS:
-                        a = int64_array(p.name, positions)
-                    elif p.source == SRC_ROW_ID:
-                        var ids = List[Int64](capacity=len(positions))
-                        for j in range(len(positions)):
-                            ids.append(p.constant.i + positions[j])
-                        a = int64_array(p.name, ids)
-                    else:
-                        a = constant_array(
-                            p.name,
-                            p.field_id,
-                            p.kind,
-                            p.precision,
-                            p.scale,
-                            p.length,
-                            p.constant,
-                            n_keep,
-                        )
-                    cols.append(
-                        ScanColumn(
-                            p.name,
-                            p.field_id,
-                            p.kind,
-                            p.precision,
-                            p.scale,
-                            p.length,
-                            a^,
-                        )
-                    )
-            out.append(ScanResult(cols^))
-            kept_total += n_keep
-            if options.limit >= 0 and kept_total >= options.limit:
-                return out^
-    return out^
+    `projected` is a list of field ids, which may name whole columns or
+    fields nested inside them. Ids that share a top-level column come back as
+    one column whose type has been pruned to exactly what was asked for, and
+    the Parquet read is pruned with it: `["a.b", "c"]` decodes the leaves
+    under `a.b` and `c`, and nothing else.
+    """
+    var f = open_data_file(
+        io,
+        data_file,
+        delete_files,
+        data_sequence_number,
+        spec,
+        schema,
+        projected,
+        meta_columns,
+        mapping,
+        residual_dsl,
+        case_sensitive,
+        options,
+        start,
+        length,
+    )
+    # All the chunks in one call: on object storage the nearby ones are
+    # coalesced and the rest fetched at once, not one after another.
+    var want = f.needed()
+    if len(want) > 0:
+        f.fill(want, io.read_ranges(data_file.file_path, want))
+    return f.decode(schema, meta_columns, options)
 
 
 def read_data_file_table(
@@ -2338,7 +2499,10 @@ def _nested_field(schema: Schema, id: Int) raises -> NestedField:
 
 # ── loading the bytes ───────────────────────────────────────────────────────
 def _load_footer(
-    io: FileIO, data_file: DataFile, mut sparse: Bool
+    io: FileIO,
+    data_file: DataFile,
+    mut sparse: Bool,
+    var tail: List[UInt8] = List[UInt8](),
 ) raises -> List[UInt8]:
     """A file-length buffer holding the footer, ready to be filled in.
 
@@ -2364,7 +2528,9 @@ def _load_footer(
     # fits, and then the 8-byte trailer and the metadata cost one request
     # instead of two.
     var want = min(size, FOOTER_PREFETCH)
-    var tail = io.read_range(data_file.file_path, size - want, want)
+    if len(tail) != want:
+        # Not prefetched by the caller (or not the expected bytes).
+        tail = io.read_range(data_file.file_path, size - want, want)
     if len(tail) != want:
         return io.read_all(data_file.file_path)
     var footer_start = footer_start_of(size, Span(tail)[want - 8 : want])

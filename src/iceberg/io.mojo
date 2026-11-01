@@ -172,6 +172,16 @@ struct FileIO(Copyable, Movable):
             ranges
         )
 
+    def read_ranges_many(
+        self, locations: List[String], ranges: List[List[ByteRange]]
+    ) raises -> List[List[List[UInt8]]]:
+        """`ranges[i]` of `locations[i]` for every `i`; on S3 every file's
+        ranges are fetched in one batch."""
+        var abs = List[String](capacity=len(locations))
+        for ref loc in locations:
+            abs.append(self.absolute(loc))
+        return self.resolver.read_ranges_many(abs, ranges)
+
     def read_all_many(
         self, locations: List[String]
     ) raises -> List[List[UInt8]]:
