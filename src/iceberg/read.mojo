@@ -117,6 +117,8 @@ from .expressions import (
     bind,
     parse_filter,
 )
+from objectstore.ranges import ByteRange
+
 from .io import FileIO
 from .json import Json, json_quote, parse_json, substr
 from .nested import (
@@ -207,6 +209,10 @@ from .values import (
 
 
 # ── reserved ids ────────────────────────────────────────────────────────────
+comptime FOOTER_PREFETCH = 512 * 1024
+"""Bytes read from a data file's end to get its footer in one request; the
+Rust and Java readers prefetch the same."""
+
 comptime POS_DELETE_FILE_PATH_ID = 2147483546
 comptime POS_DELETE_POS_ID = 2147483545
 
@@ -1936,16 +1942,16 @@ def read_data_file(
         # `needed_byte_ranges` is asked *after* `select_fields`, so what is
         # fetched is exactly what the reader will decode rather than a guess
         # that has to be kept in step with the plan above.
+        #
+        # All of them in one call: on object storage the nearby ones are
+        # coalesced and the rest fetched at once, not one after another.
         var ranges = reader.needed_byte_ranges()
+        var spans = List[ByteRange](capacity=len(ranges))
         for k in range(len(ranges)):
-            reader.fill_range(
-                ranges[k][0],
-                Span(
-                    io.read_range(
-                        data_file.file_path, ranges[k][0], ranges[k][1]
-                    )
-                ),
-            )
+            spans.append(ByteRange(ranges[k][0], ranges[k][1]))
+        var got = io.read_ranges(data_file.file_path, spans)
+        for k in range(len(ranges)):
+            reader.fill_range(ranges[k][0], Span(got[k]))
 
     # Which columns need a materialised array: everything projected, plus the
     # key columns of any equality delete and the owner of any struct leaf.
@@ -2336,8 +2342,9 @@ def _load_footer(
 ) raises -> List[UInt8]:
     """A file-length buffer holding the footer, ready to be filled in.
 
-    Two range requests — the 8-byte trailer, then the metadata — are enough
-    to build a `ParquetReader` and resolve a projection against it. The
+    One range request for the file's last `FOOTER_PREFETCH` bytes — a second
+    only when the footer is larger — is enough to build a `ParquetReader` and
+    resolve a projection against it. The
     chunks that projection reaches are fetched afterwards, by the caller,
     through `ParquetReader.fill_range`.
 
@@ -2353,13 +2360,25 @@ def _load_footer(
         size = io.length(data_file.file_path)
     if size < 12:
         return io.read_all(data_file.file_path)
-    var tail = io.read_range(data_file.file_path, size - 8, 8)
-    var footer_start = footer_start_of(size, Span(tail))
+    # Speculatively read more than the trailer: the footer almost always
+    # fits, and then the 8-byte trailer and the metadata cost one request
+    # instead of two.
+    var want = min(size, FOOTER_PREFETCH)
+    var tail = io.read_range(data_file.file_path, size - want, want)
+    if len(tail) != want:
+        return io.read_all(data_file.file_path)
+    var footer_start = footer_start_of(size, Span(tail)[want - 8 : want])
     if footer_start < 0:
         return io.read_all(data_file.file_path)
-    var footer = io.read_range(
-        data_file.file_path, footer_start, size - footer_start
-    )
+    var footer: List[UInt8]
+    if footer_start >= size - want:
+        footer = List[UInt8](Span(tail)[footer_start - (size - want) : want])
+    else:
+        # A footer larger than the prefetch: fetch what's missing in front.
+        footer = io.read_range(
+            data_file.file_path, footer_start, size - want - footer_start
+        )
+        footer.extend(Span(tail))
     if len(footer) != size - footer_start:
         return io.read_all(data_file.file_path)
     sparse = True

@@ -503,6 +503,30 @@ struct TableMetadata(Copyable, Movable):
             raise Error("iceberg: the table has no current snapshot")
         return self.snapshot_by_id(self.current_snapshot_id)
 
+    def for_reading(self) raises -> TableMetadata:
+        """A copy for reading the current snapshot, without the history.
+
+        It keeps the schemas, specs, sort orders and properties, the current
+        snapshot and the refs that point at it, and drops the other
+        snapshots, the snapshot and metadata logs and the statistics files. A
+        table written by many commits carries all of them, so this is much
+        smaller, and it's what to send to the workers reading one plan's
+        files: they need the schema and the snapshot, not the table's past.
+        """
+        var m = self.copy()
+        m.snapshots = List[Snapshot]()
+        m.refs = List[SnapshotRef]()
+        if self.has_current_snapshot and self.current_snapshot_id >= 0:
+            m.snapshots.append(self.current_snapshot())
+            for ref r in self.refs:
+                if r.snapshot_id == self.current_snapshot_id:
+                    m.refs.append(r.copy())
+        m.snapshot_log = List[SnapshotLogEntry]()
+        m.metadata_log = List[MetadataLogEntry]()
+        m.statistics = List[StatisticsFile]()
+        m.partition_statistics = List[PartitionStatisticsFile]()
+        return m^
+
     def ref_index(self, name: String) -> Int:
         for k in range(len(self.refs)):
             if self.refs[k].name == name:

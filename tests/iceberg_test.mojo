@@ -872,6 +872,30 @@ def test_metadata_round_trip() raises:
     print("    metadata round-trip:", n, "tables")
 
 
+def test_metadata_for_reading() raises:
+    """`for_reading` keeps what a scan of the current snapshot needs: it
+    round-trips, it's no larger, and a scan over it reads the same rows."""
+    var tables = fixture_table_names()
+    var n = 0
+    for k in range(len(tables)):
+        var m = load_fixture_metadata(tables[k])
+        if not m.has_current_snapshot:
+            continue
+        var r = m.for_reading()
+        assert_equal(len(r.snapshots), 1, tables[k])
+        assert_equal(r.current_snapshot().snapshot_id, m.current_snapshot_id)
+        assert_equal(len(r.snapshot_log), 0)
+        assert_true(r.to_json().byte_length() <= m.to_json().byte_length())
+        var again = TableMetadata.parse(r.to_json())
+        assert_equal(again.to_json(), r.to_json(), tables[k])
+        var whole = TableScan(m^, fixture_io()).to_table()
+        var trimmed = TableScan(r^, fixture_io()).to_table()
+        assert_equal(trimmed.num_rows(), whole.num_rows(), tables[k])
+        n += 1
+    assert_true(n > 0)
+    print("    for_reading:", n, "tables")
+
+
 def test_metadata_matches_oracle() raises:
     """Gate (a), second half: field-by-field against the oracle rendering."""
     var tables = fixture_table_names()

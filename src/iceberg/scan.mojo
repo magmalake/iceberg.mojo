@@ -60,6 +60,7 @@ from .manifest import (
     MANIFEST_CONTENT_DELETES,
     STATUS_DELETED,
     ManifestCache,
+    read_manifest_bytes_cached,
     read_manifest_io_cached,
     read_manifest_list_io_cached,
 )
@@ -673,15 +674,41 @@ struct TableScan(Copyable, Movable):
         metrics_eval: InclusiveMetricsEvaluator,
         mut cache: ManifestCache,
     ) raises -> List[FileScanTask]:
+        # ── fetch: every manifest the passes below read, at once ───────────
+        # On object storage a manifest is a request, and a table written by
+        # many small appends has one manifest per append: read one after
+        # another, they're a sum of latencies.
+        var wanted = List[Bool](length=len(manifests), fill=False)
+        var paths = List[String]()
+        for k in range(len(manifests)):
+            ref mf = manifests[k]
+            if not mf.is_delete_manifest():
+                var spec = PartitionSpec.unpartitioned(mf.partition_spec_id)
+                if self.metadata.has_spec(mf.partition_spec_id):
+                    spec = self.metadata.spec_by_id(mf.partition_spec_id)
+                if mf.has_partitions and len(mf.partitions) > 0:
+                    var me = ManifestEvaluator(row_filter, spec, schema)
+                    if not me.eval(mf.partitions):
+                        continue
+            wanted[k] = True
+            paths.append(mf.manifest_path)
+        var fetched = self.io.read_all_many(paths)
+        var bytes_of = List[List[UInt8]](length=len(manifests), fill=[])
+        var next = 0
+        for k in range(len(manifests)):
+            if wanted[k]:
+                swap(bytes_of[k], fetched[next])
+                next += 1
+
         # ── pass 1: every live delete file in the snapshot ─────────────────
         var deletes = List[_PendingDelete]()
         for k in range(len(manifests)):
             ref mf = manifests[k]
             if not mf.is_delete_manifest():
                 continue
-            var m = read_manifest_io_cached(
-                self.io, mf.manifest_path, mf, cache
-            )
+            var data = List[UInt8]()
+            swap(data, bytes_of[k])
+            var m = read_manifest_bytes_cached(data^, mf, cache)
             for j in range(len(m.entries)):
                 ref e = m.entries[j]
                 if not e.is_live():
@@ -702,18 +729,11 @@ struct TableScan(Copyable, Movable):
         var project = self.projected_field_ids()
         for k in range(len(manifests)):
             ref mf = manifests[k]
-            if mf.is_delete_manifest():
+            if mf.is_delete_manifest() or not wanted[k]:
                 continue
-            var spec = PartitionSpec.unpartitioned(mf.partition_spec_id)
-            if self.metadata.has_spec(mf.partition_spec_id):
-                spec = self.metadata.spec_by_id(mf.partition_spec_id)
-            if mf.has_partitions and len(mf.partitions) > 0:
-                var me = ManifestEvaluator(row_filter, spec, schema)
-                if not me.eval(mf.partitions):
-                    continue
-            var m = read_manifest_io_cached(
-                self.io, mf.manifest_path, mf, cache
-            )
+            var data = List[UInt8]()
+            swap(data, bytes_of[k])
+            var m = read_manifest_bytes_cached(data^, mf, cache)
             # The manifest's own spec is authoritative for its tuples.
             var residuals = ResidualEvaluator(
                 row_filter, m.partition_spec, schema
