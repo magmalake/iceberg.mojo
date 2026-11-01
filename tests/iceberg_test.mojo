@@ -2840,6 +2840,39 @@ def test_s3_read_matches_local() raises:
     print("    s3 rows:", rows, "over", len(names), "tables")
 
 
+def test_s3_read_on_threads() raises:
+    """The same rows over `s3://` with several workers making requests at
+    once, file by file and in groups, five times over: the shim's per-thread
+    clients and locked shared state, under iceberg's `parallel_for`."""
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_read_on_threads: no ICEBERG_TEST_S3")
+        return
+    var names = [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("deletes_v2"),
+        String("evolved"),
+    ]
+    var checked = 0
+    for k in range(len(names)):
+        var want = encoded_rows(fixture_scan(names[k]).to_table())
+        var t = Table.load(_s3_warehouse() + "/" + names[k], s3_io())
+        for workers in [4, 8]:
+            for group in [1, 8]:
+                var opts = ScanOptions()
+                opts.num_workers = workers
+                opts.files_at_once = group
+                for _ in range(5):
+                    var got = encoded_rows(t.scan().to_table(opts))
+                    assert_equal(
+                        _diff(got, want),
+                        "",
+                        String(names[k], " on ", workers, " workers"),
+                    )
+                    checked += 1
+    print("    s3 on threads:", checked, "reads")
+
+
 def test_s3_catalog_listing() raises:
     if _s3_warehouse() == "":
         print("SKIP test_s3_catalog_listing: no ICEBERG_TEST_S3")

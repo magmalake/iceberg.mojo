@@ -25,7 +25,7 @@ platforms = ["osx-arm64", "linux-64"]
 # path dependency would break `pixi install` for a bare clone, because pixi
 # solves every environment even when it installs one.
 [dependencies]
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "9688261452672446565d22c14d4e861b9a56577e" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "670247293c816668d479bfd323cae380921cb49f" }
 zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo", rev = "53655623ca8585fd5b36b1239842913ec308ae69" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "64502eeeabed37515cd479bc421fc2920504cac5" }
 brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo", rev = "aa6d14985baf82ad4b934f14136b95a291b55faf" }
@@ -201,7 +201,7 @@ deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "aeb57
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "479c9d390b5c12c2497e05f84b64bf690a8cfea3" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "64502eeeabed37515cd479bc421fc2920504cac5" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "9688261452672446565d22c14d4e861b9a56577e" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "670247293c816668d479bfd323cae380921cb49f" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "d98f6a597cfc3616c6ce2a990c35509ecf3f972b" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
@@ -221,7 +221,7 @@ deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "aeb57
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "479c9d390b5c12c2497e05f84b64bf690a8cfea3" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "64502eeeabed37515cd479bc421fc2920504cac5" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "9688261452672446565d22c14d4e861b9a56577e" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "670247293c816668d479bfd323cae380921cb49f" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "d98f6a597cfc3616c6ce2a990c35509ecf3f972b" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
