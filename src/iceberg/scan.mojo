@@ -1345,12 +1345,14 @@ struct _Overlap(Movable):
     var mapping: NameMapping
     var case_sensitive: Bool
     var options: ScanOptions
-    var current: List[OpenDataFile]
-    var next: List[OpenDataFile]
+    var groups: List[List[OpenDataFile]]
+    """[0] the group slot 0 decodes, [1] the one slot 1 fetches into: each
+    slot writes only its own."""
     var next_lo: Int
     var next_hi: Int
     var out: List[List[ScanResult]]
-    var failure: String
+    var failures: List[String]
+    """One per slot: each slot writes only its own, as two may fail at once."""
 
     def __init__(
         out self,
@@ -1373,24 +1375,24 @@ struct _Overlap(Movable):
         self.mapping = mapping.copy()
         self.case_sensitive = case_sensitive
         self.options = options.copy()
-        self.current = List[OpenDataFile]()
-        self.next = List[OpenDataFile]()
+        self.groups = [List[OpenDataFile](), List[OpenDataFile]()]
         self.next_lo = 0
         self.next_hi = 0
         self.out = List[List[ScanResult]]()
-        self.failure = String()
+        self.failures = [String(), String()]
 
 
 def _overlap_round(slot: Int, mut s: _Overlap):
-    """`parallel_for`'s body: it can't raise, so a failure is kept in
-    `s.failure` for the caller to raise once both slots are done."""
+    """`parallel_for`'s body: it can't raise, so a failure is kept in the
+    slot's own `s.failures` entry for the caller to raise once both slots are
+    done."""
     try:
         if slot == 0:
             _decode_group(
-                s.current, s.schema, s.meta_columns, s.options, s.out
+                s.groups[0], s.schema, s.meta_columns, s.options, s.out
             )
         elif s.next_hi > s.next_lo:
-            s.next = _open_group(
+            s.groups[1] = _open_group(
                 s.io,
                 s.tasks,
                 s.specs,
@@ -1404,7 +1406,7 @@ def _overlap_round(slot: Int, mut s: _Overlap):
                 s.next_hi,
             )
     except e:
-        s.failure = String(e)
+        s.failures[slot] = String(e)
 
 
 def _read_data_files(
@@ -1462,7 +1464,7 @@ def _read_data_files(
         case_sensitive,
         options,
     )
-    s.current = _open_group(
+    s.groups[0] = _open_group(
         io,
         tasks,
         specs,
@@ -1480,12 +1482,13 @@ def _read_data_files(
         s.next_lo = lo
         s.next_hi = min(lo + group, n)
         parallel_for[_overlap_round](2, s, 2)
-        if s.failure:
-            raise Error(s.failure)
+        for ref f in s.failures:
+            if f:
+                raise Error(f)
         if s.next_hi <= s.next_lo:
             break
-        swap(s.current, s.next)
-        s.next = List[OpenDataFile]()
+        s.groups.swap_elements(0, 1)
+        s.groups[1] = List[OpenDataFile]()
         lo = s.next_hi
     var result = List[List[ScanResult]]()
     swap(result, s.out)
