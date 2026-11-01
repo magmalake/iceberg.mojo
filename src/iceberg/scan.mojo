@@ -45,8 +45,12 @@ from .read import (
     ScanResult,
     empty_scan_result,
     is_metadata_column,
+    FOOTER_PREFETCH,
+    OpenDataFile,
+    open_data_file,
     read_data_file,
 )
+from objectstore.ranges import ByteRange
 from .json import json_quote
 from .nested import concat_tree
 from .manifest import (
@@ -837,27 +841,17 @@ struct TableScan(Copyable, Movable):
         var opts = options.copy()
         opts.num_workers = split[1]
         if workers <= 1 or n <= 1:
-            var out = List[List[ScanResult]]()
-            for k in range(n):
-                out.append(
-                    read_data_file(
-                        self.io,
-                        tasks[k].data_file,
-                        tasks[k].delete_files,
-                        tasks[k].data_sequence_number,
-                        specs[k],
-                        schema,
-                        ids,
-                        meta_columns,
-                        mapping,
-                        tasks[k].residual,
-                        self.case_sensitive,
-                        opts,
-                        tasks[k].start,
-                        tasks[k].length,
-                    )
-                )
-            return out^
+            return _read_data_files(
+                self.io,
+                tasks,
+                specs,
+                schema,
+                ids,
+                meta_columns,
+                mapping,
+                self.case_sensitive,
+                opts,
+            )
 
         var ctx = _FileScanCtx(
             self.io.copy(),
@@ -1253,6 +1247,83 @@ struct TableScan(Copyable, Movable):
         return out^
 
 
+def _read_data_files(
+    io: FileIO,
+    tasks: List[FileScanTask],
+    specs: List[PartitionSpec],
+    schema: Schema,
+    projected: List[Int],
+    meta_columns: List[String],
+    mapping: NameMapping,
+    case_sensitive: Bool,
+    options: ScanOptions,
+) raises -> List[List[ScanResult]]:
+    """Every task's batches, one slot per task, in task order, reading
+    `options.files_at_once` files together: their footers in one round of
+    requests, their chunks in the next, then each decoded in turn."""
+    var out = List[List[ScanResult]](capacity=len(tasks))
+    var group = max(options.files_at_once, 1)
+    if options.limit >= 0:
+        group = 1
+    var lo = 0
+    while lo < len(tasks):
+        var hi = min(lo + group, len(tasks))
+        # The footers: every file's last FOOTER_PREFETCH bytes.
+        var locations = List[String]()
+        var tails = List[List[ByteRange]]()
+        for k in range(lo, hi):
+            ref df = tasks[k].data_file
+            var size = Int(df.file_size_in_bytes)
+            locations.append(df.file_path)
+            var want = List[ByteRange]()
+            if size >= 12:
+                var n = min(size, FOOTER_PREFETCH)
+                want.append(ByteRange(size - n, n))
+            tails.append(want^)
+        var got = io.read_ranges_many(locations, tails)
+        var opened = List[OpenDataFile](capacity=hi - lo)
+        for k in range(lo, hi):
+            var tail = List[UInt8]()
+            if len(got[k - lo]) > 0:
+                swap(tail, got[k - lo][0])
+            opened.append(
+                open_data_file(
+                    io,
+                    tasks[k].data_file,
+                    tasks[k].delete_files,
+                    tasks[k].data_sequence_number,
+                    specs[k],
+                    schema,
+                    projected,
+                    meta_columns,
+                    mapping,
+                    tasks[k].residual,
+                    case_sensitive,
+                    options,
+                    tasks[k].start,
+                    tasks[k].length,
+                    tail^,
+                )
+            )
+        # The chunks every opened file still needs, in one round.
+        var needs = List[List[ByteRange]](capacity=hi - lo)
+        for i in range(len(opened)):
+            needs.append(opened[i].needed())
+        var chunks = io.read_ranges_many(locations, needs)
+        for i in range(len(opened)):
+            if len(needs[i]) > 0:
+                opened[i].fill(needs[i], chunks[i])
+        # Decoded in task order; popping from the end would reverse it.
+        var decoded = List[List[ScanResult]](capacity=len(opened))
+        while len(opened) > 0:
+            var f = opened.pop()
+            decoded.append(f.decode(schema, meta_columns, options))
+        while len(decoded) > 0:
+            out.append(decoded.pop())
+        lo = hi
+    return out^
+
+
 struct BatchReader(Movable):
     """A scan being read a batch at a time, in the order `to_batches` returns.
 
@@ -1343,6 +1414,9 @@ struct BatchReader(Movable):
         # `min(w, min(w, n)) == min(w, n)`.
         var budget = _worker_split(options.num_workers, len(self.tasks))
         self.wave = budget[0] if budget[0] > 0 else 1
+        if self.wave <= 1:
+            # Sequential: a wave is the files read together.
+            self.wave = max(options.files_at_once, 1)
         if options.limit >= 0:
             self.wave = 1
         self.next_task = 0

@@ -2840,6 +2840,39 @@ def test_s3_read_matches_local() raises:
     print("    s3 rows:", rows, "over", len(names), "tables")
 
 
+def test_s3_read_on_threads() raises:
+    """The same rows over `s3://` with several workers making requests at
+    once, file by file and in groups, five times over: the shim's per-thread
+    clients and locked shared state, under iceberg's `parallel_for`."""
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_read_on_threads: no ICEBERG_TEST_S3")
+        return
+    var names = [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("deletes_v2"),
+        String("evolved"),
+    ]
+    var checked = 0
+    for k in range(len(names)):
+        var want = encoded_rows(fixture_scan(names[k]).to_table())
+        var t = Table.load(_s3_warehouse() + "/" + names[k], s3_io())
+        for workers in [4, 8]:
+            for group in [1, 8]:
+                var opts = ScanOptions()
+                opts.num_workers = workers
+                opts.files_at_once = group
+                for _ in range(5):
+                    var got = encoded_rows(t.scan().to_table(opts))
+                    assert_equal(
+                        _diff(got, want),
+                        "",
+                        String(names[k], " on ", workers, " workers"),
+                    )
+                    checked += 1
+    print("    s3 on threads:", checked, "reads")
+
+
 def test_s3_catalog_listing() raises:
     if _s3_warehouse() == "":
         print("SKIP test_s3_catalog_listing: no ICEBERG_TEST_S3")
@@ -6546,16 +6579,20 @@ def test_streaming_reads_one_wave_ahead_and_no_further() raises:
     Peak RSS is a measurement, not an assertion, but what makes it hold is
     structural and can be asserted: when the caller has taken a batch, the
     reader has read at most one wave of files, and it never runs ahead of the
-    wave it is handing out. `bucket_part` plans six files, so a default scan
-    has five it must not have touched yet.
+    wave it is handing out. `bucket_part` plans six files, so a scan reading
+    one file at a time has five it must not have touched yet.
     """
     var scan = fixture_scan("bucket_part")
-    var reader = scan.to_batch_reader()
+    # One worker reads `files_at_once` files together, eight by default.
+    assert_equal(scan.to_batch_reader().wave, 8)
+    var one = ScanOptions()
+    one.files_at_once = 1
+    var reader = scan.to_batch_reader(one)
     assert_true(
         reader.num_tasks() >= 4,
         String("bucket_part planned only ", reader.num_tasks(), " files"),
     )
-    assert_equal(reader.wave, 1, "one worker reads one file at a time")
+    assert_equal(reader.wave, 1, "files_at_once = 1 reads one at a time")
     var batches = 0
     while True:
         var got = reader.next_batch()
