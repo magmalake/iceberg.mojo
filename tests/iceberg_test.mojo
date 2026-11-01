@@ -149,6 +149,12 @@ from iceberg.kernels import (
     sel_not,
     sel_or,
 )
+from objectstore.http import (
+    batch_stats,
+    pool_stats,
+    reset_batch_stats,
+    reset_pool_stats,
+)
 from iceberg.manifest import (
     ManifestCache,
     ManifestFile,
@@ -2871,6 +2877,43 @@ def test_s3_read_on_threads() raises:
                     )
                     checked += 1
     print("    s3 on threads:", checked, "reads")
+
+
+def test_s3_plans_reuse_manifests() raises:
+    """A second plan with the same cache, even with another filter, reads no
+    manifest or manifest list again: on S3, no requests at all."""
+    if _s3_warehouse() == "":
+        print("SKIP test_s3_plans_reuse_manifests: no ICEBERG_TEST_S3")
+        return
+    var names = [String("ident_part"), String("deletes_v2"), String("evolved")]
+    for k in range(len(names)):
+        var t = Table.load(_s3_warehouse() + "/" + names[k], s3_io())
+        var filters = fixture_filters(names[k])
+        var cache = ManifestCache()
+        var first = t.scan().filter(filters[0]).plan_files_with(cache)
+        var fetched = cache.file_bytes
+        assert_true(fetched > 0, names[k] + ": nothing kept")
+        for j in range(len(filters)):
+            var want = (
+                TableScan(load_fixture_metadata(names[k]), fixture_io())
+                .filter(filters[j])
+                .plan_files()
+            )
+            reset_batch_stats()
+            reset_pool_stats()
+            var tasks = t.scan().filter(filters[j]).plan_files_with(cache)
+            assert_equal(batch_stats()[0], 0, names[k] + ": batch requests")
+            assert_equal(pool_stats()[0], 0, names[k] + ": requests")
+            assert_equal(len(tasks), len(want), names[k])
+            for i in range(len(tasks)):
+                var got_parts = tasks[i].data_file.file_path.split("/")
+                var want_parts = want[i].data_file.file_path.split("/")
+                assert_equal(
+                    String(got_parts[len(got_parts) - 1]),
+                    String(want_parts[len(want_parts) - 1]),
+                )
+        assert_equal(cache.file_bytes, fetched, "nothing new to keep")
+        _ = len(first)
 
 
 def test_s3_catalog_listing() raises:

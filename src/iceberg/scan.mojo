@@ -695,14 +695,22 @@ struct TableScan(Copyable, Movable):
                     if not me.eval(mf.partitions):
                         continue
             wanted[k] = True
-            paths.append(mf.manifest_path)
+            if not cache.has_file(mf.manifest_path):
+                paths.append(mf.manifest_path)
         var fetched = self.io.read_all_many(paths)
+        for i in range(len(paths)):
+            cache.keep_file(paths[i], fetched[i])
         var bytes_of = List[List[UInt8]](length=len(manifests), fill=[])
         var next = 0
         for k in range(len(manifests)):
-            if wanted[k]:
+            if not wanted[k]:
+                continue
+            ref path = manifests[k].manifest_path
+            if next < len(paths) and paths[next] == path:
                 swap(bytes_of[k], fetched[next])
                 next += 1
+            else:
+                bytes_of[k] = cache.file(path)
 
         # ── pass 1: every live delete file in the snapshot ─────────────────
         var deletes = List[_PendingDelete]()

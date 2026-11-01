@@ -364,7 +364,11 @@ def read_manifest_list_io_cached(
     One scan reads one list, so this pays for itself only across snapshots —
     time travel, `expire_snapshots`, a diff between two refs.
     """
-    return read_manifest_list_bytes_cached(io.read_all(location), cache)
+    if cache.has_file(location):
+        return read_manifest_list_bytes_cached(cache.file(location), cache)
+    var data = io.read_all(location)
+    cache.keep_file(location, data)
+    return read_manifest_list_bytes_cached(data^, cache)
 
 
 def read_manifest_list_bytes(
@@ -633,6 +637,14 @@ struct ManifestCache(Movable):
 
     `disabled()` turns all three off without changing the code path, which is
     how the tests check that the cache is transparent.
+
+    It also keeps manifest and manifest-list **bytes**, by location, up to
+    `max_file_bytes` (64 MiB). Iceberg never rewrites one of those files, so
+    a plan of another query or a later snapshot reads only the manifests it
+    hasn't seen: on object storage, a plan of an unchanged table makes no
+    requests at all. A caller planning many queries holds one cache and
+    passes it to `TableScan.plan_files_with`, as iceberg-rust's object cache
+    does for its table.
     """
 
     var plans: PlanCache
@@ -648,6 +660,11 @@ struct ManifestCache(Movable):
     the only thing telling two manifest shapes apart."""
     var hits: Int
     var misses: Int
+    var files: Dict[String, List[UInt8]]
+    """Manifest and manifest-list bytes, by location."""
+    var file_bytes: Int
+    var max_file_bytes: Int
+    var file_hits: Int
 
     def __init__(out self):
         self.plans = PlanCache()
@@ -661,6 +678,10 @@ struct ManifestCache(Movable):
         self.collide = False
         self.hits = 0
         self.misses = 0
+        self.files = Dict[String, List[UInt8]]()
+        self.file_bytes = 0
+        self.max_file_bytes = 64 << 20
+        self.file_hits = 0
 
     def __init__(out self, *, deinit move: Self):
         self.plans = move.plans^
@@ -674,6 +695,10 @@ struct ManifestCache(Movable):
         self.collide = move.collide
         self.hits = move.hits
         self.misses = move.misses
+        self.files = move.files^
+        self.file_bytes = move.file_bytes
+        self.max_file_bytes = move.max_file_bytes
+        self.file_hits = move.file_hits
 
     @staticmethod
     def disabled() -> Self:
@@ -682,6 +707,23 @@ struct ManifestCache(Movable):
         c.enabled = False
         c.plans = PlanCache.disabled()
         return c^
+
+    def has_file(self, location: String) -> Bool:
+        return self.enabled and location in self.files
+
+    def file(mut self, location: String) raises -> List[UInt8]:
+        """A copy of a cached file's bytes; `has_file` first."""
+        self.file_hits += 1
+        return self.files[location].copy()
+
+    def keep_file(mut self, location: String, data: Span[UInt8, _]):
+        """Keeps a manifest's or manifest list's bytes, while under budget."""
+        if not self.enabled or location in self.files:
+            return
+        if self.file_bytes + len(data) > self.max_file_bytes:
+            return
+        self.files[location] = List[UInt8](data)
+        self.file_bytes += len(data)
 
     def collide_all_hashes(mut self):
         """Force every key — plans, shapes and lists — to hash to zero. A
