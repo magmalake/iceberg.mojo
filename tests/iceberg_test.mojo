@@ -2949,7 +2949,11 @@ def test_s3_overlapped_reads() raises:
     if _s3_warehouse() == "":
         print("SKIP test_s3_overlapped_reads: no ICEBERG_TEST_S3")
         return
-    for name in [String("unpartitioned"), String("ident_part"), String("deletes_v2")]:
+    for name in [
+        String("unpartitioned"),
+        String("ident_part"),
+        String("deletes_v2"),
+    ]:
         var want = encoded_rows(fixture_scan(name).to_table())
         var t = Table.load(_s3_warehouse() + "/" + name, s3_io())
         for _ in range(3):
