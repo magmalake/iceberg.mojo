@@ -34,6 +34,7 @@ from objectstore.fileio import (
 from objectstore.fileio import AnyOutputFile
 from objectstore.local import LocalInputFile, LocalOutputFile
 from objectstore.path import parse_uri
+from objectstore.ranges import ByteRange
 
 from .json import substr
 
@@ -161,6 +162,24 @@ struct FileIO(Copyable, Movable):
         return self.resolver.new_input(self.absolute(location)).read_range(
             offset, length
         )
+
+    def read_ranges(
+        self, location: String, ranges: List[ByteRange]
+    ) raises -> List[List[UInt8]]:
+        """Several ranges of one file, in order. On object storage nearby
+        ranges are coalesced and the rest fetched at once."""
+        return self.resolver.new_input(self.absolute(location)).read_ranges(
+            ranges
+        )
+
+    def read_all_many(
+        self, locations: List[String]
+    ) raises -> List[List[UInt8]]:
+        """Several whole files, in order; on S3 fetched at once."""
+        var abs = List[String](capacity=len(locations))
+        for ref loc in locations:
+            abs.append(self.absolute(loc))
+        return self.resolver.read_all_many(abs)
 
     def length(self, location: String) raises -> Int:
         return self.resolver.new_input(self.absolute(location)).length()
