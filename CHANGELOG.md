@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-11-02
+
 ### Fixed
 
 - Snapshot ids and file UUIDs are read from `/dev/urandom` instead of
