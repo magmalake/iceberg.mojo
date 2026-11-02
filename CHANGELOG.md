@@ -10,6 +10,16 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-11-02
+
+### Fixed
+
+- Built against the versions the registry serves: objectstore-mojo 0.4.0,
+  arrow-mlake-mojo 0.2.1 and parquet-full-mojo 0.1.6. 0.8.3 pinned
+  objectstore and arrow-mlake commits the registry did not resolve to, so
+  installing it from the shelf failed with duplicate objectstore and
+  arrow-mlake records.
+
 ## [0.8.3] - 2026-11-02
 
 ### Fixed
