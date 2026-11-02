@@ -4,8 +4,11 @@ random 64-bit number, and a UUID.
 Mojo's `std.time` only exposes monotonic counters, so `last-updated-ms` and a
 snapshot's `timestamp-ms` come from `clock_gettime(CLOCK_REALTIME)` directly.
 Snapshot ids are "a random long" in the spec's words, and every file this
-library writes is named with a version 4 UUID, so both come from
-`std.random`.
+library writes is named with a version 4 UUID. Both are read from the
+operating system (`/dev/urandom`), not drawn from `std.random`: that
+generator starts from the same state in every process unless something seeds
+it, so two processes committing to one table at once would draw the same
+snapshot ids and file names and overwrite each other's manifest lists.
 """
 
 from std.ffi import external_call
@@ -23,6 +26,29 @@ def now_ms() -> Int64:
     return ts[0] * 1000 + ts[1] // 1000000
 
 
+def _os_random() -> Tuple[UInt64, UInt64]:
+    """128 random bits from `/dev/urandom`. Should it ever be unreadable,
+    `std.random` reseeded from the clock and the process id, which still
+    differs between processes."""
+    var buf = List[UInt8]()
+    try:
+        with open("/dev/urandom", "r") as f:
+            buf = f.read_bytes(16)
+    except:
+        pass
+    var got = len(buf)
+    if got < 16:
+        var pid = Int(external_call["getpid", Int32]())
+        seed(Int(now_ms()) ^ (pid << 40) ^ Int(random_ui64(0, UInt64.MAX)))
+        return (random_ui64(0, UInt64.MAX), random_ui64(0, UInt64.MAX))
+    var hi = UInt64(0)
+    var lo = UInt64(0)
+    for k in range(8):
+        hi |= UInt64(buf[k]) << UInt64(8 * k)
+        lo |= UInt64(buf[8 + k]) << UInt64(8 * k)
+    return (hi, lo)
+
+
 def random_long() -> Int64:
     """A random signed 64-bit value, for a snapshot id.
 
@@ -30,7 +56,7 @@ def random_long() -> Int64:
     one, and the top bit is cleared so the id prints without a sign — which is
     what Java's `SnapshotIdGeneratorUtil` does too.
     """
-    var v = random_ui64(0, UInt64.MAX) & 0x7FFFFFFFFFFFFFFF
+    var v = _os_random()[0] & 0x7FFFFFFFFFFFFFFF
     if v == 0:
         return 1
     return Int64(v)
@@ -38,8 +64,7 @@ def random_long() -> Int64:
 
 def uuid4() -> String:
     """A version 4 UUID in the canonical 8-4-4-4-12 form."""
-    var hi = random_ui64(0, UInt64.MAX)
-    var lo = random_ui64(0, UInt64.MAX)
+    var hi, lo = _os_random()
     var b = List[UInt8](capacity=16)
     for k in range(8):
         b.append(UInt8((hi >> UInt64(8 * k)) & 0xFF))
@@ -57,7 +82,8 @@ def uuid4() -> String:
 
 
 def seed_random():
-    """Seed the generator from the OS once per process."""
+    """Seeds `std.random` from the clock. Ids and UUIDs no longer come from
+    it, so this is only for callers' own use of `std.random`."""
     seed()
 
 
