@@ -10,6 +10,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Fixed
+
+- Snapshot ids and file UUIDs are read from `/dev/urandom` instead of
+  `std.random`, which nothing seeded: every process drew the same sequence,
+  so two processes committing to one table at once made snapshots with the
+  same ids and overwrote each other's `snap-<id>` manifest lists. Found by
+  orca's taxi backfill, four runs committing to one table at once.
+
 ## [0.8.2] - 2026-10-24
 
 ### Changed

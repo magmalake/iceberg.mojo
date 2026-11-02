@@ -95,7 +95,8 @@ from iceberg.batch import (
     batch_of,
     batch_of_columns,
 )
-from iceberg.util import now_ms
+from iceberg.util import now_ms, random_long, uuid4
+from std.random import seed
 from iceberg.manifest_write import (
     manifest_entry_schema_json,
     manifest_list_schema_json,
@@ -7189,6 +7190,25 @@ def test_count_ignores_the_projection() raises:
     assert_equal(
         fixture_scan("nested_v2").select([String("addr")]).count(), full
     )
+
+
+def test_ids_differ_between_processes_with_the_same_random_state() raises:
+    """Snapshot ids and UUIDs don't come from `std.random`, which starts from
+    the same state in every process unless seeded: with that state reset
+    between draws, as two fresh processes would have it, they still differ.
+    When they didn't, concurrent writers to one table committed the same
+    snapshot ids and overwrote each other's `snap-<id>` manifest lists."""
+    seed(42)
+    var a = random_long()
+    var ua = uuid4()
+    seed(42)
+    var b = random_long()
+    var ub = uuid4()
+    assert_true(a != b, "the same snapshot id twice")
+    assert_true(ua != ub, "the same UUID twice")
+    assert_true(a > 0 and b > 0, "a snapshot id isn't positive")
+    assert_equal(ua.byte_length(), 36)
+    assert_equal(String(ua[byte=14]), "4")
 
 
 def main() raises:
