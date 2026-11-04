@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-03
+
 ### Added
 
 - Schema evolution as a write: `UpdateSchema` adds optional columns (top
