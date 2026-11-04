@@ -10,6 +10,17 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-11-03
+
+### Changed
+
+- Built against the shim-loading fix releases: zstd-mojo 0.1.5, lz4-mojo
+  0.1.4, brotli-mojo 0.1.4, objectstore-mojo 0.4.1, postgres-mojo 0.3.3,
+  sqlite-mojo 0.3.5 and parquet-full-mojo 0.1.7 (with parquet-mojo 0.11.6).
+  Their libraries are found without `CONDA_PREFIX` (next to the executable,
+  its `../lib`, the binary's rpath), and a missing one raises an Error
+  instead of aborting. The development environments pin the same revisions.
+
 ## [0.8.4] - 2026-11-02
 
 ### Fixed
