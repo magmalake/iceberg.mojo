@@ -10,6 +10,13 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-11-04
+
+### Changed
+
+- Built against objectstore-mojo 0.4.2 (objectstore-shim 0.2.1), the S3
+  multipart fix; the development environments pin the same revision.
+
 ## [0.8.6] - 2026-11-03
 
 ### Changed
