@@ -553,7 +553,15 @@ struct TableScan(Copyable, Movable):
         return self.metadata.current_snapshot()
 
     def current_schema(self) raises -> Schema:
-        if not self.has_any_snapshot():
+        """The schema rows come back in.
+
+        A scan of the table as it is uses the table's current schema, so a
+        column added since the last commit is there, null for every row. A
+        scan of a chosen snapshot (`use_snapshot`, `use_ref`, `as_of`) uses
+        the schema that snapshot was written with. Java and PyIceberg draw
+        the same line.
+        """
+        if not self.has_snapshot or not self.has_any_snapshot():
             return self.metadata.schema()
         return self.metadata.schema_for_snapshot(self.snapshot())
 
@@ -602,7 +610,7 @@ struct TableScan(Copyable, Movable):
         if not self.has_any_snapshot():
             return List[FileScanTask]()
         var snap = self.snapshot()
-        var schema = self.metadata.schema_for_snapshot(snap)
+        var schema = self.current_schema()
         var row_filter = bind(
             parse_filter(self.filter_dsl), schema, self.case_sensitive
         )

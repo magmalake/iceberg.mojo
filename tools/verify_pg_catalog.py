@@ -134,6 +134,20 @@ def direction_one(dsn: str, warehouse1: str):
             )
             (still,) = cur.fetchone()
         check(still == table.metadata_location, "the real pointer is untouched")
+
+    # Schema evolution through the Postgres pointer swap: `note` added after
+    # four rows, `amount` renamed `total` (see tools/sql_catalog_write.mojo).
+    evo = cat.load_table("db.evo")
+    check(evo.schema().schema_id == 1, "the evolved table's current schema is 1")
+    got = sorted(
+        (r["id"], r["region"], r["total"], r["note"])
+        for r in evo.scan().to_arrow().to_pylist()
+    )
+    want = [
+        (i, region_of(i), float(i) * 1.5, None if i < 4 else f"n{i}")
+        for i in range(7)
+    ]
+    check(got == want, "old files read `note` as null; new ones carry it")
     cat.close()
 
 

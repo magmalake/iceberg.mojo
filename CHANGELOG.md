@@ -10,6 +10,26 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+
+- Schema evolution as a write: `UpdateSchema` adds optional columns (top
+  level, or inside a struct, a list's element or a map's value), renames
+  fields, makes them optional, widens `int`→`long`, `float`→`double` and
+  decimal precision, and merges a schema in by name (`union_by_name`, which
+  refuses type changes). New fields get fresh ids from `last-column-id`; the
+  new schema is appended and made current. Committed by
+  `Table.update_schema`, `RestCatalog.update_schema` (with
+  `assert-current-schema-id` and `assert-last-assigned-field-id`, then
+  `add-schema` and `set-current-schema`) and `SqlCatalog.update_schema`;
+  a lost race re-applies the changes to the schema that won.
+  `verify-sql-catalog` checks it against PyIceberg both ways.
+
+### Changed
+
+- A scan that names no snapshot reads in the table's current schema, so a
+  column added since the last commit shows up (null) without waiting for
+  one. A scan of a chosen snapshot still uses that snapshot's schema.
+
 ## [0.8.4] - 2026-11-02
 
 ### Fixed

@@ -37,6 +37,11 @@ from ..manifest import DataFile
 from ..metadata import MAIN_BRANCH, REF_BRANCH, TableMetadata
 from ..schema import Schema
 from ..transforms import PartitionSpec
+from ..update_schema import (
+    UpdateSchema,
+    prepare_schema_update,
+    schema_update_body,
+)
 from ..util import uuid4
 from ..write import WriteOptions, write_data_files
 from .filesystem import Table
@@ -601,6 +606,68 @@ struct RestCatalog(Copyable, Movable):
                     + resp.body_excerpt(200)
                 )
             var err = rest_error("commit " + namespace + "." + table, resp)
+            raise err^
+
+    def update_schema(
+        self,
+        namespace: String,
+        table: String,
+        update: UpdateSchema,
+        retries: Int = 4,
+    ) raises -> Table:
+        """Commit schema changes through the catalog.
+
+        The request asserts the table's uuid, its current schema id and its
+        last assigned column id, and sends `add-schema` + `set-current-schema`
+        (see `iceberg.update_schema`). A 409 reloads and applies the same
+        changes to the schema that won; a 5xx is reported as unknown state,
+        as a commit of data is. Changes that leave the schema as it is send
+        nothing.
+        """
+        var loaded = self.load_table(namespace, table)
+        var key = uuid4()
+        var attempt = 0
+        while True:
+            var c = prepare_schema_update(loaded.metadata, update)
+            if not c.changed:
+                return loaded^
+            var body = schema_update_body(namespace, table, loaded.metadata, c)
+            var resp = self._commit(
+                namespace, table, body, key, "update schema of " + table
+            )
+            if resp.ok():
+                var out = loaded.copy()
+                var doc = parse_json(resp.text())
+                var loc = doc.opt_string(doc.root, "metadata-location", "")
+                var meta = doc.get(doc.root, "metadata")
+                if meta >= 0 and not doc.is_null(meta):
+                    out.metadata = TableMetadata.from_json(doc, meta)
+                else:
+                    out.metadata = c.metadata.copy()
+                if loc != "":
+                    out.metadata.metadata_file_location = loc
+                    out.metadata_location = loc^
+                return out^
+            if resp.status == 409 and attempt < retries:
+                attempt += 1
+                key = uuid4()
+                loaded = self.load_table(namespace, table)
+                continue
+            if resp.status >= 500:
+                raise Error(
+                    "iceberg: CommitStateUnknown — the schema update of "
+                    + namespace
+                    + "."
+                    + table
+                    + " returned "
+                    + String(resp.status)
+                    + " and may or may not have been applied; reload the"
+                    + " table before retrying: "
+                    + resp.body_excerpt(200)
+                )
+            var err = rest_error(
+                "update schema of " + namespace + "." + table, resp
+            )
             raise err^
 
     def delete_where(

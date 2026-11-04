@@ -21,7 +21,8 @@ Writes v2 and v3: `create_table`, `append`, `delete_where` (copy-on-write, or
 merge-on-read with deletion vectors on v3 and position delete files on v2),
 `delete_by_equality`, `overwrite`, `dynamic_partition_overwrite` and
 `expire_snapshots`, each committed optimistically against a filesystem layout
-or a REST catalog.
+or a REST catalog — and schema changes (`UpdateSchema`: add, rename, make
+optional, widen) through the same commit paths.
 """
 
 from iceberg.append import (
@@ -153,4 +154,10 @@ from iceberg.transforms import (
     parse_transform,
 )
 from iceberg.types import NestedField, TypeStore
+from iceberg.update_schema import (
+    SchemaCommit,
+    UpdateSchema,
+    prepare_schema_update,
+    schema_update_body,
+)
 from iceberg.values import Datum, compare

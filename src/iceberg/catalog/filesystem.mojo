@@ -54,6 +54,7 @@ from ..metadata import (
 from ..scan import TableScan
 from ..schema import Schema
 from ..transforms import PartitionSpec, SortOrder
+from ..update_schema import UpdateSchema, prepare_schema_update
 from ..util import now_ms, uuid4
 from ..write import WriteOptions, write_data_files
 
@@ -424,6 +425,30 @@ struct Table(Copyable, Movable):
         self.commit_metadata(decided[0].copy())
         _ = delete_expired_files(self.io, result)
         return result^
+
+    def update_schema(mut self, update: UpdateSchema) raises -> Schema:
+        """Commit schema changes; returns the new current schema.
+
+        No data file is touched: one new metadata file with the new schema
+        appended and made current. A concurrent commit makes this reload and
+        apply the same changes to whatever schema is current then, so a
+        column another writer added in the meantime is kept, and a clash
+        (both adding `note`) raises instead of committing twice.
+        """
+        var attempt = 0
+        while True:
+            var c = prepare_schema_update(self.metadata, update)
+            if not c.changed:
+                return c.schema.copy()
+            try:
+                self.commit_metadata(c.metadata.copy())
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
+                continue
+            return c.schema.copy()
 
     def commit(mut self, result: AppendResult) raises:
         """Persist a prepared commit as a new `<V>-<uuid>.metadata.json`."""

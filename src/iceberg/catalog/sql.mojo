@@ -73,6 +73,7 @@ from ..io import FileIO, dirname, join_path
 from ..manifest import DataFile
 from ..schema import Schema
 from ..transforms import PartitionSpec
+from ..update_schema import UpdateSchema, prepare_schema_update
 from ..write import WriteOptions, write_data_files
 from .filesystem import Table, new_table_metadata, read_metadata_file
 from .rest import COMMIT_DELETE, COMMIT_DYNAMIC, COMMIT_OVERWRITE
@@ -782,6 +783,53 @@ struct SqlCatalog(Movable):
             ):
                 var out = loaded.copy()
                 out.metadata = result.metadata.copy()
+                out.metadata.metadata_file_location = new_path
+                out.metadata_location = new_path
+                return out^
+            try:
+                self.io.delete(new_path)
+            except:
+                pass
+            attempt += 1
+            if attempt > retries:
+                raise Error(
+                    "iceberg: commit failed — table has been updated by"
+                    " another process: "
+                    + namespace
+                    + "."
+                    + name
+                )
+            loaded = self.load_table(namespace, name)
+
+    def update_schema(
+        mut self,
+        namespace: String,
+        name: String,
+        update: UpdateSchema,
+        retries: Int = 4,
+    ) raises -> Table:
+        """Commit schema changes: a new metadata file and the guarded swap.
+
+        A swap that finds the pointer moved reloads and applies the same
+        changes to the schema that is current then. Changes that leave the
+        schema as it is commit nothing.
+        """
+        var loaded = self.load_table(namespace, name)
+        var attempt = 0
+        while True:
+            var c = prepare_schema_update(loaded.metadata, update)
+            if not c.changed:
+                return loaded^
+            var version = next_metadata_version(c.metadata)
+            var new_path = join_path(
+                dirname(loaded.metadata_location), metadata_file_name(version)
+            )
+            self.io.write_new(new_path, c.metadata.to_json().as_bytes())
+            if self._guarded_swap(
+                namespace, name, loaded.metadata_location, new_path
+            ):
+                var out = loaded.copy()
+                out.metadata = c.metadata.copy()
                 out.metadata.metadata_file_location = new_path
                 out.metadata_location = new_path
                 return out^

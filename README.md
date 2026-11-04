@@ -399,6 +399,53 @@ the expired snapshots' inventory subtracted from it. The pruned metadata is
 committed **before** any file is deleted, so an interruption leaves orphans
 rather than a snapshot with holes in it.
 
+### Schema evolution
+
+`UpdateSchema` records schema changes; each catalog commits them —
+`table.update_schema(u)` on a filesystem table, `update_schema(ns, name, u)`
+on `RestCatalog` and `SqlCatalog`:
+
+```mojo
+from iceberg.update_schema import UpdateSchema
+
+var u = UpdateSchema()
+u.add_column("note", "string", "free text")      # optional, top level
+u.add_nested_column("addr", "zip", "int")        # into a struct
+u.rename_column("amount", "total")
+u.make_column_optional("region")
+u.update_column_type("qty", "long")              # int → long
+var schema = table.update_schema(u)
+```
+
+The shape is Java's and PyIceberg's: the changes are applied to the table's
+current schema when the commit is prepared, so a commit that loses a race
+re-applies them to the schema that won (a column both writers add is then a
+clash, not a duplicate). Each new field — and every field, element, key and
+value inside its type — gets a fresh id above `last-column-id`, in the order
+Java's `AssignFreshIds` uses. The result is appended to `schemas` under the
+next free `schema-id` and made current; a result equal to a schema the table
+already had makes that one current again, and no change commits nothing.
+Through a REST catalog the request asserts `assert-table-uuid`,
+`assert-current-schema-id` and `assert-last-assigned-field-id` and sends
+`add-schema` + `set-current-schema` `-1`.
+
+`union_by_name(schema)` merges a whole schema in by name, at any depth (a
+list's element struct and a map's value struct included): missing fields are
+added, fields it marks optional become optional, a new `doc` is taken, and
+fields it does not mention are kept. Unlike PyIceberg's, it **refuses** a type
+difference instead of promoting — promote explicitly with
+`update_column_type`, so a caller passing a schema always hears about a type
+change.
+
+Only compatible changes: added columns are optional (old rows have no value,
+and there is no `initial-default` on the write side), a type change is one of
+the spec's promotions, and nothing is deleted or moved. No data file is
+rewritten — an old file's missing column reads as null, by field id, and a
+promoted one is cast. A scan of the table as it is uses the current schema;
+a scan of a chosen snapshot uses the one it was written with, as in Java and
+PyIceberg. `pixi run verify-sql-catalog` has PyIceberg read a table we
+evolved and has us read one PyIceberg evolved.
+
 ### Puffin and deletion vectors
 
 `iceberg.puffin` reads a footer (`PFA1`, the little-endian size and flags, the
@@ -595,7 +642,7 @@ one from the conda `postgresql` package; no Docker).
 | Row lineage across a **copy-on-write** rewrite | A v3 rewrite should carry each row's `_row_id` into the new file; this one assigns fresh ids to rewritten rows. Merge-on-read, which is where v3 wants a delete to go, moves nothing and preserves them exactly. |
 | Removing a position delete *file* when a vector absorbs it | One position delete file can serve several data files, so dropping it would resurrect rows in the others. The superseded *vectors* are removed; a leftover position delete file is inert, because a reader that finds a vector ignores them. |
 | Equality deletes on a partitioned table, or on v3 | One unpartitioned equality delete file applies everywhere; pairing one with a partition tuple needs a caller who knows the data. v3 replaced them with deletion vectors and v4 deprecates writing them. |
-| Schema and spec evolution as a write | `create_table` fixes both; changing them afterwards is a commit this build does not construct. |
+| Partition-spec evolution, and deleting or moving columns | `UpdateSchema` adds, renames, makes optional and promotes; a partition spec is fixed at `create_table`. |
 | Writing **format version 1** | The v1 manifest schemas are generated and would be written, but nothing verifies them — v1 has no writers left to check against. v2 and v3 are gated end to end. |
 | A predicate *inside* a list or a map | `a.b > 5` on a struct leaf works; `tags.element = 'x'` is refused, because "the row matches" is not a question a per-row filter can answer about a repeated field. `is null` on the container itself does work. |
 | An `initial-default` that is itself a struct, list or map | A primitive default resolves at any depth, which is the case schema evolution produces. A nested default falls back to null — which is what the spec tells a reader that does not understand a default to do anyway. |
@@ -1047,6 +1094,7 @@ pixi run verify-pg-catalog  # the same, over PostgreSQL
 | `iceberg.append` | `prepare_append`, `AppendResult`, metadata file naming |
 | `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
 | `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
+| `iceberg.update_schema` | `UpdateSchema` (`add_column`, `add_nested_column`, `rename_column`, `make_column_optional`, `update_column_type`, `union_by_name`), `prepare_schema_update`, `schema_update_body` |
 | `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
 | `iceberg.scan` | `TableScan`, `FileScanTask`, `BatchReader` — `plan_files`, `plan_files_with`, `to_table`, `to_batches`, `to_batch_reader`, `count` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
