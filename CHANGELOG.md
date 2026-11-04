@@ -10,6 +10,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-11-03
+
+### Changed
+
+- Built against deflate-mojo 0.1.3 (gzip), avro-mojo 0.4.4 and
+  parquet-full-mojo 0.1.8 (with parquet-mojo 0.11.7), the versions the
+  registry serves.
+
 ### Added
 
 - Schema evolution as a write: `UpdateSchema` adds optional columns (top
