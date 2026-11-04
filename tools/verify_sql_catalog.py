@@ -8,13 +8,16 @@ Two directions, both against the same sqlite file:
    batches, renames a table, drops a scratch one. PyIceberg's own
    `SqlCatalog`, pointed at the same `catalog.db` and warehouse, must list
    the namespace, list the (renamed) table, load it, and read the rows back
-   cell-exact — plus confirm the drop and the namespace property landed.
+   cell-exact — plus confirm the drop and the namespace property landed,
+   and read `db.evo`, whose schema we evolved (a column added, one renamed)
+   between two appends.
 
 2. **We read what PyIceberg writes.** PyIceberg creates a namespace and
    table in a second sqlite file with a pyarrow append, and this repo's own
    `iceberg-mojo cat --sql` reads it back — checked here by shelling out to
    the CLI binary and comparing its CSV output to what PyIceberg says the
-   table holds.
+   table holds — then again after PyIceberg's `update_schema` adds a column
+   and a struct and renames one, with a file on each side of the change.
 
 Also checked directly against sqlite (no PyIceberg needed for this part,
 since it is a property of the schema and the guard, not of either client):
@@ -99,6 +102,39 @@ def direction_one(catalog1_db: str, warehouse1: str):
     (still,) = cur2.fetchone()
     check(still == table.metadata_location, "the real pointer is untouched")
     con.close()
+
+    # Schema evolution, committed by us: `note` (id 4) added after four rows,
+    # `amount` renamed `total`, three rows with `note` after that.
+    evo = cat.load_table("db.evo")
+    fields = {f.name: f for f in evo.schema().fields}
+    check(evo.schema().schema_id == 1, "the evolved table's current schema is 1")
+    check(len(evo.metadata.schemas) == 2, "both schemas are in the metadata")
+    check(evo.metadata.last_column_id == 4, "last-column-id moved to 4")
+    check(
+        "note" in fields and fields["note"].field_id == 4
+        and not fields["note"].required
+        and fields["note"].doc == "added later",
+        "PyIceberg sees `note` as optional field 4 with its doc",
+    )
+    check(
+        "total" in fields and fields["total"].field_id == 3
+        and "amount" not in fields,
+        "PyIceberg sees `amount` renamed to `total`, same id",
+    )
+    got = sorted(
+        (r["id"], r["region"], r["total"], r["note"])
+        for r in evo.scan().to_arrow().to_pylist()
+    )
+    want = [
+        (i, region_of(i), float(i) * 1.5, None if i < 4 else f"n{i}")
+        for i in range(7)
+    ]
+    check(got == want, "old files read `note` as null; new ones carry it")
+    old = evo.scan(snapshot_id=evo.metadata.snapshots[0].snapshot_id)
+    check(
+        [f.name for f in old.projection().fields] == ["id", "region", "amount"],
+        "the first snapshot keeps the schema it was written with",
+    )
     cat.close()
 
 
@@ -162,6 +198,67 @@ def direction_two(catalog2_db: str, warehouse2: str, iceberg_mojo_bin: str):
     check(
         got == expected,
         "every row iceberg-mojo reads matches what PyIceberg wrote, cell-exact",
+    )
+
+    # Schema evolution, committed by PyIceberg: we must read its new schema,
+    # and null for `note` in the file written before it existed.
+    from pyiceberg.types import StructType
+
+    with table.update_schema() as update:
+        update.add_column("note", StringType())
+        update.rename_column("amount", "total")
+        update.add_column(
+            "geo",
+            StructType(
+                NestedField(100, "lat", DoubleType(), required=False),
+            ),
+        )
+    table = cat.load_table("db2.pt")
+    check(table.schema().schema_id == 1, "PyIceberg committed schema 1")
+    more = pa.table(
+        {
+            "id": pa.array([9, 10], type=pa.int64()),
+            "region": pa.array([region_of(9), region_of(10)], type=pa.string()),
+            "total": pa.array([13.5, 15.0], type=pa.float64()),
+            "note": pa.array(["n9", "n10"], type=pa.string()),
+            "geo": pa.array(
+                [{"lat": 1.0}, None], type=pa.struct([("lat", pa.float64())])
+            ),
+        },
+        schema=table.schema().as_arrow(),
+    )
+    table.append(more)
+    result = subprocess.run(
+        [
+            iceberg_mojo_bin,
+            "cat",
+            "--sql",
+            f"sqlite:///{catalog2_db}",
+            "--table",
+            "db2.pt",
+            "--warehouse",
+            warehouse2,
+            "--select",
+            "id,total,note,geo.lat",
+            "--format",
+            "csv",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    reader = csv.reader(io.StringIO(result.stdout))
+    header = next(reader)
+    check(header == ["id", "total", "note", "geo"], f"header {header}")
+    got = sorted((int(r[0]), float(r[1]), r[2], r[3]) for r in reader)
+    want = [(i, float(i) * 1.5, "", "") for i in range(n)] + [
+        (9, 13.5, "n9", '{"lat":1.0}'),
+        (10, 15.0, "n10", ""),
+    ]
+    check(
+        got == want,
+        "iceberg-mojo reads PyIceberg's evolved table: null `note` and `geo`"
+        f" in the old file, the renamed `total` by id (got {got[-3:]})",
     )
     cat.close()
 

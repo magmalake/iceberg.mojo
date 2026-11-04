@@ -24,6 +24,7 @@ from iceberg.values import Datum
 from iceberg.catalog.sql import SqlCatalog
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionSpec
+from iceberg.update_schema import UpdateSchema
 
 
 comptime SCHEMA_JSON = String(
@@ -50,6 +51,23 @@ def make_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
         region.add(Datum.string_(region_of(i)))
         amount.add(Datum.double_(Float64(i) * 1.5))
     return batch_of([ids^, region^, amount^])
+
+
+def make_evolved_batch(
+    schema: Schema, start: Int, n: Int
+) raises -> RecordBatch:
+    """The evolved `db.evo`'s rows: `amount` renamed `total`, and `note`."""
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    var total = ColumnBuilder.of(schema, 3)
+    var note = ColumnBuilder.of(schema, 4)
+    for k in range(n):
+        var i = start + k
+        ids.add(Datum.long_(Int64(i)))
+        region.add(Datum.string_(region_of(i)))
+        total.add(Datum.double_(Float64(i) * 1.5))
+        note.add(Datum.string_("n" + String(i)))
+    return batch_of([ids^, region^, total^, note^])
 
 
 def main() raises:
@@ -105,5 +123,22 @@ def main() raises:
 
     _ = cat.rename_table("db", "rt", "db", "rt_renamed")
     print("RENAMED db.rt_renamed")
+
+    # Schema evolution: four rows, then `note` added and `amount` renamed
+    # `total` through the catalog's commit path, then three rows that carry
+    # `note`. PyIceberg must read the first four with a null `note`.
+    _ = cat.create_table("db", "evo", schema)
+    var e1 = List[RecordBatch]()
+    e1.append(make_batch(schema, 0, 4))
+    _ = cat.append("db", "evo", e1)
+    var u = UpdateSchema()
+    u.add_column("note", "string", "added later")
+    u.rename_column("amount", "total")
+    var evolved = cat.update_schema("db", "evo", u)
+    var evolved_schema = evolved.metadata.schema()
+    var e2 = List[RecordBatch]()
+    e2.append(make_evolved_batch(evolved_schema, 4, 3))
+    _ = cat.append("db", "evo", e2)
+    print("EVOLVED db.evo " + evolved_schema.to_json())
 
     print("OK")

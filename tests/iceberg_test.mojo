@@ -96,6 +96,11 @@ from iceberg.batch import (
     batch_of_columns,
 )
 from iceberg.util import now_ms, random_long, uuid4
+from iceberg.update_schema import (
+    UpdateSchema,
+    prepare_schema_update,
+    schema_update_body,
+)
 from std.random import seed
 from iceberg.manifest_write import (
     manifest_entry_schema_json,
@@ -7209,6 +7214,486 @@ def test_ids_differ_between_processes_with_the_same_random_state() raises:
     assert_true(a > 0 and b > 0, "a snapshot id isn't positive")
     assert_equal(ua.byte_length(), 36)
     assert_equal(String(ua[byte=14]), "4")
+
+
+# ── schema evolution: UpdateSchema ─────────────────────────────────────────
+
+
+def evolved_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
+    """`write_batch`'s five columns plus `note` (field id 6): `n<i>`."""
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    var amount = ColumnBuilder.of(schema, 3)
+    var ts = ColumnBuilder.of(schema, 4)
+    var ok = ColumnBuilder.of(schema, 5)
+    var note = ColumnBuilder.of(schema, 6)
+    for k in range(n):
+        var i = start + k
+        ids.add(Datum.long_(Int64(i)))
+        region.add(Datum.string_(write_region(i)))
+        amount.add(Datum.double_(Float64(i) * 1.5))
+        ts.add(Datum.integral(ts.kind, WRITE_DAY * WRITE_MICROS_PER_DAY))
+        ok.add(Datum.bool_(True))
+        note.add(Datum.string_("n" + String(i)))
+    return batch_of([ids^, region^, amount^, ts^, ok^, note^])
+
+
+comptime EVOLVE_SCHEMA = String(
+    '{"schema-id":0,"type":"struct","identifier-field-ids":[1],"fields":['
+    '{"id":1,"name":"id","required":true,"type":"long"},'
+    '{"id":2,"name":"qty","required":true,"type":"int"},'
+    '{"id":3,"name":"addr","required":false,"type":{"type":"struct",'
+    '"fields":[{"id":4,"name":"city","required":true,"type":"string"}]}},'
+    '{"id":5,"name":"tags","required":false,"type":{"type":"list",'
+    '"element-id":6,"element-required":true,"element":{"type":"struct",'
+    '"fields":[{"id":7,"name":"k","required":true,"type":"string"}]}}}]}'
+)
+
+
+def test_update_schema_assigns_fresh_ids_in_java_order() raises:
+    """A new column gets the next id, then the fields inside its type do —
+    a struct's own fields first, then what is inside them."""
+    var base = Schema.parse(EVOLVE_SCHEMA)
+    var u = UpdateSchema()
+    u.add_column("note", "string", "free text")
+    u.add_column(
+        "geo",
+        String(
+            '{"type":"struct","fields":['
+            '{"id":0,"name":"lat","required":true,"type":"double"},'
+            '{"id":0,"name":"pts","required":false,"type":{"type":"list",'
+            '"element-id":0,"element-required":false,"element":"int"}}]}'
+        ),
+    )
+    u.add_nested_column("addr", "zip", "int")
+    # A list parent adds to its element struct.
+    u.add_nested_column("tags", "v", '"long"')
+    var applied = u.apply(base, 7)
+    var s = applied[0].copy()
+    assert_equal(applied[1], 14)
+    assert_equal(s.find_by_name("note").id, 8)
+    assert_false(s.find_by_name("note").required, "added columns are optional")
+    assert_equal(s.find_by_name("geo").id, 9)
+    assert_equal(s.find_by_name("geo.lat").id, 10)
+    assert_equal(s.find_by_name("geo.pts").id, 11)
+    assert_equal(s.find_by_name("geo.pts.element").id, 12)
+    assert_equal(s.find_by_name("addr.zip").id, 13)
+    assert_equal(s.find_by_name("tags.element.v").id, 14)
+    # The added struct keeps its inner requiredness: `lat` is required
+    # within a `geo` that is itself optional, which old rows leave null.
+    assert_true(s.find_by_name("geo.lat").required)
+    var cols = s.columns()
+    assert_equal(len(cols), 6)
+    assert_equal(cols[4].name, "note")
+    assert_true(cols[4].has_doc)
+    assert_equal(cols[4].doc, "free text")
+    # Every original field is where it was, with the id it had.
+    assert_equal(s.find_by_name("addr.city").id, 4)
+    assert_equal(s.find_by_name("tags.element.k").id, 7)
+    assert_equal(len(s.identifier_field_ids), 1)
+
+
+def test_update_schema_rename_optional_and_promote() raises:
+    var base = Schema.parse(EVOLVE_SCHEMA)
+    var u = UpdateSchema()
+    u.rename_column("addr.city", "town")
+    u.make_column_optional("qty")
+    u.make_column_optional("tags.element")
+    u.update_column_type("qty", "long")
+    var s = u.apply(base, 7)[0].copy()
+    assert_equal(s.find_by_name("addr.town").id, 4)
+    assert_false(s.has_name("addr.city"))
+    assert_false(s.find_by_name("qty").required)
+    assert_false(s.find_by_name("tags.element").required)
+    assert_equal(s.store.type_name(s.find_by_name("qty").type), "long")
+
+    # A rename, then an add under the new name, then a rename of the add:
+    # the changes compose in order.
+    var v = UpdateSchema()
+    v.rename_column("addr", "address")
+    v.add_nested_column("address", "zip", "int")
+    v.rename_column("address.zip", "postcode")
+    var t = v.apply(base, 7)[0].copy()
+    assert_equal(t.find_by_name("address.postcode").id, 8)
+
+    var dec = Schema.parse(
+        '{"schema-id":0,"type":"struct","fields":['
+        '{"id":1,"name":"d","required":false,"type":"decimal(9, 2)"},'
+        '{"id":2,"name":"f","required":false,"type":"float"}]}'
+    )
+    var w = UpdateSchema()
+    w.update_column_type("d", "decimal(18, 2)")
+    w.update_column_type("f", "double")
+    var p = w.apply(dec, 2)[0].copy()
+    assert_equal(p.store.type_name(p.find_by_name("d").type), "decimal(18, 2)")
+    assert_equal(p.store.type_name(p.find_by_name("f").type), "double")
+
+
+def test_update_schema_refuses_what_it_cannot_do() raises:
+    var base = Schema.parse(EVOLVE_SCHEMA)
+
+    def refuses(u: UpdateSchema, base: Schema, what: String) raises:
+        var raised = False
+        try:
+            _ = u.apply(base, 7)
+        except e:
+            raised = True
+        assert_true(raised, what)
+
+    var dup = UpdateSchema()
+    dup.add_column("qty", "long")
+    refuses(dup, base, "an existing name")
+    var nodot = UpdateSchema()
+    with assert_raises():
+        nodot.add_column("a.b", "long")
+    var unknown = UpdateSchema()
+    unknown.add_column("x", "lnog")
+    refuses(unknown, base, "an unknown type")
+    var missing = UpdateSchema()
+    missing.add_nested_column("nope", "x", "long")
+    refuses(missing, base, "a parent that is not there")
+    var not_struct = UpdateSchema()
+    not_struct.add_nested_column("qty", "x", "long")
+    refuses(not_struct, base, "a parent that is not a struct")
+    var narrow = UpdateSchema()
+    narrow.update_column_type("id", "int")
+    refuses(narrow, base, "long to int")
+    var cross = UpdateSchema()
+    cross.update_column_type("qty", "string")
+    refuses(cross, base, "int to string")
+    var ident = UpdateSchema()
+    ident.make_column_optional("id")
+    refuses(ident, base, "an identifier field made optional")
+    var clash = UpdateSchema()
+    clash.rename_column("qty", "id")
+    refuses(clash, base, "a rename onto a sibling's name")
+
+
+def test_update_schema_union_by_name() raises:
+    """Missing fields added at any depth, optionality relaxed, the rest kept,
+    and a type change refused rather than applied."""
+    var base = Schema.parse(EVOLVE_SCHEMA)
+    var wanted = Schema.parse(
+        '{"schema-id":7,"type":"struct","fields":['
+        '{"id":100,"name":"id","required":true,"type":"long"},'
+        '{"id":101,"name":"qty","required":false,"type":"int",'
+        '"doc":"how many"},'
+        '{"id":102,"name":"addr","required":false,"type":{"type":"struct",'
+        '"fields":[{"id":103,"name":"city","required":true,"type":"string"},'
+        '{"id":104,"name":"zip","required":false,"type":"int"}]}},'
+        '{"id":105,"name":"tags","required":false,"type":{"type":"list",'
+        '"element-id":106,"element-required":true,"element":{"type":"struct",'
+        '"fields":[{"id":107,"name":"k","required":true,"type":"string"},'
+        '{"id":108,"name":"w","required":false,"type":"double"}]}}},'
+        '{"id":109,"name":"note","required":false,"type":"string"}]}'
+    )
+    var u = UpdateSchema()
+    u.union_by_name(wanted)
+    var applied = u.apply(base, 7)
+    var s = applied[0].copy()
+    assert_equal(applied[1], 10)
+    assert_equal(s.find_by_name("addr.zip").id, 8)
+    assert_equal(s.find_by_name("tags.element.w").id, 9)
+    assert_equal(s.find_by_name("note").id, 10)
+    assert_false(s.find_by_name("qty").required)
+    assert_equal(s.find_by_name("qty").id, 2)
+    var cols = s.columns()
+    assert_true(cols[1].has_doc)
+    assert_equal(cols[1].doc, "how many")
+
+    # A schema that is a subset changes nothing.
+    var subset = UpdateSchema()
+    subset.union_by_name(
+        Schema.parse(
+            '{"schema-id":0,"type":"struct","fields":['
+            '{"id":1,"name":"id","required":true,"type":"long"}]}'
+        )
+    )
+    var same = subset.apply(base, 7)
+    assert_equal(same[1], 7)
+    assert_equal(same[0].to_json(), base.to_json())
+
+    var retype = UpdateSchema()
+    retype.union_by_name(
+        Schema.parse(
+            '{"schema-id":0,"type":"struct","fields":['
+            '{"id":1,"name":"qty","required":true,"type":"long"}]}'
+        )
+    )
+    with assert_raises(contains="update_column_type"):
+        _ = retype.apply(base, 7)
+    var required = UpdateSchema()
+    required.union_by_name(
+        Schema.parse(
+            '{"schema-id":0,"type":"struct","fields":['
+            '{"id":1,"name":"extra","required":true,"type":"long"}]}'
+        )
+    )
+    with assert_raises(contains="required"):
+        _ = required.apply(base, 7)
+
+
+def test_prepare_schema_update_metadata() raises:
+    """A new schema appended with the next id; a schema the table already had
+    made current again by id; no change, no commit."""
+    var catalog = fresh_catalog("schema_prepare")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var t = catalog.create_table(
+        String("db"), String("t"), schema, PartitionSpec.unpartitioned()
+    )
+    var u = UpdateSchema()
+    u.add_column("note", "string")
+    var c = prepare_schema_update(t.metadata, u)
+    assert_true(c.changed and c.added)
+    assert_equal(c.schema.schema_id, 1)
+    assert_equal(c.metadata.current_schema_id, 1)
+    assert_equal(len(c.metadata.schemas), 2)
+    assert_equal(c.metadata.last_column_id, 6)
+    assert_equal(len(c.metadata.metadata_log), 1)
+
+    var body = schema_update_body(String("db"), String("t"), t.metadata, c)
+    var doc = parse_json(body)
+    var reqs = doc.get(doc.root, "requirements")
+    assert_equal(doc.size(reqs), 3)
+    assert_equal(
+        doc.req_string(doc.at(reqs, 1), "type"), "assert-current-schema-id"
+    )
+    assert_equal(Int(doc.req_int(doc.at(reqs, 1), "current-schema-id")), 0)
+    assert_equal(Int(doc.req_int(doc.at(reqs, 2), "last-assigned-field-id")), 5)
+    var ups = doc.get(doc.root, "updates")
+    assert_equal(doc.req_string(doc.at(ups, 0), "action"), "add-schema")
+    assert_equal(Int(doc.req_int(doc.at(ups, 0), "last-column-id")), 6)
+    assert_equal(Int(doc.req_int(doc.at(ups, 1), "schema-id")), -1)
+
+    var none = UpdateSchema()
+    assert_false(prepare_schema_update(t.metadata, none).changed)
+    var subset = UpdateSchema()
+    subset.union_by_name(schema)
+    assert_false(prepare_schema_update(t.metadata, subset).changed)
+
+    # A rename and its undo: the second change produces schema 0 again, which
+    # is made current by its id rather than added a second time.
+    var there = UpdateSchema()
+    there.rename_column("region", "area")
+    var m = prepare_schema_update(t.metadata, there).metadata.copy()
+    assert_equal(m.current_schema_id, 1)
+    var back = UpdateSchema()
+    back.rename_column("area", "region")
+    var again = prepare_schema_update(m, back)
+    assert_true(again.changed)
+    assert_false(again.added)
+    assert_equal(again.schema.schema_id, 0)
+    assert_equal(again.metadata.current_schema_id, 0)
+    assert_equal(len(again.metadata.schemas), 2)
+    var reuse = schema_update_body(String("db"), String("t"), m, again)
+    var rdoc = parse_json(reuse)
+    var rups = rdoc.get(rdoc.root, "updates")
+    assert_equal(rdoc.size(rups), 1)
+    assert_equal(
+        rdoc.req_string(rdoc.at(rups, 0), "action"), "set-current-schema"
+    )
+    assert_equal(Int(rdoc.req_int(rdoc.at(rups, 0), "schema-id")), 0)
+
+
+def test_update_schema_old_files_read_null() raises:
+    """The acceptance test: files written before a column existed read it as
+    null, files written after carry it, and a scan of an older snapshot
+    still sees the schema it was written with."""
+    var catalog = fresh_catalog("schema_evolve")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = catalog.create_table(
+        String("db"), String("t"), schema, PartitionSpec.unpartitioned()
+    )
+    var t = catalog.load_table(String("db"), String("t"))
+    var first = List[RecordBatch]()
+    first.append(write_batch(schema, 0, 6))
+    _ = t.append(first)
+    var before = t.metadata.current_snapshot_id
+
+    var u = UpdateSchema()
+    u.add_column("note", "string")
+    var evolved = t.update_schema(u)
+    assert_equal(evolved.schema_id, 1)
+    assert_equal(evolved.find_by_name("note").id, 6)
+
+    # A fresh load sees what was committed.
+    var back = catalog.load_table(String("db"), String("t"))
+    assert_equal(back.metadata.current_schema_id, 1)
+    assert_equal(back.metadata.last_column_id, 6)
+    assert_equal(len(back.metadata.schemas), 2)
+    assert_equal(back.metadata.current_snapshot_id, before)
+
+    # No commit since the change: the table as it is has the column, null.
+    var now = back.scan().to_table()
+    assert_equal(now.num_rows(), 6)
+    assert_equal(now.num_columns(), 6)
+    for r in range(now.num_rows()):
+        assert_false(now.value(r, 5).valid, "note is null in an old file")
+    # The snapshot as written does not.
+    var then = back.scan().use_snapshot(before).to_table()
+    assert_equal(then.num_columns(), 5)
+
+    var second = List[RecordBatch]()
+    second.append(evolved_batch(evolved, 6, 4))
+    _ = back.append(second)
+    assert_equal(back.metadata.current_snapshot().schema_id, 1)
+    var all = back.scan().select([String("id"), String("note")]).to_table()
+    assert_equal(all.num_rows(), 10)
+    for r in range(all.num_rows()):
+        var id = Int(all.value(r, 0).i)
+        if id < 6:
+            assert_false(all.value(r, 1).valid, "old row " + String(id))
+        else:
+            assert_equal(all.value(r, 1).s, "n" + String(id))
+    # A predicate on the new column prunes the old file by its absence.
+    var hit = back.scan().filter('["=","note","n7"]').to_table()
+    assert_equal(hit.num_rows(), 1)
+    var nulls = back.scan().filter('["is-null","note"]').to_table()
+    assert_equal(nulls.num_rows(), 6)
+
+    # Rename it: the values are found by id, under the new name.
+    var r = UpdateSchema()
+    r.rename_column("note", "remark")
+    _ = back.update_schema(r)
+    var renamed = back.scan().filter('["=","remark","n8"]').to_table()
+    assert_equal(renamed.num_rows(), 1)
+
+    # Changes that change nothing write nothing.
+    var loc = back.metadata_location
+    var same = UpdateSchema()
+    same.union_by_name(back.metadata.schema())
+    _ = back.update_schema(same)
+    assert_equal(back.metadata_location, loc)
+
+
+def test_update_schema_reapplies_after_a_concurrent_change() raises:
+    """Two writers each add a column from the same starting point: the second
+    commit finds the first, reloads, and adds its column on top — both are
+    there, with different ids."""
+    var catalog = fresh_catalog("schema_race")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = catalog.create_table(
+        String("db"), String("t"), schema, PartitionSpec.unpartitioned()
+    )
+    var a = catalog.load_table(String("db"), String("t"))
+    var b = catalog.load_table(String("db"), String("t"))
+    var ua = UpdateSchema()
+    ua.add_column("from_a", "long")
+    _ = a.update_schema(ua)
+    var ub = UpdateSchema()
+    ub.add_column("from_b", "string")
+    var s = b.update_schema(ub)
+    assert_equal(s.schema_id, 2)
+    assert_equal(s.find_by_name("from_a").id, 6)
+    assert_equal(s.find_by_name("from_b").id, 7)
+    var back = catalog.load_table(String("db"), String("t"))
+    assert_equal(back.metadata.last_column_id, 7)
+    assert_equal(len(back.metadata.schemas), 3)
+
+    # The same column from both: the second one's re-apply finds it taken.
+    var c = catalog.load_table(String("db"), String("t"))
+    var d = catalog.load_table(String("db"), String("t"))
+    var uc = UpdateSchema()
+    uc.add_column("both", "long")
+    _ = c.update_schema(uc)
+    with assert_raises(contains="exists"):
+        _ = d.update_schema(uc)
+
+
+def _sql_catalog_update_schema_on(backend: String) raises:
+    var cat = fresh_sql_catalog("schema", backend)
+    cat.create_namespace("db")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    _ = cat.create_table("db", "t", schema)
+    var first = List[RecordBatch]()
+    first.append(write_batch(schema, 0, 5))
+    _ = cat.append("db", "t", first)
+    var u = UpdateSchema()
+    u.add_column("note", "string")
+    var after = cat.update_schema("db", "t", u)
+    assert_equal(after.metadata.current_schema_id, 1)
+    var back = cat.load_table("db", "t")
+    assert_equal(back.metadata_location, after.metadata_location)
+    var evolved = back.metadata.schema()
+    assert_equal(evolved.find_by_name("note").id, 6)
+    var second = List[RecordBatch]()
+    second.append(evolved_batch(evolved, 5, 3))
+    _ = cat.append("db", "t", second)
+    var rows = (
+        cat.load_table("db", "t").scan().filter('["is-null","note"]').to_table()
+    )
+    assert_equal(rows.num_rows(), 5)
+    # Nothing to change: the pointer stays.
+    var loc = cat.load_table("db", "t").metadata_location
+    _ = cat.update_schema("db", "t", UpdateSchema())
+    assert_equal(cat.load_table("db", "t").metadata_location, loc)
+
+
+def test_sql_catalog_update_schema() raises:
+    for backend in sql_catalog_backends():
+        _sql_catalog_update_schema_on(backend)
+
+
+def test_rest_update_schema() raises:
+    """Through the mock REST server, which checks the three requirements and
+    applies `add-schema` and `set-current-schema` -1 itself — once after a
+    rigged 409, which reloads and re-applies."""
+    if getenv("ICEBERG_TEST_REST", "") == "":
+        print("  (skipped: no ICEBERG_TEST_REST)")
+        return
+    var catalog = rest_write_catalog()
+    var schema = Schema.parse(WRITE_SCHEMA)
+    for which in range(2):
+        var name = String("schema_evolve_a") if which == 0 else String(
+            "conflict_once_schema"
+        )
+        _ = catalog.create_table(
+            String("wr"), name, schema, PartitionSpec.unpartitioned()
+        )
+        var batches = List[RecordBatch]()
+        batches.append(write_batch(schema, 0, 4))
+        if which == 0:
+            _ = catalog.append(String("wr"), name, batches)
+        var u = UpdateSchema()
+        u.add_column("note", "string")
+        var after = catalog.update_schema(String("wr"), name, u)
+        assert_equal(after.metadata.current_schema_id, 1)
+        var back = catalog.load_table(String("wr"), name)
+        assert_equal(back.metadata.current_schema_id, 1)
+        assert_equal(back.metadata.last_column_id, 6)
+        var evolved = back.metadata.schema()
+        assert_equal(evolved.find_by_name("note").id, 6)
+        if which == 0:
+            var more = List[RecordBatch]()
+            more.append(evolved_batch(evolved, 4, 2))
+            _ = catalog.append(String("wr"), name, more)
+            var rows = (
+                catalog.load_table(String("wr"), name)
+                .scan()
+                .filter('["is-null","note"]')
+                .to_table()
+            )
+            assert_equal(rows.num_rows(), 4)
+
+    # A request built from a stale read is refused by the server: its
+    # current schema has moved on.
+    var stale = catalog.load_table(String("wr"), String("schema_evolve_a"))
+    var u2 = UpdateSchema()
+    u2.add_column("more", "long")
+    _ = catalog.update_schema(String("wr"), String("schema_evolve_a"), u2)
+    var u3 = UpdateSchema()
+    u3.add_column("stale", "long")
+    var c = prepare_schema_update(stale.metadata, u3)
+    var resp = catalog._commit(
+        String("wr"),
+        String("schema_evolve_a"),
+        schema_update_body(
+            String("wr"), String("schema_evolve_a"), stale.metadata, c
+        ),
+        uuid4(),
+        String("stale schema update"),
+    )
+    assert_equal(resp.status, 409)
 
 
 def main() raises:

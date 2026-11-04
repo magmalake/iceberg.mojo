@@ -145,14 +145,36 @@ def _check_requirements(doc, requirements):
         elif kind == "assert-current-schema-id":
             if doc.get("current-schema-id") != r.get("current-schema-id"):
                 return "assert-current-schema-id"
+        elif kind == "assert-last-assigned-field-id":
+            if doc.get("last-column-id") != r.get("last-assigned-field-id"):
+                return "assert-last-assigned-field-id: %r != %r" % (
+                    doc.get("last-column-id"), r.get("last-assigned-field-id"))
         elif kind == "assert-default-spec-id":
             if doc.get("default-spec-id") != r.get("default-spec-id"):
                 return "assert-default-spec-id"
     return None
 
 
+def _highest_id(t):
+    """The highest field, element, key or value id anywhere in a type."""
+    if not isinstance(t, dict):
+        return 0
+    ids = [0]
+    for f in t.get("fields", []):
+        ids.append(f["id"])
+        ids.append(_highest_id(f["type"]))
+    for k in ("element-id", "key-id", "value-id"):
+        if k in t:
+            ids.append(t[k])
+    for k in ("element", "key", "value"):
+        if k in t:
+            ids.append(_highest_id(t[k]))
+    return max(ids)
+
+
 def _apply_updates(doc, updates):
     """The `TableUpdate` actions a commit from this client can send."""
+    last_added = None
     for u in updates or []:
         action = u.get("action")
         if action == "add-snapshot":
@@ -179,8 +201,24 @@ def _apply_updates(doc, updates):
                 doc["current-snapshot-id"] = u["snapshot-id"]
         elif action == "add-schema":
             doc["schemas"] = doc.get("schemas", []) + [u["schema"]]
+            # `last-column-id` is optional (deprecated); without it the
+            # server works it out, as here, from the ids the schema uses.
+            doc["last-column-id"] = max(
+                doc.get("last-column-id", 0),
+                u.get("last-column-id", 0),
+                _highest_id(u["schema"]))
+            last_added = u["schema"]["schema-id"]
         elif action == "set-current-schema":
-            doc["current-schema-id"] = u["schema-id"]
+            # -1 is "the schema this request just added".
+            sid = u["schema-id"]
+            if sid == -1:
+                if last_added is None:
+                    return "set-current-schema -1 with no add-schema before it"
+                sid = last_added
+            if not any(s.get("schema-id") == sid
+                       for s in doc.get("schemas", [])):
+                return "set-current-schema: no schema %r" % sid
+            doc["current-schema-id"] = sid
         elif action == "set-properties":
             doc.setdefault("properties", {}).update(u["updates"])
         elif action == "remove-properties":
