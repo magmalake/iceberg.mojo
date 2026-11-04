@@ -1,6 +1,6 @@
 [workspace]
 name = "iceberg-mojo"
-version = "0.8.6"
+version = "0.8.7"
 authors = ["Marius S <39998+winding-lines@users.noreply.github.com>"]
 description = "Native pure-Mojo Apache Iceberg — table metadata, snapshots, partition transforms, expressions, manifests, scan planning, multi-core data reads including nested columns, and writes: append, delete, overwrite and deletion vectors."
 preview = ["pixi-build"]
@@ -25,7 +25,7 @@ platforms = ["osx-arm64", "linux-64"]
 # path dependency would break `pixi install` for a bare clone, because pixi
 # solves every environment even when it installs one.
 [dependencies]
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "41fac2800882e5a64da09729262dfa22bbd4ad13" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ff66975c095f392695facc1b6dd56823dec914bc" }
 zstd-mojo = { git = "https://github.com/magmalake/zstd.mojo", rev = "76190bb31012cd2d2f6712c4e1724a66474215db" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "23cd6e54967d7e41573371507228ca5c958ca685" }
 brotli-mojo = { git = "https://github.com/magmalake/brotli.mojo", rev = "dcbf840d22e3deaf24c587d12d28570a9a882b7f" }
@@ -179,7 +179,7 @@ nightly = ["nightly"]
 # Conda package name is iceberg-mojo; the Mojo import stays `from iceberg import …`.
 [package]
 name = "iceberg-mojo"
-version = "0.8.6"
+version = "0.8.7"
 
 [package.build]
 backend = { name = "pixi-build-mojo", version = "0.*" }
@@ -201,7 +201,7 @@ deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "6639b
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "db833d86ddbd7cbaba4dbd79377b0a06009181ec" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "23cd6e54967d7e41573371507228ca5c958ca685" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "41fac2800882e5a64da09729262dfa22bbd4ad13" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ff66975c095f392695facc1b6dd56823dec914bc" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "178aae6e0da0dbe105f9cb02632a51cfd35b9dda" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
@@ -221,7 +221,7 @@ deflate-mojo = { git = "https://github.com/magmalake/deflate.mojo", rev = "6639b
 avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "db833d86ddbd7cbaba4dbd79377b0a06009181ec" }
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "23cd6e54967d7e41573371507228ca5c958ca685" }
-objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "41fac2800882e5a64da09729262dfa22bbd4ad13" }
+objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ff66975c095f392695facc1b6dd56823dec914bc" }
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "178aae6e0da0dbe105f9cb02632a51cfd35b9dda" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
