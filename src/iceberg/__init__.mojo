@@ -69,7 +69,13 @@ from iceberg.expressions import (
     project_strict,
     rewrite_not,
 )
-from iceberg.io import FileIO, InputFile, LocalInputFile, strip_scheme
+from iceberg.io import FileIO, IOCounts, InputFile, LocalInputFile, strip_scheme
+from iceberg.metadata_log import (
+    DEFAULT_PREVIOUS_VERSIONS_MAX,
+    DELETE_AFTER_COMMIT,
+    PREVIOUS_VERSIONS_MAX,
+    trim_metadata_log,
+)
 from iceberg.kernels import (
     arrow_type_for,
     cast_array,
@@ -91,10 +97,20 @@ from iceberg.nested import (
     subtree_copy,
 )
 from iceberg.maintain import (
+    DEFAULT_MAX_SNAPSHOT_AGE_MS,
+    DEFAULT_MIN_SNAPSHOTS_TO_KEEP,
+    ExpirePolicy,
     ExpireResult,
+    ExpiryPlan,
+    MAX_REF_AGE_MS,
+    MAX_SNAPSHOT_AGE_MS,
+    MIN_SNAPSHOTS_TO_KEEP,
+    NO_AGE_LIMIT,
     choose_expired,
     delete_expired_files,
     expire_snapshots,
+    expire_with_policy,
+    plan_expiry,
 )
 from iceberg.manifest import (
     DATA_FILE_WIRE_VERSION,

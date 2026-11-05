@@ -319,7 +319,13 @@ _ = tx.commit()
   `added-files-size`, `changed-partition-count` and the `total-*` keys carried
   forward; `sequence-number = last + 1`; the parent's manifests carried into
   the new manifest list *unchanged*, keeping their sequence numbers and their
-  `first_row_id`.
+  `first_row_id` — until there are `commit.manifest.min-count-to-merge` (100)
+  small data manifests of the default spec, which an append then folds into
+  manifests of up to `commit.manifest.target-size-bytes` (8 MB), as Java's
+  merge-append does (`commit.manifest-merge.enabled=false` turns it off; v3
+  tables aren't folded). Folded entries are EXISTING and keep their snapshot
+  and sequence numbers. Without it the manifest list every commit rewrites
+  and every scan plans grows by one entry per commit.
 - **Row lineage (v3).** The snapshot's `first-row-id` is the table's
   `next-row-id`, the new manifest is assigned it, every data file in that
   manifest inherits from it in order, and `next-row-id` advances by
@@ -414,12 +420,35 @@ Parquet at all.
 rows land and replaces exactly those partitions, examining no row.
 
 `expire_snapshots(older_than_ms, keep_last, dry_run)` drops old snapshots and
-then the files nothing points at. The keep set is built from the *retained*
-snapshots first — a data file added five snapshots ago is in every snapshot
-since, and expiring the oldest of them must not touch it — and only then is
-the expired snapshots' inventory subtracted from it. The pruned metadata is
-committed **before** any file is deleted, so an interruption leaves orphans
-rather than a snapshot with holes in it.
+then the files nothing points at; `expire_by_properties()` does the same by
+the table's own `history.expire.max-snapshot-age-ms` (five days),
+`history.expire.min-snapshots-to-keep` (1) and `history.expire.max-ref-age-ms`,
+and `expire(ExpirePolicy)` takes a policy with snapshot ids to keep whatever
+their age (`retain`), which is how a scheduler keeps what a live job reads.
+Retention follows the spec: every branch keeps its head, its last
+`min-snapshots-to-keep` ancestors and the ancestors younger than the age cut
+(a ref's own settings first); a tag keeps its snapshot; a branch or tag older
+than `max-ref-age-ms` goes (never `main`).
+
+The files are found with set arithmetic on manifest *paths*, so the cost is
+linear in the history, not quadratic: every manifest list is read once
+(batched on object storage), only the manifests that expired snapshots list
+and no retained one does are opened, and a retained manifest is opened only
+if it could hold one of their files live — on one line of history, only the
+manifests written by the snapshots that dropped those (a rewrite or merge),
+otherwise every retained manifest once. On a 1,000-snapshot table that was
+591,513 manifest reads and 57 s; it is 1,097 reads and 0.27 s
+(`bench/bench_expiry.mojo`, which counts requests with `FileIO.counts()`). The
+pruned metadata is committed **before** any file is deleted, so an
+interruption leaves orphans rather than a snapshot with holes in it.
+
+**Old metadata files.** Every commit keeps the newest
+`write.metadata.previous-versions-max` (100) entries of the `metadata-log`,
+and with `write.metadata.delete-after-commit.enabled=true` deletes the files
+that fell off it once the new metadata is in place. A filesystem commit no
+longer lists the metadata directory: it looks for the one version it is about
+to write (a prefix listing) and reads `version-hint.text`, so its cost stays
+flat however many versions the table has.
 
 ### Schema evolution
 
@@ -1118,7 +1147,8 @@ pixi run verify-pg-catalog  # the same, over PostgreSQL
 | `iceberg.commit` | `prepare_commit`, `FileChanges` — a snapshot that adds *and* removes |
 | `iceberg.delete` | `prepare_delete`, `prepare_overwrite`, `write_deletion_vectors`, `write_position_deletes`, `write_equality_deletes` |
 | `iceberg.update_schema` | `UpdateSchema` (`add_column`, `add_nested_column`, `rename_column`, `make_column_optional`, `update_column_type`, `union_by_name`), `prepare_schema_update`, `schema_update_body` |
-| `iceberg.maintain` | `expire_snapshots`, `delete_expired_files`, `ExpireResult` |
+| `iceberg.maintain` | `expire_snapshots`, `expire_with_policy`, `ExpirePolicy`, `plan_expiry`, `delete_expired_files`, `ExpireResult` |
+| `iceberg.metadata_log` | `trim_metadata_log`, `write.metadata.previous-versions-max`, `write.metadata.delete-after-commit.enabled` |
 | `iceberg.scan` | `TableScan`, `FileScanTask`, `BatchReader` — `plan_files`, `plan_files_with`, `to_table`, `to_batches`, `to_batch_reader`, `count` |
 | `iceberg.io` | `FileIO` over local, S3, GCS, Azure and HTTP |
 | `iceberg.catalog.filesystem` | `Table`, `AppendFiles`, `FilesystemCatalog` |

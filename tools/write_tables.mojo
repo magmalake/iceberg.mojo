@@ -185,6 +185,7 @@ def main() raises:
                 "next-row-id=" + String(table.metadata.next_row_id),
             )
     write_delete_tables(catalog, schema)
+    write_expire_tables(catalog, schema, warehouse)
     write_nested_tables(catalog, warehouse)
 
 
@@ -312,6 +313,179 @@ def write_delete_tables(catalog: FilesystemCatalog, schema: Schema) raises:
         one.append(make_batch(schema, 100, 1))
         _ = dyn.dynamic_partition_overwrite(one)
         report(name, dyn, "dynamic overwrite of the eu partition")
+
+
+# ── snapshot expiry ─────────────────────────────────────────────────────────
+def _ids_json(table: Table) raises -> String:
+    var rows = table.scan().select([String("id")]).to_table()
+    var ids = List[Int64]()
+    for r in range(rows.num_rows()):
+        ids.append(rows.value(r, 0).i)
+    for i in range(1, len(ids)):
+        var j = i
+        while j > 0 and ids[j] < ids[j - 1]:
+            ids.swap_elements(j, j - 1)
+            j -= 1
+    var out = String("[")
+    for k in range(len(ids)):
+        if k > 0:
+            out += ","
+        out += String(ids[k])
+    return out + "]"
+
+
+def _expect(
+    warehouse: String, name: String, table: Table, ids: String, note: String
+) raises:
+    """What `tools/verify_written.py` checks after the expiry: the same rows
+    as before it, this many snapshots and metadata-log entries."""
+    var doc = (
+        '{"ids":'
+        + ids
+        + ',"snapshots":'
+        + String(len(table.metadata.snapshots))
+        + ',"metadata_log":'
+        + String(len(table.metadata.metadata_log))
+        + "}"
+    )
+    FileIO.local().write_text(
+        join_path(join_path(warehouse, "exp"), name + ".expect.json"), doc
+    )
+    print(
+        "wrote exp." + name,
+        String(len(table.metadata.snapshots)) + " snapshots",
+        note,
+    )
+
+
+def _seed_exp(
+    catalog: FilesystemCatalog,
+    schema: Schema,
+    name: String,
+    shape: String,
+    version: Int,
+    var props: Dict[String, String],
+) raises -> Table:
+    var table = catalog.create_table(
+        String("exp"), name, schema, spec_for(shape), props^, version
+    )
+    for b in range(3):
+        var batches = List[RecordBatch]()
+        batches.append(make_batch(schema, b * 6, 6))
+        var tx = table.new_append()
+        tx.add_batches(batches)
+        _ = tx.commit()
+        table.refresh()
+    return table^
+
+
+def write_expire_tables(
+    catalog: FilesystemCatalog, schema: Schema, warehouse: String
+) raises:
+    """Tables expired by this library, for PyIceberg and DuckDB to read: the
+    rows must be the ones the table had before, and every file the retained
+    snapshots name must still be there, and nothing else."""
+    # A copy-on-write delete, more appends, then keep the last two.
+    var cow = _seed_exp(
+        catalog, schema, "cow_ident_v2", "ident", 2, Dict[String, String]()
+    )
+    _ = cow.delete_where(String('["=","region","eu"]'))
+    var more = List[RecordBatch]()
+    more.append(make_batch(schema, 300, 4))
+    var tx = cow.new_append()
+    tx.add_batches(more)
+    _ = tx.commit()
+    cow.refresh()
+    var cow_ids = _ids_json(cow)
+    var r1 = cow.expire_snapshots(-1, 2, False)
+    _expect(
+        warehouse,
+        "cow_ident_v2",
+        cow,
+        cow_ids,
+        String(len(r1.deleted_files)) + " data files deleted",
+    )
+
+    # Two merge-on-read deletes on v3 (deletion vectors), keep one.
+    var mp = Dict[String, String]()
+    mp["write.delete.mode"] = "merge-on-read"
+    var mor = _seed_exp(catalog, schema, "mor_v3", "unpartitioned", 3, mp^)
+    _ = mor.delete_where(String('["=","id",0]'))
+    _ = mor.delete_where(String('["=","id",3]'))
+    var mor_ids = _ids_json(mor)
+    var r2 = mor.expire_snapshots(-1, 1, False)
+    _expect(
+        warehouse,
+        "mor_v3",
+        mor,
+        mor_ids,
+        String(len(r2.deleted_files)) + " files deleted",
+    )
+
+    # A dynamic partition overwrite (a rerun of one partition), keep one.
+    var dyn = _seed_exp(
+        catalog, schema, "dyn_ident_v2", "ident", 2, Dict[String, String]()
+    )
+    var one = List[RecordBatch]()
+    one.append(make_batch(schema, 100, 1))
+    _ = dyn.dynamic_partition_overwrite(one)
+    dyn.refresh()
+    var dyn_ids = _ids_json(dyn)
+    var r3 = dyn.expire_snapshots(-1, 1, False)
+    _expect(
+        warehouse,
+        "dyn_ident_v2",
+        dyn,
+        dyn_ids,
+        String(len(r3.deleted_files)) + " data files deleted",
+    )
+
+    # Merge-append folding small manifests (every third), then an expiry
+    # that deletes the folded ones.
+    var gp = Dict[String, String]()
+    gp["commit.manifest.min-count-to-merge"] = "3"
+    var merged = _seed_exp(catalog, schema, "merged_ident_v2", "ident", 2, gp^)
+    for b in range(4):
+        var batches = List[RecordBatch]()
+        batches.append(make_batch(schema, 500 + b * 2, 2))
+        var t3 = merged.new_append()
+        t3.add_batches(batches)
+        _ = t3.commit()
+        merged.refresh()
+    var merged_ids = _ids_json(merged)
+    var r5 = merged.expire_snapshots(-1, 1, False)
+    _expect(
+        warehouse,
+        "merged_ident_v2",
+        merged,
+        merged_ids,
+        String(len(r5.deleted_manifests)) + " manifests and lists deleted",
+    )
+
+    # Old metadata files deleted after commit, two kept in the log; then an
+    # expiry by the table's own history.expire.* properties.
+    var lp = Dict[String, String]()
+    lp["write.metadata.delete-after-commit.enabled"] = "true"
+    lp["write.metadata.previous-versions-max"] = "2"
+    lp["history.expire.min-snapshots-to-keep"] = "2"
+    lp["history.expire.max-snapshot-age-ms"] = "0"
+    var meta = _seed_exp(catalog, schema, "meta_log_v2", "day", 2, lp^)
+    for b in range(3):
+        var batches = List[RecordBatch]()
+        batches.append(make_batch(schema, 400 + b * 3, 3))
+        var t2 = meta.new_append()
+        t2.add_batches(batches)
+        _ = t2.commit()
+        meta.refresh()
+    var meta_ids = _ids_json(meta)
+    var r4 = meta.expire_by_properties()
+    _expect(
+        warehouse,
+        "meta_log_v2",
+        meta,
+        meta_ids,
+        String(len(r4.expired)) + " snapshots expired by properties",
+    )
 
 
 # ── nested columns ──────────────────────────────────────────────────────────

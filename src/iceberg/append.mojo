@@ -44,6 +44,8 @@ from .manifest import (
     MANIFEST_CONTENT_DATA,
     MANIFEST_CONTENT_DELETES,
     STATUS_ADDED,
+    STATUS_EXISTING,
+    read_manifest_bytes,
     read_manifest_list_io,
 )
 from .manifest_write import write_manifest, write_manifest_list
@@ -111,6 +113,142 @@ struct AppendResult(Copyable, Movable):
 
 def _metadata_dir(metadata: TableMetadata) -> String:
     return join_path(metadata.location, "metadata")
+
+
+comptime MANIFEST_MERGE_ENABLED = String("commit.manifest-merge.enabled")
+comptime MANIFEST_MIN_COUNT_TO_MERGE = String(
+    "commit.manifest.min-count-to-merge"
+)
+comptime MANIFEST_TARGET_SIZE_BYTES = String(
+    "commit.manifest.target-size-bytes"
+)
+
+
+def _int_prop(metadata: TableMetadata, key: String, dflt: Int) -> Int:
+    var v = metadata.property_(key, "")
+    if v == "":
+        return dflt
+    try:
+        return Int(v)
+    except:
+        return dflt
+
+
+def merge_small_manifests(
+    io: FileIO,
+    metadata: TableMetadata,
+    snapshot_id: Int64,
+    sequence_number: Int64,
+    var carried: List[ManifestFile],
+) raises -> List[ManifestFile]:
+    """Java's merge-append: once a table's small data manifests of the
+    default spec number `commit.manifest.min-count-to-merge` (100), rewrite
+    them into manifests of up to `commit.manifest.target-size-bytes` (8 MB).
+
+    Without it every append adds a manifest that is never folded, so the
+    manifest list every commit reads and rewrites, and every scan plans,
+    grows by one entry per commit for ever. Merged entries are EXISTING and
+    keep their snapshot and sequence numbers, so nothing a reader or a
+    delete file's scope sees changes. DELETED entries, which only describe
+    an older snapshot's change, are dropped as Java drops them.
+    `commit.manifest-merge.enabled=false` turns it off. Format v3 tables
+    are left as they are: a v3 manifest's first row id is inherited by its
+    added files, and folding would have to write it into each entry.
+    """
+    if metadata.format_version >= 3:
+        return carried^
+    if metadata.property_(MANIFEST_MERGE_ENABLED, "true").lower() != "true":
+        return carried^
+    var min_count = _int_prop(metadata, MANIFEST_MIN_COUNT_TO_MERGE, 100)
+    var target = _int_prop(metadata, MANIFEST_TARGET_SIZE_BYTES, 8388608)
+    var spec_id = metadata.default_spec_id
+    var small = List[Int]()
+    for k in range(len(carried)):
+        ref mf = carried[k]
+        if (
+            mf.content == MANIFEST_CONTENT_DATA
+            and mf.partition_spec_id == spec_id
+            and Int(mf.manifest_length) < target
+        ):
+            small.append(k)
+    if len(small) < max(min_count, 2):
+        return carried^
+
+    # Bins in list order (newest first), each up to the target size.
+    var bins = List[List[Int]]()
+    var current = List[Int]()
+    var size = 0
+    for k in range(len(small)):
+        var length = Int(carried[small[k]].manifest_length)
+        if len(current) > 0 and size + length > target:
+            bins.append(current^)
+            current = List[Int]()
+            size = 0
+        current.append(small[k])
+        size += length
+    if len(current) > 0:
+        bins.append(current^)
+
+    var replaced = Dict[Int, Int]()  # carried index -> bin, for merged bins
+    var merged = List[ManifestFile]()
+    for b in range(len(bins)):
+        if len(bins[b]) < 2:
+            continue
+        var paths = List[String]()
+        for k in range(len(bins[b])):
+            paths.append(carried[bins[b][k]].manifest_path)
+        var blobs = io.read_all_many(paths)
+        var entries = List[ManifestEntry]()
+        var schema = metadata.schema()
+        var spec = metadata.spec()
+        for k in range(len(bins[b])):
+            var m = read_manifest_bytes(blobs[k].copy(), carried[bins[b][k]])
+            if k == 0:
+                schema = m.schema.copy()
+                spec = m.partition_spec.copy()
+            for j in range(len(m.entries)):
+                ref e = m.entries[j]
+                if not e.is_live():
+                    continue
+                entries.append(
+                    ManifestEntry(
+                        STATUS_EXISTING,
+                        e.snapshot_id,
+                        True,
+                        e.sequence_number,
+                        e.file_sequence_number,
+                        e.data_file.copy(),
+                    )
+                )
+        for k in range(len(bins[b])):
+            replaced[bins[b][k]] = b
+        if len(entries) == 0:
+            continue  # nothing live left in any of them: drop them all
+        var w = write_manifest(
+            metadata.format_version,
+            schema,
+            spec,
+            MANIFEST_CONTENT_DATA,
+            snapshot_id,
+            sequence_number,
+            entries,
+        )
+        var path = join_path(_metadata_dir(metadata), uuid4() + "-m1.avro")
+        io.write_all(path, Span(w.bytes))
+        merged.append(
+            w.to_manifest_file(
+                path, spec_id, snapshot_id, sequence_number, 0, False
+            )
+        )
+    if len(replaced) == 0:
+        return carried^
+    var out = List[ManifestFile]()
+    for k in range(len(merged)):
+        out.append(merged[k].copy())
+    for k in range(len(carried)):
+        if k not in replaced:
+            out.append(carried[k].copy())
+    return out^
 
 
 def _total(metadata: TableMetadata, key: String) -> Int64:
@@ -187,7 +325,13 @@ def prepare_append(
         parent_id = parent.snapshot_id
         has_parent = True
         if parent.manifest_list != "":
-            var carried = read_manifest_list_io(io, parent.manifest_list)
+            var carried = merge_small_manifests(
+                io,
+                metadata,
+                snapshot_id,
+                sequence_number,
+                read_manifest_list_io(io, parent.manifest_list),
+            )
             for k in range(len(carried)):
                 manifests.append(carried[k].copy())
 
@@ -350,6 +494,24 @@ def next_metadata_version(metadata: TableMetadata) -> Int:
                 return Int(head) + 1
             except:
                 pass
+    # `v<V>.metadata.json` (Hadoop tables) and `<V>.metadata.json`. The log
+    # length is the last resort only: it is bounded by
+    # `write.metadata.previous-versions-max`, so it stops counting versions.
+    var digits = String("")
+    var nb = name.as_bytes()
+    var start = 1 if name.startswith("v") else 0
+    for k in range(start, len(nb)):
+        if nb[k] >= 48 and nb[k] <= 57:
+            digits += chr(Int(nb[k]))
+        else:
+            if nb[k] != 46:  # "."
+                digits = ""
+            break
+    if digits != "" and name.endswith(".metadata.json"):
+        try:
+            return Int(digits) + 1
+        except:
+            pass
     return len(metadata.metadata_log) + 1
 
 

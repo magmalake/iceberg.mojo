@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Write thirty-six tables with this library — ten appended to, twenty-two
-# deleted from or overwritten, and four with structs, lists and maps in them —
+# Write forty-one tables with this library — ten appended to, twenty-two
+# deleted from or overwritten, four with structs, lists and maps in them, and
+# five whose snapshots it expired (and whose old metadata files it deleted) —
 # then read every one of them with PyIceberg 0.11.1 and DuckDB 1.5.5 and check
 # they agree, cell for cell. Then import a nested *scan* into pyarrow over the
 # Arrow C Data Interface. Finally let PyIceberg *append* to four of them, two

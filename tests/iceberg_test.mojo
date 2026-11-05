@@ -20,6 +20,7 @@ from std.testing import (
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
 from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
+from iceberg.maintain import ExpirePolicy
 from iceberg.io import FileIO, basename, dirname, join_path, strip_scheme
 from iceberg.catalog.filesystem import (
     FilesystemCatalog,
@@ -5252,8 +5253,14 @@ def test_next_metadata_version_reads_the_file_name() raises:
         "/w/db/t/metadata/00007-abc.metadata.json"
     )
     assert_equal(next_metadata_version(m), 8)
+    # Hadoop names count too: the metadata log's length is no version count
+    # once `write.metadata.previous-versions-max` trims it.
     m.metadata_file_location = String("/w/db/t/metadata/v3.metadata.json")
-    assert_equal(next_metadata_version(m), 1, "no leading digits: fall back")
+    assert_equal(next_metadata_version(m), 4)
+    m.metadata_file_location = String("/w/db/t/metadata/3.metadata.json")
+    assert_equal(next_metadata_version(m), 4)
+    m.metadata_file_location = String("/w/db/t/metadata/current.json")
+    assert_equal(next_metadata_version(m), 1, "no version in it: fall back")
     m.metadata_file_location = String("")
     assert_equal(next_metadata_version(m), 1)
     assert_true(metadata_file_name(12).startswith("00012-"))
@@ -6291,6 +6298,239 @@ def test_expire_snapshots_after_a_merge_on_read_delete() raises:
     assert_equal(table.scan().to_table().num_rows(), 16)
     assert_false(table.io.exists(first), "the superseded vector's file goes")
     assert_true(table.io.exists(second), "the live one stays")
+
+
+def _append_rows(mut table: Table, start: Int, n: Int) raises:
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var batches = List[RecordBatch]()
+    batches.append(write_batch(schema, start, n))
+    var tx = table.new_append()
+    tx.add_batches(batches)
+    _ = tx.commit()
+    table.refresh()
+
+
+def _metadata_files(table: Table) raises -> Int:
+    var names = table.io.list_names(dirname(table.metadata_location))
+    var n = 0
+    for k in range(len(names)):
+        if names[k].endswith(".metadata.json"):
+            n += 1
+    return n
+
+
+def test_expire_reads_each_manifest_list_once() raises:
+    """Forty appends, one manifest each, every manifest still current: an
+    expiry reads the forty lists and opens no manifest at all."""
+    var table = build_written_table("expire_linear", "unpartitioned", 2, 40)
+    assert_equal(len(table.metadata.snapshots), 40)
+    table.io.reset_counts()
+    var done = table.expire_snapshots(-1, 5, False)
+    var io = table.io.counts()
+    assert_equal(len(done.expired), 35)
+    assert_equal(done.manifest_lists_read, 40)
+    assert_equal(done.manifests_read, 0, "every manifest is still listed")
+    assert_false(done.reachable)
+    assert_equal(len(done.deleted_files), 0)
+    assert_equal(len(done.deleted_manifests), 35, "the expired lists only")
+    # The lists, the commit's own few requests, nothing per snapshot pair.
+    assert_true(io.reads < 50, String("reads: ", io))
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 5)
+    assert_equal(table.scan().to_table().num_rows(), 240)
+
+
+def test_expire_after_a_partition_is_replaced() raises:
+    """A dynamic overwrite drops the replaced partition's manifests whole
+    (no DELETED entries anywhere); expiry still finds those files."""
+    var table = build_written_table("expire_replace", "ident", 2, 3)
+    var before = table.scan().filter(String('["=","region","eu"]')).plan_files()
+    var old_eu = List[String]()
+    for k in range(len(before)):
+        old_eu.append(before[k].data_file.file_path)
+    assert_true(len(old_eu) > 0)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var one = List[RecordBatch]()
+    one.append(write_batch(schema, 100, 1))
+    _ = table.dynamic_partition_overwrite(one)
+    table.refresh()
+    _append_rows(table, 200, 2)
+    var rows = table.scan().to_table().num_rows()
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_equal(len(done.expired), 4)
+    table.refresh()
+    assert_equal(table.scan().to_table().num_rows(), rows)
+    for k in range(len(old_eu)):
+        assert_false(table.io.exists(old_eu[k]), "the replaced eu file goes")
+    var after = table.scan().plan_files()
+    for k in range(len(after)):
+        assert_true(table.io.exists(after[k].data_file.file_path))
+
+
+def test_expire_keeps_what_a_tag_names() raises:
+    """A tag on an old snapshot keeps it and its files, and makes expiry
+    open every retained manifest instead of taking the one-line shortcut."""
+    var table = build_written_table("expire_tag", "unpartitioned", 2, 3)
+    var tagged = table.metadata.snapshots[0].snapshot_id
+    var first_files = table.scan().use_snapshot(tagged).plan_files()
+    var m = table.metadata.copy()
+    m.refs.append(
+        SnapshotRef(
+            String("v1"), tagged, String("tag"), 0, False, 0, False, 0, False
+        )
+    )
+    table.commit_metadata(m^)
+    _ = table.delete_where(String('["=","region","eu"]'))
+    table.refresh()
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_true(done.reachable)
+    assert_equal(len(done.expired), 2, "the two between the tag and main")
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 2)
+    assert_equal(table.scan().use_snapshot(tagged).to_table().num_rows(), 6)
+    for k in range(len(first_files)):
+        assert_true(table.io.exists(first_files[k].data_file.file_path))
+    assert_equal(table.scan().to_table().num_rows(), 14)
+
+    # And a tag older than max-ref-age-ms goes, taking its snapshot along.
+    var p = ExpirePolicy(-1, 1)
+    p.max_ref_age_ms = 0
+    p.now_ms = table.metadata.last_updated_ms + 1000
+    var gone = table.expire(p)
+    assert_equal(len(gone.removed_refs), 1)
+    assert_equal(gone.removed_refs[0], "v1")
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 1)
+    assert_equal(table.metadata.ref_index(String("v1")), -1)
+    assert_equal(table.scan().to_table().num_rows(), 14)
+
+
+def test_expire_by_table_properties() raises:
+    var table = build_written_table("expire_props", "unpartitioned", 2, 6)
+    table.metadata.properties[
+        String("history.expire.min-snapshots-to-keep")
+    ] = "4"
+    table.metadata.properties[
+        String("history.expire.max-snapshot-age-ms")
+    ] = "0"
+    var done = table.expire_by_properties()
+    assert_equal(len(done.expired), 2)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 4)
+    # The defaults (five days) keep everything this test just wrote.
+    var t2 = build_written_table("expire_props_default", "unpartitioned", 2, 3)
+    assert_equal(len(t2.expire_by_properties().expired), 0)
+
+
+def test_expire_never_touches_pinned_snapshots() raises:
+    var table = build_written_table("expire_pins", "unpartitioned", 2, 5)
+    var pinned = table.metadata.snapshots[1].snapshot_id
+    var p = ExpirePolicy(-1, 1)
+    p.retain.append(pinned)
+    var done = table.expire(p)
+    assert_equal(len(done.expired), 3)
+    table.refresh()
+    assert_equal(len(table.metadata.snapshots), 2)
+    assert_equal(table.scan().use_snapshot(pinned).to_table().num_rows(), 12)
+
+
+def test_metadata_log_is_bounded_and_old_files_deleted() raises:
+    var table = build_written_table("meta_log", "unpartitioned", 2, 1)
+    table.metadata.properties[
+        String("write.metadata.previous-versions-max")
+    ] = "3"
+    table.metadata.properties[
+        String("write.metadata.delete-after-commit.enabled")
+    ] = "true"
+    var first = table.metadata_location
+    for k in range(6):
+        _append_rows(table, 100 + k * 2, 2)
+    assert_equal(len(table.metadata.metadata_log), 3)
+    assert_false(table.io.exists(first), "the oldest metadata file is gone")
+    assert_equal(_metadata_files(table), 4, "three in the log, plus current")
+    for k in range(len(table.metadata.metadata_log)):
+        assert_true(
+            table.io.exists(table.metadata.metadata_log[k].metadata_file)
+        )
+    assert_equal(table.scan().to_table().num_rows(), 18)
+    # A fresh load still finds the newest version.
+    var again = Table.load_local(dirname(dirname(table.metadata_location)))
+    assert_equal(again.metadata_location, table.metadata_location)
+
+    # Off by default: the log is still trimmed, the files stay.
+    var keep = build_written_table("meta_log_keep", "unpartitioned", 2, 1)
+    keep.metadata.properties[
+        String("write.metadata.previous-versions-max")
+    ] = "2"
+    for k in range(4):
+        _append_rows(keep, 100 + k * 2, 2)
+    assert_equal(len(keep.metadata.metadata_log), 2)
+    assert_equal(_metadata_files(keep), 6)
+
+
+def test_commit_cost_does_not_grow_with_history() raises:
+    """A commit looks for one metadata version; it does not list them all."""
+    var table = build_written_table("commit_flat", "unpartitioned", 2, 3)
+    table.io.reset_counts()
+    _append_rows(table, 100, 1)
+    var early = table.io.counts()
+    for k in range(30):
+        _append_rows(table, 200 + k, 1)
+    table.io.reset_counts()
+    _append_rows(table, 300, 1)
+    var late = table.io.counts()
+    assert_equal(late.lists, early.lists, String(early, " vs ", late))
+    assert_equal(late.requests(), early.requests(), String(early, " vs ", late))
+    # Two writers on the same version: the second is refused.
+    var a = Table.load_local(dirname(dirname(table.metadata_location)))
+    var b = Table.load_local(dirname(dirname(table.metadata_location)))
+    _append_rows(a, 400, 1)
+    with assert_raises():
+        b.commit_metadata(b.metadata.copy())
+
+
+def test_appends_merge_small_manifests() raises:
+    """Merge-append: once there are min-count-to-merge small manifests they
+    are folded into one, and an expiry afterwards deletes the small ones
+    and no data file, opening only the merged manifest."""
+    var table = build_written_table("merge_append", "ident", 2, 1)
+    table.metadata.properties[
+        String("commit.manifest.min-count-to-merge")
+    ] = "4"
+    for k in range(7):
+        _append_rows(table, 100 + k * 3, 3)
+    var current = read_manifest_list_io(
+        table.io, table.metadata.current_snapshot().manifest_list
+    )
+    assert_true(len(current) < 5, String(len(current), " manifests"))
+    assert_equal(table.scan().to_table().num_rows(), 6 + 21)
+    var eu = table.scan().filter(String('["=","region","eu"]')).to_table()
+    assert_true(eu.num_rows() > 0)
+    var files = table.scan().plan_files()
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_equal(len(done.deleted_files), 0, "every data file is live")
+    assert_true(len(done.deleted_manifests) > len(done.expired))
+    assert_true(done.manifests_read < len(done.deleted_manifests) + 3)
+    table.refresh()
+    assert_equal(table.scan().to_table().num_rows(), 27)
+    for k in range(len(files)):
+        assert_true(table.io.exists(files[k].data_file.file_path))
+    # Off by property: one manifest per append again.
+    var plain = build_written_table("merge_append_off", "unpartitioned", 2, 1)
+    plain.metadata.properties[
+        String("commit.manifest.min-count-to-merge")
+    ] = "2"
+    plain.metadata.properties[String("commit.manifest-merge.enabled")] = "false"
+    for k in range(3):
+        _append_rows(plain, 100 + k, 1)
+    assert_equal(
+        len(
+            read_manifest_list_io(
+                plain.io, plain.metadata.current_snapshot().manifest_list
+            )
+        ),
+        4,
+    )
 
 
 def test_delete_that_matches_nothing_changes_nothing() raises:

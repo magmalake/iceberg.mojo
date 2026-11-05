@@ -1282,6 +1282,77 @@ def _emit_absent(t, prefix, out):
         slot[1] += 1
 
 
+def _referenced_files(t):
+    """Every file the table's metadata still names: manifest lists,
+    manifests, data and delete files of every retained snapshot."""
+    io = t.io
+    out = set()
+    for snap in t.metadata.snapshots:
+        out.add(snap.manifest_list)
+        for mf in snap.manifests(io):
+            out.add(mf.manifest_path)
+            for e in mf.fetch_manifest_entry(io, discard_deleted=True):
+                out.add(e.data_file.file_path)
+    return {p[len("file://"):] if p.startswith("file://") else p for p in out}
+
+
+def verify_expired_table(name, table_dir, con, expect):
+    """A table this library expired: the rows it had before the expiry, the
+    snapshots the policy kept, every file they name present, and no data or
+    manifest file left that nothing names."""
+    from pyiceberg.table import StaticTable
+
+    meta = latest_metadata(table_dir)
+    doc = json.load(open(meta))
+    t = StaticTable.from_metadata("file://" + meta)
+    want = sorted(expect["ids"])
+    got = sorted(r["id"] for r in t.scan(selected_fields=("id",)).to_arrow().to_pylist())
+    check(got == want, "exp.%s/pyiceberg: ids %s != %s" % (name, got, want))
+    if con is not None:
+        rows = con.execute(
+            "SELECT id FROM iceberg_scan('%s') ORDER BY id" % meta
+        ).fetchall()
+        dgot = [r[0] for r in rows]
+        check(dgot == want, "exp.%s/duckdb: ids %s != %s" % (name, dgot, want))
+    snaps = t.inspect.snapshots().to_pylist()
+    check(
+        len(snaps) == expect["snapshots"],
+        "exp.%s: %d snapshots, expected %d" % (name, len(snaps), expect["snapshots"]),
+    )
+    ids = {s["snapshot-id"] for s in doc["snapshots"]}
+    for e in doc.get("snapshot-log", []):
+        check(e["snapshot-id"] in ids, "exp.%s: snapshot-log names an expired snapshot" % name)
+    check(
+        len(doc.get("metadata-log", [])) == expect["metadata_log"],
+        "exp.%s: metadata-log has %d entries" % (name, len(doc.get("metadata-log", []))),
+    )
+    for e in doc.get("metadata-log", []):
+        path = e["metadata-file"]
+        path = path[len("file://"):] if path.startswith("file://") else path
+        check(os.path.exists(path), "exp.%s: metadata-log names a missing %s" % (name, path))
+    referenced = _referenced_files(t)
+    for path in referenced:
+        check(os.path.exists(path), "exp.%s: %s is referenced but gone" % (name, path))
+    on_disk = set()
+    for root, _dirs, files in os.walk(table_dir):
+        for f in files:
+            if f.endswith((".parquet", ".avro", ".puffin")):
+                on_disk.add(os.path.join(root, f))
+    left = sorted(p for p in on_disk if os.path.abspath(p) not in
+                  {os.path.abspath(r) for r in referenced})
+    check(not left, "exp.%s: files nothing references: %s" % (name, left))
+    md_files = [f for f in os.listdir(os.path.join(table_dir, "metadata"))
+                if f.endswith(".metadata.json")]
+    if doc.get("properties", {}).get(
+            "write.metadata.delete-after-commit.enabled") == "true":
+        check(
+            len(md_files) == expect["metadata_log"] + 1,
+            "exp.%s: %d metadata files with delete-after-commit" % (name, len(md_files)),
+        )
+    return {"name": "exp." + name, "rows": len(want), "snapshots": len(snaps),
+            "files": len(referenced), "metadata_files": len(md_files)}
+
+
 def main():
     warehouse = os.path.abspath(sys.argv[1])
     do_append = "--append-with-pyiceberg" in sys.argv
@@ -1340,6 +1411,32 @@ def main():
             if not os.path.isdir(os.path.join(delns, name, "metadata")):
                 failures.append("del.%s was never written" % name)
                 print("FAIL del.%s: missing" % name)
+
+    expns = os.path.join(warehouse, "exp")
+    if os.path.isdir(expns):
+        expected_exp = 0
+        for name in sorted(os.listdir(expns)):
+            if not name.endswith(".expect.json"):
+                continue
+            expected_exp += 1
+            tname = name[: -len(".expect.json")]
+            with open(os.path.join(expns, name)) as fh:
+                expect = json.load(fh)
+            try:
+                report.append(
+                    verify_expired_table(tname, os.path.join(expns, tname), con, expect)
+                )
+                print("ok   exp.%s" % tname)
+            except Failure as e:
+                failures.append(str(e))
+                print("FAIL exp.%s: %s" % (tname, e))
+            except Exception as e:
+                failures.append("exp.%s: %s" % (tname, e))
+                print("FAIL exp.%s: %s: %s" % (tname, type(e).__name__, e))
+        if expected_exp < 5:
+            failures.append("exp: %d expired tables, expected 5" % expected_exp)
+    else:
+        failures.append("exp: the expired tables were never written")
 
     nest = os.path.join(warehouse, "nest")
     rows_json = os.path.join(nest, "rows.json")
