@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-04
+
 ### Changed
 
 - Needs parquet-mojo with magmalake/parquet.mojo#59 (the streaming
