@@ -179,6 +179,9 @@ from iceberg.manifest import (
     CONTENT_EQUALITY_DELETES,
     MANIFEST_CONTENT_DATA,
     MANIFEST_CONTENT_DELETES,
+    DATA_FILE_WIRE_VERSION,
+    decode_data_files,
+    encode_data_files,
 )
 from iceberg.types import (
     TypeStore,
@@ -8293,3 +8296,282 @@ def test_vector_leaf_matches_the_datum_path() raises:
                         r,
                     ),
                 )
+
+
+# ── DataFile's wire form ────────────────────────────────────────────────────
+# `DataFile.encode`/`decode` carry an entry from the process that wrote the
+# file to the one that commits it. Every field must come back as it went,
+# including the ones a writer leaves at their defaults, so the entry below
+# sets each to something other than its default, and every Datum kind a
+# partition value can be, with the edges an 8-byte copy would get wrong.
+
+
+def _wire_metrics(field_id: Int, salt: Int64) -> ColumnMetrics:
+    return ColumnMetrics(
+        field_id,
+        salt + 1,
+        True,
+        salt + 2,
+        field_id % 2 == 0,
+        salt + 3,
+        True,
+        [UInt8(0), UInt8(0xFF), UInt8(Int(salt) & 0xFF)],
+        field_id % 3 != 0,
+        [UInt8(0x80)],
+        True,
+    )
+
+
+def _wire_partition() raises -> List[Datum]:
+    var out = List[Datum]()
+    out.append(Datum.bool_(True))
+    out.append(Datum.int_(Int64(-2147483648)))
+    out.append(Datum.long_(Int64.MIN))
+    out.append(Datum.long_(Int64.MAX))
+    out.append(Datum.integral(P_DATE, 19723))
+    out.append(Datum.integral(P_TIMESTAMPTZ, -1))
+    out.append(Datum.float_(Float64(0.1)))
+    out.append(Datum.double_(-0.0))
+    # A NaN with a payload of its own, which must come back bit for bit.
+    out.append(Datum.double_(bitcast[DType.float64](Int64(0x7FF8000000ABCDEF))))
+    out.append(Datum.string_("région/ä=b c"))
+    out.append(Datum.string_(""))
+    out.append(Datum.binary_([UInt8(0), UInt8(1), UInt8(0xFE)]))
+    out.append(Datum.fixed_([UInt8(9), UInt8(8), UInt8(7), UInt8(6)]))
+    var u = List[UInt8]()
+    for k in range(16):
+        u.append(UInt8(k * 17))
+    out.append(Datum.uuid_(u^))
+    out.append(Datum.decimal_int(Int64(-12345), 9, 2))
+    out.append(Datum.none())
+    # An invalid value keeps its kind: a null partition value of a typed
+    # field.
+    var null_long = Datum.long_(7)
+    null_long.valid = False
+    out.append(null_long^)
+    return out^
+
+
+def _wire_file() raises -> DataFile:
+    return DataFile(
+        CONTENT_POSITION_DELETES,
+        String("s3://bucket/wh/db/t/data/région=eu/00001-a.parquet"),
+        String("PARQUET"),
+        _wire_partition(),
+        Int64(123456789012),
+        Int64(98765),
+        [_wire_metrics(1, 10), _wire_metrics(2, 20)],
+        [_wire_metrics(1, 30), _wire_metrics(4, 40), _wire_metrics(6, 50)],
+        [UInt8(1), UInt8(2), UInt8(3)],
+        True,
+        [Int64(4), Int64(4096), Int64(1 << 40)],
+        [1, 2, 7],
+        3,
+        True,
+        Int64(5000),
+        True,
+        String("s3://bucket/wh/db/t/data/00000-b.parquet"),
+        True,
+        Int64(64),
+        True,
+        Int64(512),
+        True,
+    )
+
+
+def _same_datum(a: Datum, b: Datum, what: String) raises:
+    assert_equal(Int(a.kind), Int(b.kind), what + " kind")
+    assert_equal(a.i, b.i, what + " i")
+    assert_equal(
+        bitcast[DType.int64](a.f), bitcast[DType.int64](b.f), what + " f bits"
+    )
+    assert_equal(a.s, b.s, what + " s")
+    assert_true(a.b == b.b, what + " b")
+    assert_equal(a.precision, b.precision, what + " precision")
+    assert_equal(a.scale, b.scale, what + " scale")
+    assert_equal(a.length, b.length, what + " length")
+    assert_equal(a.valid, b.valid, what + " valid")
+
+
+def _same_metrics(
+    a: List[ColumnMetrics], b: List[ColumnMetrics], what: String
+) raises:
+    assert_equal(len(a), len(b), what + " count")
+    for k in range(len(a)):
+        ref x = a[k]
+        ref y = b[k]
+        var at = String(what, "[", k, "]")
+        assert_equal(x.field_id, y.field_id, at)
+        assert_equal(x.value_count, y.value_count, at)
+        assert_equal(x.has_value_count, y.has_value_count, at)
+        assert_equal(x.null_value_count, y.null_value_count, at)
+        assert_equal(x.has_null_value_count, y.has_null_value_count, at)
+        assert_equal(x.nan_value_count, y.nan_value_count, at)
+        assert_equal(x.has_nan_value_count, y.has_nan_value_count, at)
+        assert_true(x.lower_bound == y.lower_bound, at + " lower")
+        assert_equal(x.has_lower, y.has_lower, at)
+        assert_true(x.upper_bound == y.upper_bound, at + " upper")
+        assert_equal(x.has_upper, y.has_upper, at)
+
+
+def _same_file(a: DataFile, b: DataFile) raises:
+    assert_equal(a.content, b.content)
+    assert_equal(a.file_path, b.file_path)
+    assert_equal(a.file_format, b.file_format)
+    assert_equal(len(a.partition), len(b.partition))
+    for k in range(len(a.partition)):
+        _same_datum(a.partition[k], b.partition[k], String("partition ", k))
+    assert_equal(a.record_count, b.record_count)
+    assert_equal(a.file_size_in_bytes, b.file_size_in_bytes)
+    _same_metrics(a.column_sizes, b.column_sizes, "column_sizes")
+    _same_metrics(a.metrics, b.metrics, "metrics")
+    assert_true(a.key_metadata == b.key_metadata, "key_metadata")
+    assert_equal(a.has_key_metadata, b.has_key_metadata)
+    assert_true(a.split_offsets == b.split_offsets, "split_offsets")
+    assert_true(a.equality_ids == b.equality_ids, "equality_ids")
+    assert_equal(a.sort_order_id, b.sort_order_id)
+    assert_equal(a.has_sort_order_id, b.has_sort_order_id)
+    assert_equal(a.first_row_id, b.first_row_id)
+    assert_equal(a.has_first_row_id, b.has_first_row_id)
+    assert_equal(a.referenced_data_file, b.referenced_data_file)
+    assert_equal(a.has_referenced_data_file, b.has_referenced_data_file)
+    assert_equal(a.content_offset, b.content_offset)
+    assert_equal(a.has_content_offset, b.has_content_offset)
+    assert_equal(a.content_size_in_bytes, b.content_size_in_bytes)
+    assert_equal(a.has_content_size_in_bytes, b.has_content_size_in_bytes)
+
+
+def test_data_file_wire_form_round_trips_every_field() raises:
+    var f = _wire_file()
+    var bytes = f.to_bytes()
+    assert_equal(Int(bytes[0]), Int(DATA_FILE_WIRE_VERSION))
+    _same_file(f, DataFile.from_bytes(Span(bytes)))
+    # Encoding is deterministic: the same entry, the same bytes.
+    assert_true(DataFile.from_bytes(Span(bytes)).to_bytes() == bytes)
+    # The defaults a writer leaves come back as themselves too.
+    var blank = DataFile(
+        CONTENT_DATA,
+        String("a.parquet"),
+        String("PARQUET"),
+        List[Datum](),
+        0,
+        0,
+        List[ColumnMetrics](),
+        List[ColumnMetrics](),
+        List[UInt8](),
+        False,
+        List[Int64](),
+        List[Int](),
+        0,
+        False,
+        0,
+        False,
+        String(""),
+        False,
+        0,
+        False,
+        0,
+        False,
+    )
+    _same_file(blank, DataFile.from_bytes(Span(blank.to_bytes())))
+
+
+def test_data_file_lists_and_datums_round_trip_in_a_stream() raises:
+    # Embedded in a longer message, as a dista result is: what's before and
+    # after an entry is left alone, and `pos` lands just past it.
+    var files: List[DataFile] = [_wire_file(), _wire_file()]
+    files[1].file_path = String("b.parquet")
+    files[1].partition = List[Datum]()
+    var out: List[UInt8] = [UInt8(0xAA)]
+    encode_data_files(files, out)
+    out.append(UInt8(0xBB))
+    var pos = 1
+    var back = decode_data_files(Span(out), pos)
+    assert_equal(pos, len(out) - 1)
+    assert_equal(len(back), 2)
+    _same_file(files[0], back[0])
+    _same_file(files[1], back[1])
+    var empty = List[UInt8]()
+    encode_data_files(List[DataFile](), empty)
+    pos = 0
+    assert_equal(len(decode_data_files(Span(empty), pos)), 0)
+    # Each Datum on its own.
+    var parts = _wire_partition()
+    for k in range(len(parts)):
+        var b = List[UInt8]()
+        parts[k].encode(b)
+        var p = 0
+        _same_datum(parts[k], Datum.decode(Span(b), p), String("datum ", k))
+        assert_equal(p, len(b))
+
+
+def test_data_file_wire_form_refuses_bad_bytes() raises:
+    var bytes = _wire_file().to_bytes()
+    # Every truncation raises; none reads past the end.
+    for n in range(len(bytes)):
+        var short = List[UInt8](Span(bytes)[0:n])
+        with assert_raises():
+            _ = DataFile.from_bytes(Span(short))
+    # Bytes left over after the entry.
+    var longer = bytes.copy()
+    longer.append(UInt8(0))
+    with assert_raises(contains="bytes after a data file entry"):
+        _ = DataFile.from_bytes(Span(longer))
+    # A version this build doesn't know.
+    var later = bytes.copy()
+    later[0] = DATA_FILE_WIRE_VERSION + 1
+    with assert_raises(contains="wire version"):
+        _ = DataFile.from_bytes(Span(later))
+    # A list count no buffer this size could hold.
+    var huge = List[UInt8]()
+    var n = Int64.MAX
+    for k in range(8):
+        huge.append(UInt8((UInt64(n) >> UInt64(8 * k)) & 0xFF))
+    var pos = 0
+    with assert_raises(contains="doesn't fit"):
+        _ = decode_data_files(Span(huge), pos)
+
+
+def test_data_files_from_write_data_files_commit_after_a_round_trip() raises:
+    """The use it's for: files written in one place, their entries sent as
+    bytes and committed somewhere else, and the table reads them back with
+    their partitions and metrics intact."""
+    var catalog = fresh_catalog("wire-commit")
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                2, 1000, String("region"), parse_transform("identity")
+            )
+        ],
+    )
+    var table = catalog.create_table(String("db"), String("t"), schema, spec)
+    var files = write_data_files(
+        table.io,
+        table.metadata.location,
+        [write_batch(schema, 0, 20)],
+        schema,
+        spec,
+        0,
+        WriteOptions(),
+    )
+    assert_equal(len(files), 5)
+    var wire = List[UInt8]()
+    encode_data_files(files, wire)
+    var pos = 0
+    var back = decode_data_files(Span(wire), pos)
+    assert_equal(len(back), len(files))
+    for k in range(len(files)):
+        _same_file(files[k], back[k])
+    table.commit(
+        prepare_append(table.io, table.metadata, back^, Dict[String, String]())
+    )
+    var reread = catalog.load_table(String("db"), String("t"))
+    assert_equal(reread.scan().to_table().num_rows(), 20)
+    var eu = reread.scan().filter('["=","region","eu"]')
+    assert_equal(len(eu.plan_files()), 1)
+    assert_equal(eu.to_table().num_rows(), 4)
+    # The metrics survived: a filter outside every file's id bounds prunes
+    # all of them.
+    assert_equal(len(reread.scan().filter('[">","id",100]').plan_files()), 0)

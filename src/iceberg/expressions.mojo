@@ -23,6 +23,16 @@ The pieces, in the order a scan uses them:
 from std.collections import Dict
 
 from .json import Json, parse_json, json_quote, substr
+from .wire import (
+    get_bool,
+    get_bytes,
+    get_i64,
+    get_int,
+    put_bool,
+    put_bytes,
+    put_i64,
+    put_int,
+)
 from .schema import Schema, AccessorField
 from .transforms import (
     PartitionSpec,
@@ -953,6 +963,49 @@ struct ColumnMetrics(Copyable, Movable):
     def blank(field_id: Int) -> Self:
         return Self(
             field_id, 0, False, 0, False, 0, False, [], False, [], False
+        )
+
+    def encode(self, mut out: List[UInt8]):
+        """Appends these metrics in iceberg's wire form (`iceberg.wire`),
+        every field in declaration order."""
+        put_int(out, self.field_id)
+        put_i64(out, self.value_count)
+        put_bool(out, self.has_value_count)
+        put_i64(out, self.null_value_count)
+        put_bool(out, self.has_null_value_count)
+        put_i64(out, self.nan_value_count)
+        put_bool(out, self.has_nan_value_count)
+        put_bytes(out, self.lower_bound)
+        put_bool(out, self.has_lower)
+        put_bytes(out, self.upper_bound)
+        put_bool(out, self.has_upper)
+
+    @staticmethod
+    def decode(buf: Span[UInt8, _], mut pos: Int) raises -> Self:
+        """Reads what `encode` wrote at `buf[pos]` and advances `pos`."""
+        var field_id = get_int(buf, pos)
+        var vc = get_i64(buf, pos)
+        var has_vc = get_bool(buf, pos)
+        var nc = get_i64(buf, pos)
+        var has_nc = get_bool(buf, pos)
+        var nanc = get_i64(buf, pos)
+        var has_nanc = get_bool(buf, pos)
+        var lo = get_bytes(buf, pos)
+        var has_lo = get_bool(buf, pos)
+        var hi = get_bytes(buf, pos)
+        var has_hi = get_bool(buf, pos)
+        return Self(
+            field_id,
+            vc,
+            has_vc,
+            nc,
+            has_nc,
+            nanc,
+            has_nanc,
+            lo^,
+            has_lo,
+            hi^,
+            has_hi,
         )
 
 

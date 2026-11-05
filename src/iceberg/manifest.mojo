@@ -61,6 +61,21 @@ from .schema import Schema
 from .transforms import PartitionSpec
 from .types import TypeStore, TK_PRIMITIVE, P_UNKNOWN
 from .values import Datum, datum_from_bytes_prim
+from .wire import (
+    get_bool,
+    get_bytes,
+    get_count,
+    get_i64,
+    get_int,
+    get_string,
+    get_u8,
+    put_bool,
+    put_bytes,
+    put_i64,
+    put_int,
+    put_string,
+    put_u8,
+)
 
 
 # ── manifest content ────────────────────────────────────────────────────────
@@ -191,6 +206,170 @@ struct DataFile(Copyable, Movable, Writable):
             self.record_count,
             ")",
         )
+
+    def encode(self, mut out: List[UInt8]):
+        """Appends this entry in iceberg's wire form (`iceberg.wire`): the
+        version byte `DATA_FILE_WIRE_VERSION`, then every field in
+        declaration order, the partition values and metrics included.
+
+        For sending an entry to another process, such as a data file a
+        worker wrote and a coordinator commits; it isn't a manifest, and no
+        other Iceberg implementation reads it.
+        """
+        put_u8(out, DATA_FILE_WIRE_VERSION)
+        put_int(out, self.content)
+        put_string(out, self.file_path)
+        put_string(out, self.file_format)
+        put_int(out, len(self.partition))
+        for d in self.partition:
+            d.encode(out)
+        put_i64(out, self.record_count)
+        put_i64(out, self.file_size_in_bytes)
+        put_int(out, len(self.column_sizes))
+        for m in self.column_sizes:
+            m.encode(out)
+        put_int(out, len(self.metrics))
+        for m in self.metrics:
+            m.encode(out)
+        put_bytes(out, self.key_metadata)
+        put_bool(out, self.has_key_metadata)
+        put_int(out, len(self.split_offsets))
+        for o in self.split_offsets:
+            put_i64(out, o)
+        put_int(out, len(self.equality_ids))
+        for e in self.equality_ids:
+            put_int(out, e)
+        put_int(out, self.sort_order_id)
+        put_bool(out, self.has_sort_order_id)
+        put_i64(out, self.first_row_id)
+        put_bool(out, self.has_first_row_id)
+        put_string(out, self.referenced_data_file)
+        put_bool(out, self.has_referenced_data_file)
+        put_i64(out, self.content_offset)
+        put_bool(out, self.has_content_offset)
+        put_i64(out, self.content_size_in_bytes)
+        put_bool(out, self.has_content_size_in_bytes)
+
+    @staticmethod
+    def decode(buf: Span[UInt8, _], mut pos: Int) raises -> Self:
+        """Reads what `encode` wrote at `buf[pos]` and advances `pos`.
+
+        Raises on a version other than `DATA_FILE_WIRE_VERSION`, and on a
+        buffer that ends early or holds a length that can't fit.
+        """
+        var version = get_u8(buf, pos)
+        if version != DATA_FILE_WIRE_VERSION:
+            raise Error(
+                "iceberg: a data file entry in wire version ",
+                Int(version),
+                "; this build reads version ",
+                Int(DATA_FILE_WIRE_VERSION),
+            )
+        var content = get_int(buf, pos)
+        var file_path = get_string(buf, pos)
+        var file_format = get_string(buf, pos)
+        var partition = List[Datum]()
+        for _ in range(get_count(buf, pos, _DATUM_MIN_BYTES)):
+            partition.append(Datum.decode(buf, pos))
+        var record_count = get_i64(buf, pos)
+        var size = get_i64(buf, pos)
+        var column_sizes = List[ColumnMetrics]()
+        for _ in range(get_count(buf, pos, _METRICS_MIN_BYTES)):
+            column_sizes.append(ColumnMetrics.decode(buf, pos))
+        var metrics = List[ColumnMetrics]()
+        for _ in range(get_count(buf, pos, _METRICS_MIN_BYTES)):
+            metrics.append(ColumnMetrics.decode(buf, pos))
+        var key_metadata = get_bytes(buf, pos)
+        var has_key_metadata = get_bool(buf, pos)
+        var split_offsets = List[Int64]()
+        for _ in range(get_count(buf, pos, 8)):
+            split_offsets.append(get_i64(buf, pos))
+        var equality_ids = List[Int]()
+        for _ in range(get_count(buf, pos, 8)):
+            equality_ids.append(get_int(buf, pos))
+        var sort_order_id = get_int(buf, pos)
+        var has_sort_order_id = get_bool(buf, pos)
+        var first_row_id = get_i64(buf, pos)
+        var has_first_row_id = get_bool(buf, pos)
+        var referenced = get_string(buf, pos)
+        var has_referenced = get_bool(buf, pos)
+        var content_offset = get_i64(buf, pos)
+        var has_content_offset = get_bool(buf, pos)
+        var content_size = get_i64(buf, pos)
+        var has_content_size = get_bool(buf, pos)
+        return Self(
+            content,
+            file_path^,
+            file_format^,
+            partition^,
+            record_count,
+            size,
+            column_sizes^,
+            metrics^,
+            key_metadata^,
+            has_key_metadata,
+            split_offsets^,
+            equality_ids^,
+            sort_order_id,
+            has_sort_order_id,
+            first_row_id,
+            has_first_row_id,
+            referenced^,
+            has_referenced,
+            content_offset,
+            has_content_offset,
+            content_size,
+            has_content_size,
+        )
+
+    def to_bytes(self) -> List[UInt8]:
+        """This entry's wire form on its own (`encode`)."""
+        var out = List[UInt8]()
+        self.encode(out)
+        return out^
+
+    @staticmethod
+    def from_bytes(buf: Span[UInt8, _]) raises -> Self:
+        """The entry `to_bytes` wrote; raises if `buf` holds anything more."""
+        var pos = 0
+        var f = Self.decode(buf, pos)
+        if pos != len(buf):
+            raise Error(
+                "iceberg: ", len(buf) - pos, " bytes after a data file entry"
+            )
+        return f^
+
+
+comptime DATA_FILE_WIRE_VERSION: UInt8 = 1
+"""The layout `DataFile.encode` writes. A change to it, a field added or
+moved, bumps this, and `DataFile.decode` refuses any other."""
+
+comptime _DATUM_MIN_BYTES = 58
+"""The smallest encoded `Datum`: kind, five integers and a float, two empty
+byte strings, a Bool."""
+
+comptime _METRICS_MIN_BYTES = 53
+"""The smallest encoded `ColumnMetrics`: four integers, two empty byte
+strings, five Bools."""
+
+
+def encode_data_files(files: List[DataFile], mut out: List[UInt8]):
+    """Appends a list of data file entries: their count, then each
+    (`DataFile.encode`)."""
+    put_int(out, len(files))
+    for f in files:
+        f.encode(out)
+
+
+def decode_data_files(
+    buf: Span[UInt8, _], mut pos: Int
+) raises -> List[DataFile]:
+    """Reads what `encode_data_files` wrote at `buf[pos]` and advances
+    `pos`."""
+    var out = List[DataFile]()
+    for _ in range(get_count(buf, pos, 1)):
+        out.append(DataFile.decode(buf, pos))
+    return out^
 
 
 @fieldwise_init

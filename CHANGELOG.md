@@ -10,6 +10,17 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+
+- A wire form for data file entries, so files written in one process can be
+  committed by another (#68): `DataFile.encode` / `DataFile.decode`,
+  `to_bytes` / `from_bytes`, and `encode_data_files` / `decode_data_files`
+  for a list, with `Datum.encode`/`decode` and `ColumnMetrics.encode`/`decode`
+  under them. Every field round-trips, partition values and metrics
+  included; the layout is versioned (`DATA_FILE_WIRE_VERSION`, 1) and
+  bounds-checked. The signatures match dista's `Codec`, without iceberg
+  depending on dista.
+
 ## [0.8.7] - 2026-11-04
 
 ### Changed
