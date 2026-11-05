@@ -28,12 +28,13 @@ jobs:
       contents: read
       pull-requests: read
     with:
-      # The unit tests run in the stable / ubuntu-latest job below.
+      # The test legs below are skipped on release PRs, and the consumer build
+      # is the check (the tests build against sibling checkouts of the other tins).
       task: ""
 
   test:
     needs: release
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.release.outputs.release_only != 'true' }}
     # Stable only. Every FFI sibling below is a pixi git source dependency,
     # and its source build drops a `.mojoc` compiled with 1.2.0 into the
     # environment; a nightly compiler refuses to load it. The `default`
@@ -44,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.release.outputs.release_only == 'true' && '["ubuntu-latest"]' || '["ubuntu-latest", "macos-latest"]') }}
+        os: [ubuntu-latest, macos-latest]
         env: [stable]
     steps:
       # This repo consumes sibling magmalake tins by source path
