@@ -118,7 +118,10 @@ from iceberg.write import (
     WriteOptions,
     _align,
     align_batch,
+    data_file_from_footer,
+    data_file_from_parquet,
     encode_parquet,
+    write_parquet_to,
     write_data_files,
     write_parquet,
     escape_path,
@@ -129,7 +132,7 @@ from iceberg.write import (
 )
 from std.memory import bitcast
 
-from parquet import ParquetReader, RecordBatch
+from parquet import ListSink, ParquetReader, RecordBatch
 from parquet_full import AllCodecs
 from parquet.arrow import (
     AT_FLOAT32,
@@ -7820,6 +7823,65 @@ def test_partitioned_write_reads_from_the_batch() raises:
             var got = String(unsafe_from_utf8=Span(reg.values)[lo:hi])
             assert_equal(got, f.partition[0].s)
     assert_equal(rows, 25)
+
+
+def test_data_file_from_the_writers_footer() raises:
+    """The `data_file` built from the footer the writer hands back is the one
+    reading that footer back out of the bytes gives, field for field — on a
+    flat table and a nested one, with nulls, at four threads."""
+    for which in range(2):
+        var schema = Schema.parse(
+            WRITE_SCHEMA if which == 0 else NESTED_WRITE_SCHEMA
+        )
+        var batch = write_batch(
+            schema, 0, 60
+        ) if which == 0 else nested_write_batch(schema, 0, 60)
+        var a = _align(batch, schema)
+        var opts = WriteOptions()
+        opts.num_workers = 4
+        opts.row_group_rows = 25
+        var sink = ListSink()
+        var written = write_parquet_to(batch.arena, a.roots, schema, opts, sink)
+        var spec = PartitionSpec.unpartitioned()
+        var got = data_file_from_footer(
+            written.metadata,
+            written.file_size,
+            "f",
+            schema,
+            spec,
+            List[Datum](),
+            0,
+            opts,
+        )
+        var want = data_file_from_parquet(
+            sink.bytes, "f", schema, spec, List[Datum](), 0, opts
+        )
+        assert_equal(got.record_count, want.record_count)
+        assert_equal(got.file_size_in_bytes, Int64(len(sink.bytes)))
+        assert_equal(got.file_size_in_bytes, want.file_size_in_bytes)
+        assert_equal(len(got.split_offsets), 3)
+        for k in range(len(want.split_offsets)):
+            assert_equal(got.split_offsets[k], want.split_offsets[k])
+        assert_equal(len(got.column_sizes), len(want.column_sizes))
+        for k in range(len(want.column_sizes)):
+            assert_equal(
+                got.column_sizes[k].field_id, want.column_sizes[k].field_id
+            )
+            assert_equal(
+                got.column_sizes[k].value_count,
+                want.column_sizes[k].value_count,
+            )
+        assert_equal(len(got.metrics), len(want.metrics))
+        for k in range(len(want.metrics)):
+            ref g = got.metrics[k]
+            ref w = want.metrics[k]
+            assert_equal(g.value_count, w.value_count)
+            assert_equal(g.has_null_value_count, w.has_null_value_count)
+            assert_equal(g.null_value_count, w.null_value_count)
+            assert_equal(g.has_lower, w.has_lower)
+            assert_equal(g.has_upper, w.has_upper)
+            _assert_same_bytes(g.lower_bound, w.lower_bound, "lower")
+            _assert_same_bytes(g.upper_bound, w.upper_bound, "upper")
 
 
 def _assert_same_array(a: ArrayData, b: ArrayData, what: String) raises:

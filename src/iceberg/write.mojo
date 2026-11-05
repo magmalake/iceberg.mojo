@@ -18,7 +18,16 @@ incremented so it stays an upper bound, and dropped when it cannot be.
 
 from std.collections import Dict
 
-from parquet import ParquetReader, ParquetWriter, RecordBatch, WriterOptions
+from parquet import (
+    ByteSink,
+    ListSink,
+    ParquetReader,
+    ParquetWriter,
+    RecordBatch,
+    WriterOptions,
+    WrittenFile,
+    build_schema,
+)
 from parquet.arrow import ArrayArena, ArrayData, ArrowType
 from parquet_full import AllCodecs
 from parquet.stats import (
@@ -30,7 +39,8 @@ from parquet.stats import (
     SV_UINT,
     ScalarValue,
 )
-from thrift import CompressionCodec
+from parquet.stats import decode_stats
+from thrift import CompressionCodec, FileMetaData, read_footer
 
 from .expressions import ColumnMetrics
 from .io import FileIO, join_path
@@ -138,12 +148,17 @@ struct WriteOptions(Copyable, Defaultable, Movable):
     """Target *uncompressed* bytes of values per data page."""
     var truncate: Int
     """`write.metadata.metrics.default = truncate(N)`; 0 disables truncation."""
+    var num_workers: Int
+    """Threads that encode each data file's pages (parquet.mojo's
+    `WriterOptions.num_workers`): 1, the default, encodes on the calling
+    thread, 0 on every core. The files are the same either way."""
 
     def __init__(out self):
         self.codec = String("zstd")
         self.row_group_rows = 1024 * 1024
         self.page_size = 1024 * 1024
         self.truncate = DEFAULT_METRICS_TRUNCATE
+        self.num_workers = 1
 
     @staticmethod
     def from_properties(properties: Dict[String, String]) raises -> Self:
@@ -617,14 +632,34 @@ def encode_parquet(
     """One Parquet file of the arrays at `roots`, which are already aligned
     to `schema`. The arena may hold other arrays too; only `roots` and what
     they reach are written."""
+    var sink = ListSink()
+    _ = write_parquet_to(arena, roots, schema, options, sink)
+    var out = List[UInt8]()
+    swap(out, sink.bytes)
+    return out^
+
+
+def write_parquet_to[
+    S: ByteSink
+](
+    arena: ArrayArena,
+    roots: List[Int],
+    schema: Schema,
+    options: WriteOptions,
+    mut sink: S,
+) raises -> WrittenFile:
+    """`encode_parquet`, handing each row group to `sink` as soon as it is
+    encoded, and returning the footer the writer wrote — which is what the
+    `data_file` is built from."""
     var opts = WriterOptions()
     opts.codec = codec_value(options.codec)
     opts.row_group_size = options.row_group_rows
     opts.data_page_size = options.page_size
+    opts.num_workers = options.num_workers
     var writer = ParquetWriter[AllCodecs](opts^)
     writer.add_metadata("iceberg.schema", schema.to_json())
-    writer.write_batch(arena, roots)
-    return writer^.finish()
+    writer.write_batch_to(arena, roots, sink)
+    return writer^.finish_to(sink)
 
 
 def data_file_from_parquet(
@@ -636,18 +671,37 @@ def data_file_from_parquet(
     sort_order_id: Int,
     options: WriteOptions,
 ) raises -> DataFile:
-    """Read back the footer we just wrote and turn it into a `data_file`.
+    """Read back the footer of a file already in memory and turn it into a
+    `data_file`. Only the footer is parsed, from `data` where it lies."""
+    return data_file_from_footer(
+        read_footer(Span(data)),
+        len(data),
+        path,
+        schema,
+        spec,
+        partition,
+        sort_order_id,
+        options,
+    )
 
-    Only the footer is parsed, from `data` where it lies: the reader borrows
-    the bytes rather than taking a copy of the whole file, and nothing past
-    the footer is decoded.
-    """
-    var reader = ParquetReader[AllCodecs].from_span(Span(data))
+
+def data_file_from_footer(
+    meta: FileMetaData,
+    file_size: Int,
+    path: String,
+    schema: Schema,
+    spec: PartitionSpec,
+    partition: List[Datum],
+    sort_order_id: Int,
+    options: WriteOptions,
+) raises -> DataFile:
+    """A `data_file` from a Parquet footer: the one the writer hands back
+    from `finish_to`, so nothing is read back out of the file at all."""
+    var leaves = build_schema(meta.schema).leaves.copy()
     var sizes = List[ColumnMetrics]()
     var metrics = List[ColumnMetrics]()
-    var n_leaves = len(reader.schema.leaves)
-    for leaf in range(n_leaves):
-        ref lc = reader.schema.leaves[leaf]
+    for leaf in range(len(leaves)):
+        ref lc = leaves[leaf]
         var fid = Int(lc.field_id)
         if fid < 0:
             continue
@@ -662,13 +716,16 @@ def data_file_from_parquet(
         var lo = ScalarValue()
         var hi = ScalarValue()
         var have_bounds = False
-        for rg in range(reader.num_row_groups()):
-            ref chunk = reader.meta.row_groups[rg].columns[leaf]
-            if chunk.meta_data:
-                ref cm = chunk.meta_data.value()
-                size += cm.total_compressed_size
-                values += cm.num_values
-            var st = reader.statistics(rg, leaf)
+        for rg in range(len(meta.row_groups)):
+            ref chunk = meta.row_groups[rg].columns[leaf]
+            if not chunk.meta_data:
+                continue
+            ref cm = chunk.meta_data.value()
+            size += cm.total_compressed_size
+            values += cm.num_values
+            if not cm.statistics:
+                continue
+            var st = decode_stats(lc, cm.statistics.value())
             if st.has_null_count:
                 nulls += st.null_count
                 has_nulls = True
@@ -713,13 +770,13 @@ def data_file_from_parquet(
         path,
         String("PARQUET"),
         partition.copy(),
-        Int64(reader.num_rows()),
-        Int64(len(data)),
+        Int64(meta.num_rows),
+        Int64(file_size),
         sizes^,
         metrics^,
         List[UInt8](),
         False,
-        reader.split_offsets(),
+        _split_offsets(meta),
         List[Int](),
         sort_order_id,
         True,
@@ -732,6 +789,26 @@ def data_file_from_parquet(
         0,
         False,
     )
+
+
+def _split_offsets(meta: FileMetaData) -> List[Int64]:
+    """Iceberg's `data_file.split_offsets`: where each row group starts —
+    what `ParquetReader.split_offsets` reports, from the footer alone."""
+    var out = List[Int64](capacity=len(meta.row_groups))
+    for rg in meta.row_groups:
+        if rg.file_offset:
+            out.append(rg.file_offset.value())
+        elif len(rg.columns) and rg.columns[0].meta_data:
+            ref cm = rg.columns[0].meta_data.value()
+            var start = Int64(cm.data_page_offset)
+            if cm.dictionary_page_offset:
+                var d = cm.dictionary_page_offset.value()
+                if d > 0 and d < start:
+                    start = d
+            out.append(start)
+        else:
+            out.append(0)
+    return out^
 
 
 def _scalar_less(a: ScalarValue, b: ScalarValue) raises -> Bool:
@@ -862,7 +939,8 @@ def write_data_files(
 
         # ── one file per group ─────────────────────────────────────────────
         for g in range(len(keys)):
-            var data: List[UInt8]
+            var sink = ListSink()
+            var written: WrittenFile
             if group_count[g] == n:
                 # The whole batch is one file: write the columns from where
                 # they are. That is the batch's own arena when every column
@@ -870,12 +948,12 @@ def write_data_files(
                 if not aligned.all_borrowed() and not aligned.none_borrowed():
                     aligned.adopt_borrowed(batch)
                 if aligned.all_borrowed():
-                    data = encode_parquet(
-                        batch.arena, aligned.roots, schema, options
+                    written = write_parquet_to(
+                        batch.arena, aligned.roots, schema, options, sink
                     )
                 else:
-                    data = encode_parquet(
-                        aligned.own, aligned.roots, schema, options
+                    written = write_parquet_to(
+                        aligned.own, aligned.roots, schema, options, sink
                     )
             else:
                 var arena = ArrayArena()
@@ -901,7 +979,7 @@ def write_data_files(
                                 arena,
                             )
                         )
-                data = encode_parquet(arena, roots, schema, options)
+                written = write_parquet_to(arena, roots, schema, options, sink)
             var dir = join_path(location, "data")
             var rel = partition_path(spec, group_values[g])
             if rel != "":
@@ -909,10 +987,11 @@ def write_data_files(
             var name = uuid4() + "-" + zero_pad(counter, 5) + ".parquet"
             counter += 1
             var path = join_path(dir, name)
-            io.write_all(path, Span(data))
+            io.write_all(path, Span(sink.bytes))
             out.append(
-                data_file_from_parquet(
-                    data,
+                data_file_from_footer(
+                    written.metadata,
+                    written.file_size,
                     path,
                     schema,
                     spec,

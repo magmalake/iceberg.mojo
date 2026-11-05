@@ -12,6 +12,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ### Changed
 
+- Needs parquet-mojo with magmalake/parquet.mojo#59 (the streaming
+  writer). Each data file goes through `ParquetWriter.write_batch_to` and
+  `finish_to`, and its `data_file` is built from the footer the writer
+  returns (`data_file_from_footer`) — nothing is read back out of the
+  bytes. `WriteOptions.num_workers` encodes each file's pages on that many
+  threads; the files are the same at any setting. One GH Archive hour
+  writes in 375 ms on four threads against 783 ms on one (M4).
+
 - `write_data_files` no longer copies a batch on its way to Parquet. A
   column whose name, field id and Arrow type already match the table's
   schema (`tree_matches`) is written straight out of the batch's arena;
