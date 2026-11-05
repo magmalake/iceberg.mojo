@@ -10,6 +10,10 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-05
+
+Test release, not to be merged.
+
 ## [0.9.1] - 2026-11-05
 
 ### Added
