@@ -42,12 +42,13 @@ from .kernels import (
 )
 from .nested import (
     ColumnTree,
-    cast_column,
+    cast_tree,
     default_tree,
     filter_tree,
     find_struct_path,
     flatten_leaf,
     subtree_copy,
+    tree_matches,
 )
 from .manifest import CONTENT_DATA, DataFile
 from .read import _extract
@@ -465,35 +466,137 @@ def align_batch(batch: RecordBatch, schema: Schema) raises -> List[ColumnTree]:
     whose struct has its fields in another order, under other names, or one
     field short still lines up with the table — the same resolution the read
     path does, run the other way.
+
+    Every column comes back in an arena of its own, so this copies each one
+    once. `write_data_files` does not go through here: it uses `_align`,
+    which leaves a column that already matches where it is.
     """
     var out = List[ColumnTree]()
     var cols = schema.columns()
     for k in range(len(cols)):
         ref f = cols[k]
         var at = _column_for(batch, f, f.name)
+        var arena = ArrayArena()
+        var r: Int
         if at < 0:
-            if f.required:
-                raise Error(
-                    "iceberg: the batch has no column for required field '"
-                    + f.name
-                    + "'"
-                )
-            var arena = ArrayArena()
-            var r = default_tree(arena, schema.store, f, batch.num_rows)
-            out.append(ColumnTree(arena^, r))
-            continue
-        var src = ArrayArena()
-        var sr = subtree_copy(batch.arena, batch.roots[at], src)
-        out.append(
-            cast_column(
-                ColumnTree(src^, sr),
+            r = _missing_column(arena, schema, f, batch.num_rows)
+        else:
+            r = cast_tree(
+                batch.arena,
+                batch.roots[at],
                 schema.store,
                 f.type,
                 f.name,
                 f.id,
                 not f.required,
+                arena,
+            )
+        out.append(ColumnTree(arena^, r))
+    return out^
+
+
+def _missing_column(
+    mut arena: ArrayArena, schema: Schema, f: NestedField, rows: Int
+) raises -> Int:
+    if f.required:
+        raise Error(
+            "iceberg: the batch has no column for required field '"
+            + f.name
+            + "'"
+        )
+    return default_tree(arena, schema.store, f, rows)
+
+
+struct _Aligned(Movable):
+    """A batch lined up with the table, copying only what had to change.
+
+    Column `k` is `roots[k]` in the batch's own arena when `borrowed[k]`, and
+    in `own` otherwise: a column whose names, ids and types already match the
+    schema (`tree_matches`) is written from where it is, and only a column
+    that has to be cast, or is missing and gets its default, is built anew.
+    """
+
+    var own: ArrayArena
+    var borrowed: List[Bool]
+    var roots: List[Int]
+
+    def __init__(out self):
+        self.own = ArrayArena()
+        self.borrowed = List[Bool]()
+        self.roots = List[Int]()
+
+    def __init__(out self, *, deinit move: Self):
+        self.own = move.own^
+        self.borrowed = move.borrowed^
+        self.roots = move.roots^
+
+    def all_borrowed(self) -> Bool:
+        for b in self.borrowed:
+            if not b:
+                return False
+        return True
+
+    def none_borrowed(self) -> Bool:
+        for b in self.borrowed:
+            if b:
+                return False
+        return True
+
+    def adopt_borrowed(mut self, batch: RecordBatch) raises:
+        """Copy the borrowed columns into `own`, so that every column is in
+        one arena — what a single Parquet file needs when some columns had
+        to be cast and some did not. Only the borrowed columns are copied."""
+        for k in range(len(self.roots)):
+            if self.borrowed[k]:
+                self.roots[k] = subtree_copy(
+                    batch.arena, self.roots[k], self.own
+                )
+                self.borrowed[k] = False
+
+
+def _align(
+    batch: RecordBatch, schema: Schema, borrow: Bool = True
+) raises -> _Aligned:
+    """`align_batch` without the copies: see `_Aligned`. `borrow=False` casts
+    every column, which is the reference the borrowing path is tested
+    against."""
+    var out = _Aligned()
+    var cols = schema.columns()
+    for k in range(len(cols)):
+        ref f = cols[k]
+        var at = _column_for(batch, f, f.name)
+        if at < 0:
+            out.roots.append(
+                _missing_column(out.own, schema, f, batch.num_rows)
+            )
+            out.borrowed.append(False)
+            continue
+        var src = batch.roots[at]
+        if borrow and tree_matches(
+            batch.arena,
+            src,
+            schema.store,
+            f.type,
+            f.name,
+            f.id,
+            not f.required,
+        ):
+            out.roots.append(src)
+            out.borrowed.append(True)
+            continue
+        out.roots.append(
+            cast_tree(
+                batch.arena,
+                src,
+                schema.store,
+                f.type,
+                f.name,
+                f.id,
+                not f.required,
+                out.own,
             )
         )
+        out.borrowed.append(False)
     return out^
 
 
@@ -505,6 +608,15 @@ def write_parquet(
     var roots = List[Int]()
     for k in range(len(columns)):
         roots.append(subtree_copy(columns[k].arena, columns[k].root, arena))
+    return encode_parquet(arena, roots, schema, options)
+
+
+def encode_parquet(
+    arena: ArrayArena, roots: List[Int], schema: Schema, options: WriteOptions
+) raises -> List[UInt8]:
+    """One Parquet file of the arrays at `roots`, which are already aligned
+    to `schema`. The arena may hold other arrays too; only `roots` and what
+    they reach are written."""
     var opts = WriterOptions()
     opts.codec = codec_value(options.codec)
     opts.row_group_size = options.row_group_rows
@@ -524,8 +636,13 @@ def data_file_from_parquet(
     sort_order_id: Int,
     options: WriteOptions,
 ) raises -> DataFile:
-    """Read back the footer we just wrote and turn it into a `data_file`."""
-    var reader = ParquetReader[AllCodecs](data.copy())
+    """Read back the footer we just wrote and turn it into a `data_file`.
+
+    Only the footer is parsed, from `data` where it lies: the reader borrows
+    the bytes rather than taking a copy of the whole file, and nothing past
+    the footer is decoded.
+    """
+    var reader = ParquetReader[AllCodecs].from_span(Span(data))
     var sizes = List[ColumnMetrics]()
     var metrics = List[ColumnMetrics]()
     var n_leaves = len(reader.schema.leaves)
@@ -658,8 +775,9 @@ def write_data_files(
     var cols = schema.columns()
     var counter = 0
     for b in range(len(batches)):
-        var aligned = align_batch(batches[b], schema)
-        var n = batches[b].num_rows
+        ref batch = batches[b]
+        var aligned = _align(batch, schema)
+        var n = batch.num_rows
         if n == 0:
             continue
 
@@ -706,9 +824,14 @@ def write_data_files(
                         + "' is inside a list or a map, which cannot be"
                         " partitioned on"
                     )
-                source_arrays.append(
-                    flatten_leaf(aligned[slot].arena, aligned[slot].root, path)
-                )
+                if aligned.borrowed[slot]:
+                    source_arrays.append(
+                        flatten_leaf(batch.arena, aligned.roots[slot], path)
+                    )
+                else:
+                    source_arrays.append(
+                        flatten_leaf(aligned.own, aligned.roots[slot], path)
+                    )
                 source_types.append(schema.find_field(src_id).type)
             for r in range(n):
                 var values = List[Datum]()
@@ -739,22 +862,46 @@ def write_data_files(
 
         # ── one file per group ─────────────────────────────────────────────
         for g in range(len(keys)):
-            var columns = List[ColumnTree]()
+            var data: List[UInt8]
             if group_count[g] == n:
-                for k in range(len(aligned)):
-                    columns.append(aligned[k].copy())
-            else:
-                for k in range(len(aligned)):
-                    var arena = ArrayArena()
-                    var r = filter_tree(
-                        aligned[k].arena,
-                        aligned[k].root,
-                        group_keep[g],
-                        group_count[g],
-                        arena,
+                # The whole batch is one file: write the columns from where
+                # they are. That is the batch's own arena when every column
+                # already matched the schema, and no copy is made at all.
+                if not aligned.all_borrowed() and not aligned.none_borrowed():
+                    aligned.adopt_borrowed(batch)
+                if aligned.all_borrowed():
+                    data = encode_parquet(
+                        batch.arena, aligned.roots, schema, options
                     )
-                    columns.append(ColumnTree(arena^, r))
-            var data = write_parquet(columns, schema, options)
+                else:
+                    data = encode_parquet(
+                        aligned.own, aligned.roots, schema, options
+                    )
+            else:
+                var arena = ArrayArena()
+                var roots = List[Int]()
+                for k in range(len(aligned.roots)):
+                    if aligned.borrowed[k]:
+                        roots.append(
+                            filter_tree(
+                                batch.arena,
+                                aligned.roots[k],
+                                group_keep[g],
+                                group_count[g],
+                                arena,
+                            )
+                        )
+                    else:
+                        roots.append(
+                            filter_tree(
+                                aligned.own,
+                                aligned.roots[k],
+                                group_keep[g],
+                                group_count[g],
+                                arena,
+                            )
+                        )
+                data = encode_parquet(arena, roots, schema, options)
             var dir = join_path(location, "data")
             var rel = partition_path(spec, group_values[g])
             if rel != "":
