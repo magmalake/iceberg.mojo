@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-05
+
 ### Added
 
 - A wire form for data file entries, so files written in one process can be
@@ -20,6 +22,11 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   included; the layout is versioned (`DATA_FILE_WIRE_VERSION`, 1) and
   bounds-checked. The signatures match dista's `Codec`, without iceberg
   depending on dista.
+
+### Changed
+
+- Built against deflate-mojo 0.2.0, avro-mojo 0.4.5 and parquet-full-mojo
+  0.1.10, the versions the registry serves.
 
 ## [0.9.0] - 2026-11-04
 
