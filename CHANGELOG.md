@@ -21,6 +21,47 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   bounds-checked. The signatures match dista's `Codec`, without iceberg
   depending on dista.
 
+## [0.9.0] - 2026-11-04
+
+### Changed
+
+- Needs parquet-mojo with magmalake/parquet.mojo#59 (the streaming
+  writer). Each data file goes through `ParquetWriter.write_batch_to` and
+  `finish_to`, and its `data_file` is built from the footer the writer
+  returns (`data_file_from_footer`) — nothing is read back out of the
+  bytes. `WriteOptions.num_workers` encodes each file's pages on that many
+  threads; the files are the same at any setting. One GH Archive hour
+  writes in 375 ms on four threads against 783 ms on one (M4).
+
+- `write_data_files` no longer copies a batch on its way to Parquet. A
+  column whose name, field id and Arrow type already match the table's
+  schema (`tree_matches`) is written straight out of the batch's arena;
+  only a column that has to be cast or renamed, or is missing and gets its
+  default, is built, once, by `cast_tree`. An unpartitioned batch — or one
+  whose rows all land in one partition — is written from where it is
+  instead of through `aligned[k].copy()` and `write_parquet`'s
+  `subtree_copy`, and a partitioned one is filtered straight out of it.
+  The files are byte-for-byte those the copying path wrote. One GH Archive
+  hour (170,233 rows in 50,000-row batches, day-partitioned) now peaks at
+  0.96–1.14 GB instead of 1.86 GB (magmalake/iceberg.mojo#69).
+- `data_file_from_parquet` parses only the footer, over the bytes in place,
+  instead of handing a copy of the whole file to a reader.
+- `align_batch` casts each column once, from the batch, instead of copying
+  it and then casting the copy.
+
+### Added
+
+- `ColumnBuilder.add_bytes`, `add_int`, `add_float` and `add_bool` append
+  a value straight to the column's Arrow buffers, with no `Datum` per cell
+  (mojo-census GAPS.md entry 22), and `take` hands the array over without
+  the copy `build` makes. They mix with `add(Datum)` in order. 250,000
+  `long`s: 1.1 ms, against 1.7 ms to add them as `Datum`s and another
+  ~1.9 ms to build those.
+- `encode_parquet(arena, roots, schema, options)`: one Parquet file of
+  arrays already aligned to the schema, from any arena.
+- `tree_matches`: whether a column is already what `cast_tree` would make
+  of it.
+
 ## [0.8.7] - 2026-11-04
 
 ### Changed

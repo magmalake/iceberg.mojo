@@ -14,11 +14,13 @@ for k in range(n):
 var batch = batch_of([ids^, region^])
 ```
 
-This is deliberately the *slow* side of the library — one tagged value per
-cell, which is exactly what `iceberg.kernels` exists to avoid on the read
-path. It is here because the alternative is asking a caller to lay out
-validity bitmaps and offset buffers by hand, and a batch built once and
-written once is not where the time goes.
+`add(Datum)` is the convenient side — one tagged value per cell, which is
+exactly what `iceberg.kernels` exists to avoid on the read path. A builder
+fed by a parser that already holds the bytes or the integer should use
+`add_bytes` / `add_int` / `add_float` / `add_bool` instead, which append the
+value straight to the Arrow buffers, and `take` the array at the end rather
+than `build` a copy of it. Either way nobody lays out validity bitmaps and
+offset buffers by hand.
 """
 
 from std.memory import bitcast
@@ -34,6 +36,7 @@ from parquet.arrow import (
     AT_FLOAT64,
     AT_LARGE_BINARY,
     AT_LARGE_UTF8,
+    AT_NULL,
     AT_UTF8,
     ArrayArena,
     ArrayData,
@@ -68,7 +71,15 @@ from .values import Datum, datum_from_json_prim
 
 
 struct ColumnBuilder(Copyable, Movable, Sized):
-    """One column's values, before they become an Arrow array."""
+    """One column's values, before they become an Arrow array.
+
+    `add` takes a `Datum` per cell. `add_bytes`, `add_int`, `add_float` and
+    `add_bool` take the value itself and append it straight to the Arrow
+    buffers, with no tagged value at all — what a parser that already holds
+    the bytes or the integer should use. The two may be mixed: `Datum`s wait
+    in `values` and are folded into `array`, in order, before the next direct
+    append and when the column is built.
+    """
 
     var name: String
     var field_id: Int
@@ -78,6 +89,10 @@ struct ColumnBuilder(Copyable, Movable, Sized):
     var length: Int
     var nullable: Bool
     var values: List[Datum]
+    """`Datum`s added since the last direct append, not yet in `array`."""
+    var array: ArrayData
+    """Everything before `values`. Its last validity byte may be short until
+    the column is built."""
 
     def __init__(
         out self,
@@ -89,6 +104,18 @@ struct ColumnBuilder(Copyable, Movable, Sized):
         length: Int = 0,
         nullable: Bool = True,
     ):
+        # A kind with no Arrow type raises when the column is built, as it
+        # always did; a direct append to it raises at once.
+        try:
+            self.array = ArrayData(
+                arrow_type_for(kind, precision, scale, length), name.copy()
+            )
+        except:
+            self.array = ArrayData(ArrowType(AT_NULL), name.copy())
+        self.array.nullable = nullable
+        self.array.field_id = Int32(field_id)
+        if is_var_width_array(self.array):
+            self.array.offsets.append(0)
         self.name = name^
         self.field_id = field_id
         self.kind = kind
@@ -107,6 +134,7 @@ struct ColumnBuilder(Copyable, Movable, Sized):
         self.length = copy.length
         self.nullable = copy.nullable
         self.values = copy.values.copy()
+        self.array = copy.array.copy()
 
     def __init__(out self, *, deinit move: Self):
         self.name = move.name^
@@ -117,6 +145,7 @@ struct ColumnBuilder(Copyable, Movable, Sized):
         self.length = move.length
         self.nullable = move.nullable
         self.values = move.values^
+        self.array = move.array^
 
     @staticmethod
     def of(schema: Schema, field_id: Int) raises -> Self:
@@ -143,24 +172,147 @@ struct ColumnBuilder(Copyable, Movable, Sized):
     def add_null(mut self):
         self.values.append(Datum.none())
 
+    def _fold(mut self) raises:
+        """Move the waiting `Datum`s into `array`, in order."""
+        if len(self.values) == 0:
+            return
+        if self.array.type.id == AT_NULL:
+            # No Arrow type for this kind: raise what building would.
+            _ = arrow_type_for(
+                self.kind, self.precision, self.scale, self.length
+            )
+        for r in range(len(self.values)):
+            append_datum(self.array, self.values[r], self.kind)
+        self.values = List[Datum]()
+
+    @always_inline
+    def _valid_row(mut self) -> Int:
+        var r = self.array.length
+        bit_set(self.array.validity, r, True)
+        self.array.length = r + 1
+        return r
+
+    def add_bytes(mut self, value: Span[UInt8, _]) raises:
+        """A `string` or `binary` value, as its bytes (UTF-8 for a string)."""
+        self._fold()
+        if not is_var_width_array(self.array):
+            raise Error(
+                "iceberg: add_bytes on column '"
+                + self.name
+                + "', which is not a string or binary"
+            )
+        self.array.values.extend(value)
+        if len(self.array.values) > 0x7FFFFFFF:
+            raise Error(
+                "iceberg: column '"
+                + self.name
+                + "' holds more than 2 GiB of values in one batch"
+            )
+        self.array.offsets.append(Int32(len(self.array.values)))
+        _ = self._valid_row()
+
+    def add_int(mut self, value: Int64) raises:
+        """An `int`, `long`, `date`, `time` or timestamp value, in the units
+        the column stores (days, microseconds, nanoseconds)."""
+        self._fold()
+        var id = self.array.type.id
+        var width = self.array.type.fixed_width()
+        if (
+            width == 0
+            or id == AT_BOOL
+            or id == AT_FLOAT32
+            or id == AT_FLOAT64
+            or id == AT_DECIMAL128
+            or id == AT_FIXED_SIZE_BINARY
+        ):
+            raise Error(
+                "iceberg: add_int on column '"
+                + self.name
+                + "', which is not an integer, date, time or timestamp"
+            )
+        var at = len(self.array.values)
+        self.array.values.resize(at + width, 0)
+        var p = self.array.values.unsafe_ptr().unsafe_offset(at)
+        if width == 8:
+            p.unsafe_bitcast[Int64]().unsafe_store[alignment=1](value)
+        elif width == 4:
+            p.unsafe_bitcast[Int32]().unsafe_store[alignment=1](Int32(value))
+        else:
+            var u = UInt64(value)
+            for k in range(width):
+                p.unsafe_store(k, UInt8((u >> UInt64(8 * k)) & 0xFF))
+        _ = self._valid_row()
+
+    def add_float(mut self, value: Float64) raises:
+        """A `float` or `double` value."""
+        self._fold()
+        var id = self.array.type.id
+        if id == AT_FLOAT64:
+            _put_le(self.array.values, bitcast[DType.uint64](value), 8)
+        elif id == AT_FLOAT32:
+            _put_le(
+                self.array.values,
+                UInt64(bitcast[DType.uint32](Float32(value))),
+                4,
+            )
+        else:
+            raise Error(
+                "iceberg: add_float on column '"
+                + self.name
+                + "', which is not a float or double"
+            )
+        _ = self._valid_row()
+
+    def add_bool(mut self, value: Bool) raises:
+        """A `boolean` value."""
+        self._fold()
+        if self.array.type.id != AT_BOOL:
+            raise Error(
+                "iceberg: add_bool on column '"
+                + self.name
+                + "', which is not a boolean"
+            )
+        var r = self.array.length
+        while len(self.array.values) <= r // 8:
+            self.array.values.append(0)
+        if value:
+            self.array.values[r // 8] |= UInt8(1) << UInt8(r % 8)
+        _ = self._valid_row()
+
     def __len__(self) -> Int:
-        return len(self.values)
+        return self.array.length + len(self.values)
 
     def build_tree(self) raises -> ColumnTree:
         """The same array, ready to sit beside a nested one."""
         return ColumnTree(self.build())
 
     def build(self) raises -> ArrayData:
-        return array_from_datums(
-            self.name,
-            self.field_id,
-            self.kind,
-            self.precision,
-            self.scale,
-            self.length,
-            self.nullable,
-            self.values,
-        )
+        """The column as an Arrow array, leaving the builder as it was."""
+        if self.array.length == 0:
+            return array_from_datums(
+                self.name,
+                self.field_id,
+                self.kind,
+                self.precision,
+                self.scale,
+                self.length,
+                self.nullable,
+                self.values,
+            )
+        var a = self.array.copy()
+        for r in range(len(self.values)):
+            append_datum(a, self.values[r], self.kind)
+        finish_array(a)
+        return a^
+
+    def take(deinit self) raises -> ArrayData:
+        """The column as an Arrow array, without `build`'s copy of it."""
+        if self.array.length == 0:
+            return self.build()
+        self._fold()
+        var a = self.array^
+        finish_array(a)
+        return a^
 
 
 def array_from_datums(
@@ -195,6 +347,7 @@ def is_var_width_array(a: ArrayData) -> Bool:
     )
 
 
+@always_inline
 def append_datum(mut a: ArrayData, d: Datum, kind: UInt8) raises:
     """Append one value to a primitive array, growing every buffer it has."""
     var r = a.length

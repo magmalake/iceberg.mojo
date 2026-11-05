@@ -116,7 +116,14 @@ from iceberg.scan import (
 from iceberg.transforms import parse_transform
 from iceberg.write import (
     WriteOptions,
+    _align,
+    align_batch,
+    data_file_from_footer,
+    data_file_from_parquet,
+    encode_parquet,
+    write_parquet_to,
     write_data_files,
+    write_parquet,
     escape_path,
     human_partition_value,
     partition_path,
@@ -125,7 +132,8 @@ from iceberg.write import (
 )
 from std.memory import bitcast
 
-from parquet import RecordBatch
+from parquet import ListSink, ParquetReader, RecordBatch
+from parquet_full import AllCodecs
 from parquet.arrow import (
     AT_FLOAT32,
     AT_FLOAT64,
@@ -7697,6 +7705,258 @@ def test_rest_update_schema() raises:
         String("stale schema update"),
     )
     assert_equal(resp.status, 409)
+
+
+# ── writing without copies ─────────────────────────────────────────────────
+# `write_data_files` leaves a column that already matches the schema in the
+# batch's arena and writes it from there. The file has to be the one the
+# copying path writes, byte for byte, so each case below writes both ways.
+
+
+def _aligned_bytes(
+    batch: RecordBatch, schema: Schema, borrow: Bool
+) raises -> List[UInt8]:
+    var a = _align(batch, schema, borrow)
+    if not a.all_borrowed() and not a.none_borrowed():
+        a.adopt_borrowed(batch)
+    if a.all_borrowed():
+        return encode_parquet(batch.arena, a.roots, schema, WriteOptions())
+    return encode_parquet(a.own, a.roots, schema, WriteOptions())
+
+
+def _assert_same_bytes(a: List[UInt8], b: List[UInt8], what: String) raises:
+    assert_equal(len(a), len(b), what + ": length")
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            assert_equal(Int(a[i]), Int(b[i]), String(what, ": byte ", i))
+
+
+def _assert_borrowed(
+    batch: RecordBatch, schema: Schema, want: List[Bool]
+) raises:
+    var a = _align(batch, schema)
+    assert_equal(len(a.borrowed), len(want))
+    for k in range(len(want)):
+        assert_equal(a.borrowed[k], want[k], String("column ", k))
+
+
+def test_matching_columns_are_written_where_they_are() raises:
+    """A batch built for the table needs no copy at all, flat or nested, and
+    writes the same file as the casting path and the public `align_batch` +
+    `write_parquet` one."""
+    var flat = Schema.parse(WRITE_SCHEMA)
+    var fb = write_batch(flat, 0, 50)
+    var a = _align(fb, flat)
+    assert_true(a.all_borrowed(), "every flat column borrowed")
+    assert_equal(len(a.own.nodes), 0, "nothing built")
+    var want = write_parquet(align_batch(fb, flat), flat, WriteOptions())
+    _assert_same_bytes(_aligned_bytes(fb, flat, True), want, "flat, borrowed")
+    _assert_same_bytes(_aligned_bytes(fb, flat, False), want, "flat, cast")
+
+    var nested = Schema.parse(NESTED_WRITE_SCHEMA)
+    var nb = nested_write_batch(nested, 0, 40)
+    var na = _align(nb, nested)
+    assert_true(na.all_borrowed(), "struct, list and map borrowed")
+    var nwant = write_parquet(align_batch(nb, nested), nested, WriteOptions())
+    _assert_same_bytes(
+        _aligned_bytes(nb, nested, True), nwant, "nested, borrowed"
+    )
+    _assert_same_bytes(_aligned_bytes(nb, nested, False), nwant, "nested, cast")
+
+
+def test_only_mismatched_columns_are_copied() raises:
+    """Reordered columns, one that needs a cast (int into a long field), one
+    under another name but the right id, and two optional ones missing: the
+    first two kinds are cast or renamed, the matching one is borrowed, and the
+    file is the casting path's either way."""
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var region = ColumnBuilder.of(schema, 2)
+    var ids = ColumnBuilder(String("id"), 1, P_INT, nullable=False)
+    var amount = ColumnBuilder(String("AMOUNT"), 3, P_DOUBLE)
+    for i in range(30):
+        region.add_bytes(write_region(i).as_bytes())
+        ids.add_int(Int64(i))
+        if i % 3 == 0:
+            amount.add_null()
+        else:
+            amount.add_float(Float64(i) / 4)
+    var batch = batch_of([region^, ids^, amount^])
+    _assert_borrowed(batch, schema, [False, True, False, False, False])
+    var want = write_parquet(align_batch(batch, schema), schema, WriteOptions())
+    _assert_same_bytes(_aligned_bytes(batch, schema, True), want, "mixed")
+    _assert_same_bytes(_aligned_bytes(batch, schema, False), want, "cast")
+
+
+def test_partitioned_write_reads_from_the_batch() raises:
+    """A partitioned batch filters straight out of the batch's arena; the
+    files still hold every row once, in the right partition."""
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [PartitionField.single(2, 1000, "region", parse_transform("identity"))],
+    )
+    var dir = WRITE_ROOT + "/borrowed-partitions"
+    var io = FileIO.local()
+    try:
+        for p in io.list(dir):
+            io.delete(p)
+    except:
+        pass
+    var files = write_data_files(
+        io,
+        dir,
+        [write_batch(schema, 0, 25)],
+        schema,
+        spec,
+        0,
+        WriteOptions(),
+    )
+    assert_equal(len(files), 5)
+    var rows = 0
+    for f in files:
+        rows += Int(f.record_count)
+        var r = ParquetReader[AllCodecs].open(io.local_path(f.file_path))
+        var t = r.read_table()
+        assert_equal(t.num_rows, Int(f.record_count))
+        ref b = t.batches[0]
+        ref reg = b.arena.nodes[b.roots[1]]
+        for i in range(reg.length):
+            var lo = Int(reg.offsets[i])
+            var hi = Int(reg.offsets[i + 1])
+            var got = String(unsafe_from_utf8=Span(reg.values)[lo:hi])
+            assert_equal(got, f.partition[0].s)
+    assert_equal(rows, 25)
+
+
+def test_data_file_from_the_writers_footer() raises:
+    """The `data_file` built from the footer the writer hands back is the one
+    reading that footer back out of the bytes gives, field for field — on a
+    flat table and a nested one, with nulls, at four threads."""
+    for which in range(2):
+        var schema = Schema.parse(
+            WRITE_SCHEMA if which == 0 else NESTED_WRITE_SCHEMA
+        )
+        var batch = write_batch(
+            schema, 0, 60
+        ) if which == 0 else nested_write_batch(schema, 0, 60)
+        var a = _align(batch, schema)
+        var opts = WriteOptions()
+        opts.num_workers = 4
+        opts.row_group_rows = 25
+        var sink = ListSink()
+        var written = write_parquet_to(batch.arena, a.roots, schema, opts, sink)
+        var spec = PartitionSpec.unpartitioned()
+        var got = data_file_from_footer(
+            written.metadata,
+            written.file_size,
+            "f",
+            schema,
+            spec,
+            List[Datum](),
+            0,
+            opts,
+        )
+        var want = data_file_from_parquet(
+            sink.bytes, "f", schema, spec, List[Datum](), 0, opts
+        )
+        assert_equal(got.record_count, want.record_count)
+        assert_equal(got.file_size_in_bytes, Int64(len(sink.bytes)))
+        assert_equal(got.file_size_in_bytes, want.file_size_in_bytes)
+        assert_equal(len(got.split_offsets), 3)
+        for k in range(len(want.split_offsets)):
+            assert_equal(got.split_offsets[k], want.split_offsets[k])
+        assert_equal(len(got.column_sizes), len(want.column_sizes))
+        for k in range(len(want.column_sizes)):
+            assert_equal(
+                got.column_sizes[k].field_id, want.column_sizes[k].field_id
+            )
+            assert_equal(
+                got.column_sizes[k].value_count,
+                want.column_sizes[k].value_count,
+            )
+        assert_equal(len(got.metrics), len(want.metrics))
+        for k in range(len(want.metrics)):
+            ref g = got.metrics[k]
+            ref w = want.metrics[k]
+            assert_equal(g.value_count, w.value_count)
+            assert_equal(g.has_null_value_count, w.has_null_value_count)
+            assert_equal(g.null_value_count, w.null_value_count)
+            assert_equal(g.has_lower, w.has_lower)
+            assert_equal(g.has_upper, w.has_upper)
+            _assert_same_bytes(g.lower_bound, w.lower_bound, "lower")
+            _assert_same_bytes(g.upper_bound, w.upper_bound, "upper")
+
+
+def _assert_same_array(a: ArrayData, b: ArrayData, what: String) raises:
+    assert_equal(a.length, b.length, what + " length")
+    assert_equal(a.null_count, b.null_count, what + " nulls")
+    assert_equal(a.nullable, b.nullable, what + " nullable")
+    assert_equal(a.field_id, b.field_id, what + " id")
+    assert_equal(a.type.id, b.type.id, what + " type")
+    _assert_same_bytes(a.validity, b.validity, what + " validity")
+    _assert_same_bytes(a.values, b.values, what + " values")
+    assert_equal(len(a.offsets), len(b.offsets), what + " offsets")
+    for i in range(len(a.offsets)):
+        assert_equal(a.offsets[i], b.offsets[i], what + " offset")
+
+
+def test_column_builder_appends_without_datums() raises:
+    """`add_int` / `add_bytes` / `add_float` / `add_bool` build exactly the
+    array `add(Datum)` does, and `take` hands it over without a copy."""
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var by_datum = write_batch(schema, 0, 37)
+    var ids = ColumnBuilder.of(schema, 1)
+    var region = ColumnBuilder.of(schema, 2)
+    var amount = ColumnBuilder.of(schema, 3)
+    var ts = ColumnBuilder.of(schema, 4)
+    var ok = ColumnBuilder.of(schema, 5)
+    for i in range(37):
+        ids.add_int(Int64(i))
+        region.add_bytes(write_region(i).as_bytes())
+        if i % 4 == 0:
+            amount.add_null()
+        else:
+            amount.add_float(Float64(i) * 1.5)
+        ts.add_int(
+            (WRITE_DAY + Int64(i % 3)) * WRITE_MICROS_PER_DAY + Int64(i) * 1000
+        )
+        if i % 5 == 0:
+            ok.add_null()
+        else:
+            ok.add_bool(i % 2 == 0)
+    assert_equal(len(ids), 37)
+    var built = ok.build()
+    var direct: List[ArrayData] = [
+        ids^.take(),
+        region^.take(),
+        amount^.take(),
+        ts^.take(),
+        ok^.take(),
+    ]
+    _assert_same_array(built, direct[4], "build vs take")
+    for k in range(5):
+        _assert_same_array(
+            direct[k],
+            by_datum.arena.nodes[by_datum.roots[k]],
+            String("column ", k),
+        )
+    # The two spellings mixed, in runs and alternating, still keep order.
+    var mixed = ColumnBuilder.of(schema, 2)
+    for i in range(37):
+        if i < 5 or i % 3 == 0:
+            mixed.add(Datum.string_(write_region(i)))
+        else:
+            mixed.add_bytes(write_region(i).as_bytes())
+    assert_equal(len(mixed), 37)
+    _assert_same_array(
+        mixed.build(), by_datum.arena.nodes[by_datum.roots[1]], "mixed build"
+    )
+    _assert_same_array(
+        mixed^.take(), by_datum.arena.nodes[by_datum.roots[1]], "mixed take"
+    )
+    var wrong = ColumnBuilder.of(schema, 2)
+    with assert_raises(contains="not an integer"):
+        wrong.add_int(1)
 
 
 def main() raises:
