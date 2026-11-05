@@ -23,6 +23,9 @@ without downloading the whole file.
 """
 
 from std.collections import Dict
+from std.memory import ArcPointer
+from std.os import listdir
+from std.os.path import exists as path_exists
 
 from objectstore.fileio import (
     AnyInputFile,
@@ -40,6 +43,60 @@ from .json import substr
 
 
 comptime FILE_SCHEME = String("file://")
+
+
+struct IOCounts(Copyable, Defaultable, Movable, Writable):
+    """Requests a `FileIO` (and every copy of it) has made, by kind.
+
+    One whole-file read, one ranged read, one existence check and one listing
+    are each one request on object storage, which is the cost that matters
+    there. `read_all_many` counts each file it reads.
+    """
+
+    var reads: Int
+    var ranged_reads: Int
+    var exists: Int
+    var lists: Int
+    var writes: Int
+    var deletes: Int
+    var bytes_read: Int
+
+    def __init__(out self):
+        self.reads = 0
+        self.ranged_reads = 0
+        self.exists = 0
+        self.lists = 0
+        self.writes = 0
+        self.deletes = 0
+        self.bytes_read = 0
+
+    def requests(self) -> Int:
+        return (
+            self.reads
+            + self.ranged_reads
+            + self.exists
+            + self.lists
+            + self.writes
+            + self.deletes
+        )
+
+    def write_to(self, mut writer: Some[Writer]):
+        writer.write(
+            "reads=",
+            self.reads,
+            " ranged=",
+            self.ranged_reads,
+            " exists=",
+            self.exists,
+            " lists=",
+            self.lists,
+            " writes=",
+            self.writes,
+            " deletes=",
+            self.deletes,
+            " bytes=",
+            self.bytes_read,
+        )
 
 
 def strip_scheme(location: String) -> String:
@@ -75,14 +132,26 @@ struct FileIO(Copyable, Movable):
     that a warehouse can be moved without rewriting metadata. Absolute
     locations — anything with a scheme or a leading `/` — are untouched.
     """
+    var _counts: ArcPointer[IOCounts]
+    """Shared by every copy, so a table's reads add up wherever they happen."""
 
     def __init__(out self):
         self.resolver = FileIOResolver()
         self.base_location = ""
+        self._counts = ArcPointer(IOCounts())
 
     def __init__(out self, var resolver: FileIOResolver):
         self.resolver = resolver^
         self.base_location = ""
+        self._counts = ArcPointer(IOCounts())
+
+    # ── accounting ─────────────────────────────────────────────────────────
+    def counts(self) -> IOCounts:
+        """What this `FileIO` and its copies have requested so far."""
+        return self._counts[].copy()
+
+    def reset_counts(self):
+        self._counts[] = IOCounts()
 
     @staticmethod
     def local() -> Self:
@@ -154,11 +223,16 @@ struct FileIO(Copyable, Movable):
         return self.resolver.new_input(self.absolute(location))
 
     def read_all(self, location: String) raises -> List[UInt8]:
-        return self.resolver.new_input(self.absolute(location)).read_all()
+        var data = self.resolver.new_input(self.absolute(location)).read_all()
+        self._counts[].reads += 1
+        self._counts[].bytes_read += len(data)
+        return data^
 
     def read_range(
         self, location: String, offset: Int, length: Int
     ) raises -> List[UInt8]:
+        self._counts[].ranged_reads += 1
+        self._counts[].bytes_read += length
         return self.resolver.new_input(self.absolute(location)).read_range(
             offset, length
         )
@@ -168,6 +242,7 @@ struct FileIO(Copyable, Movable):
     ) raises -> List[List[UInt8]]:
         """Several ranges of one file, in order. On object storage nearby
         ranges are coalesced and the rest fetched at once."""
+        self._counts[].ranged_reads += len(ranges)
         return self.resolver.new_input(self.absolute(location)).read_ranges(
             ranges
         )
@@ -180,6 +255,8 @@ struct FileIO(Copyable, Movable):
         var abs = List[String](capacity=len(locations))
         for ref loc in locations:
             abs.append(self.absolute(loc))
+        for ref r in ranges:
+            self._counts[].ranged_reads += len(r)
         return self.resolver.read_ranges_many(abs, ranges)
 
     def read_all_many(
@@ -189,7 +266,11 @@ struct FileIO(Copyable, Movable):
         var abs = List[String](capacity=len(locations))
         for ref loc in locations:
             abs.append(self.absolute(loc))
-        return self.resolver.read_all_many(abs)
+        var out = self.resolver.read_all_many(abs)
+        self._counts[].reads += len(out)
+        for ref d in out:
+            self._counts[].bytes_read += len(d)
+        return out^
 
     def length(self, location: String) raises -> Int:
         return self.resolver.new_input(self.absolute(location)).length()
@@ -199,6 +280,7 @@ struct FileIO(Copyable, Movable):
         return String(StringSlice(unsafe_from_utf8=Span(raw)))
 
     def exists(self, location: String) -> Bool:
+        self._counts[].exists += 1
         try:
             return self.resolver.new_input(self.absolute(location)).exists()
         except:
@@ -210,6 +292,7 @@ struct FileIO(Copyable, Movable):
 
     def write_all(self, location: String, data: Span[UInt8, _]) raises:
         """Overwrite `location` with `data`, creating parents as needed."""
+        self._counts[].writes += 1
         self.resolver.new_output(self.absolute(location)).overwrite(data)
 
     def write_new(self, location: String, data: Span[UInt8, _]) raises:
@@ -221,6 +304,7 @@ struct FileIO(Copyable, Movable):
         itself calls out — so `FilesystemCatalog` refuses to commit over an
         object store without being told to.
         """
+        self._counts[].writes += 1
         self.resolver.new_output(self.absolute(location)).create(data)
 
     def write_text(self, location: String, text: String) raises:
@@ -235,6 +319,7 @@ struct FileIO(Copyable, Movable):
         `build` as the host — so a *relative* local location has to lose its
         scheme before an object store's URI parsing gets hold of it.
         """
+        self._counts[].deletes += 1
         var target = self.resolver.resolve(self.absolute(location))
         if is_local_location(target):
             target = strip_scheme(target)
@@ -243,6 +328,7 @@ struct FileIO(Copyable, Movable):
     # ── listing ────────────────────────────────────────────────────────────
     def list(self, prefix: String) raises -> List[String]:
         """Every location under `prefix`, as full URIs."""
+        self._counts[].lists += 1
         return self.resolver.list(self.absolute(prefix))
 
     def list_names(self, directory: String) raises -> List[String]:
@@ -253,9 +339,11 @@ struct FileIO(Copyable, Movable):
         A local directory is listed directly.
         """
         var out = List[String]()
+        var seen = Dict[String, Bool]()
         var prefix = directory
         while prefix.endswith("/"):
             prefix = substr(prefix, 0, prefix.byte_length() - 1)
+        self._counts[].lists += 1
         var entries = self.resolver.list(self.absolute(prefix) + "/")
         var resolved = self.resolver.resolve(self.absolute(prefix))
         while resolved.endswith("/"):
@@ -272,13 +360,46 @@ struct FileIO(Copyable, Movable):
             var rest = substr(e, cut, e.byte_length())
             var slash = rest.find("/")
             var name = rest if slash < 0 else substr(rest, 0, slash)
-            var seen = False
-            for j in range(len(out)):
-                if out[j] == name:
-                    seen = True
-                    break
-            if not seen:
+            if name not in seen:
+                seen[name] = True
                 out.append(name^)
+        return out^
+
+    def list_names_with_prefix(
+        self, directory: String, name_prefix: String
+    ) raises -> List[String]:
+        """The files directly in `directory` whose names start with
+        `name_prefix`.
+
+        On object storage this is one `LIST` of that key prefix, so its cost
+        does not grow with the number of other files in the directory, which
+        is what lets a commit look for one metadata version without listing
+        every version there is. A local directory is read directly.
+        """
+        var dir = directory
+        while dir.endswith("/"):
+            dir = substr(dir, 0, dir.byte_length() - 1)
+        self._counts[].lists += 1
+        var out = List[String]()
+        var resolved = self.resolver.resolve(self.absolute(dir))
+        if is_local_location(resolved):
+            var path = strip_scheme(resolved)
+            if not path_exists(path):
+                return out^
+            var names = listdir(path)
+            for k in range(len(names)):
+                if names[k].startswith(name_prefix):
+                    out.append(names[k])
+            return out^
+        var entries = self.resolver.list(self.absolute(dir) + "/" + name_prefix)
+        var cut = resolved.byte_length() + 1
+        for k in range(len(entries)):
+            ref e = entries[k]
+            if not e.startswith(resolved) or e.byte_length() <= cut:
+                continue
+            var rest = substr(e, cut, e.byte_length())
+            if rest.find("/") < 0 and rest.startswith(name_prefix):
+                out.append(rest^)
         return out^
 
 

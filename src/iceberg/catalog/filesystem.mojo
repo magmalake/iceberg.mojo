@@ -39,7 +39,18 @@ from ..delete import (
     prepare_equality_delete,
     prepare_overwrite,
 )
-from ..maintain import ExpireResult, delete_expired_files, expire_snapshots
+from ..maintain import (
+    ExpirePolicy,
+    ExpireResult,
+    delete_expired_files,
+    expire_with_policy,
+)
+from ..metadata_log import (
+    delete_after_commit,
+    delete_metadata_files,
+    record_previous,
+    trim_metadata_log,
+)
 from ..read import ScanOptions
 from ..io import FileIO, basename, dirname, join_path, strip_scheme
 from ..json import substr
@@ -55,7 +66,7 @@ from ..scan import TableScan
 from ..schema import Schema
 from ..transforms import PartitionSpec, SortOrder
 from ..update_schema import UpdateSchema, prepare_schema_update
-from ..util import now_ms, uuid4
+from ..util import now_ms, uuid4, zero_pad
 from ..write import WriteOptions, write_data_files
 
 
@@ -114,9 +125,11 @@ def read_metadata_file(io: FileIO, location: String) raises -> TableMetadata:
 def read_version_hint(io: FileIO, metadata_dir: String) raises -> Int:
     """The integer in `version-hint.text`, or -1 when there is no hint."""
     var path = join_path(metadata_dir, VERSION_HINT)
-    if not io.exists(path):
+    var text: String
+    try:
+        text = io.read_text(path)
+    except:
         return -1
-    var text = io.read_text(path)
     var digits = String("")
     var b = text.as_bytes()
     for k in range(len(b)):
@@ -173,14 +186,9 @@ def find_latest_metadata(io: FileIO, table_location: String) raises -> String:
 
     var hint = read_version_hint(io, metadata_dir)
     if hint >= 0:
-        var candidates = [
-            join_path(metadata_dir, "v" + String(hint) + METADATA_SUFFIX),
-            join_path(metadata_dir, String(hint) + METADATA_SUFFIX),
-            join_path(metadata_dir, "v" + String(hint) + GZ_METADATA_SUFFIX),
-        ]
-        for k in range(len(candidates)):
-            if io.exists(candidates[k]):
-                return candidates[k]
+        var found = latest_from_version(io, metadata_dir, hint)
+        if found != "":
+            return found^
 
     # Highest version wins; ties are broken by `last-updated-ms`.
     #
@@ -221,6 +229,93 @@ def find_latest_metadata(io: FileIO, table_location: String) raises -> String:
             # An unreadable candidate is not a reason to fail discovery.
             continue
     return best^
+
+
+def _hadoop_names(version: Int) -> List[String]:
+    return [
+        "v" + String(version) + METADATA_SUFFIX,
+        String(version) + METADATA_SUFFIX,
+        "v" + String(version) + GZ_METADATA_SUFFIX,
+    ]
+
+
+def metadata_files_of_version(
+    io: FileIO, metadata_dir: String, version: Int, hadoop: Bool = False
+) raises -> List[String]:
+    """The metadata files of one version, as paths: `<V>-<uuid>` names found
+    with one prefix listing, and with `hadoop`, `v<V>.metadata.json` and its
+    spellings checked by name too.
+
+    One request (plus three with `hadoop`) however many versions the
+    directory holds, which is what keeps a commit's cost flat as a table's
+    history grows.
+    """
+    var out = List[String]()
+    var names = io.list_names_with_prefix(
+        metadata_dir, zero_pad(version, 5) + "-"
+    )
+    for k in range(len(names)):
+        if _metadata_version_of(names[k]) == version:
+            out.append(join_path(metadata_dir, names[k]))
+    if hadoop:
+        var spelled = _hadoop_names(version)
+        for k in range(len(spelled)):
+            var path = join_path(metadata_dir, spelled[k])
+            if io.exists(path):
+                out.append(path^)
+    return out^
+
+
+def _newest_of(io: FileIO, var paths: List[String]) -> String:
+    """One version's files: the one with the latest `last-updated-ms`."""
+    if len(paths) == 0:
+        return String("")
+    if len(paths) == 1:
+        return paths[0]
+    _sort_names(paths)
+    var best = paths[0]
+    var best_updated: Int64 = -1
+    for k in range(len(paths)):
+        try:
+            var m = read_metadata_file(io, paths[k])
+            if m.last_updated_ms > best_updated:
+                best_updated = m.last_updated_ms
+                best = paths[k]
+        except:
+            continue
+    return best^
+
+
+def _is_hadoop_name(name: String) -> Bool:
+    return name.startswith("v") or name.find("-") < 0
+
+
+def latest_from_version(
+    io: FileIO, metadata_dir: String, version: Int
+) raises -> String:
+    """The newest metadata file at or after `version`, or "" when that
+    version has no file.
+
+    Versions are dense — every commit writes the one after the one it read —
+    so the newest is found by stepping forward from a known one until a
+    version is missing: a request or two per step, never a listing of the
+    whole directory.
+    """
+    var found = _newest_of(
+        io, metadata_files_of_version(io, metadata_dir, version, True)
+    )
+    if found == "":
+        return found^
+    var hadoop = _is_hadoop_name(basename(found))
+    var v = version + 1
+    while True:
+        var next = _newest_of(
+            io, metadata_files_of_version(io, metadata_dir, v, hadoop)
+        )
+        if next == "":
+            return found^
+        found = next^
+        v += 1
 
 
 def _metadata_version_of(name: String) -> Int:
@@ -287,9 +382,19 @@ struct Table(Copyable, Movable):
         return TableScan(self.metadata.copy(), self.io.copy())
 
     def refresh(mut self) raises:
-        var path = find_latest_metadata(
-            self.io, dirname(self.metadata_location)
-        )
+        """Reload, stepping forward from the version this table already has
+        (or from `version-hint.text`, when that is further on): no listing
+        of the metadata directory."""
+        var dir = dirname(self.metadata_location)
+        var mine = _metadata_version_of(basename(self.metadata_location))
+        var hint = read_version_hint(self.io, dir)
+        var path = String("")
+        if hint > mine:
+            path = latest_from_version(self.io, dir, hint)
+        if path == "" and mine >= 0:
+            path = latest_from_version(self.io, dir, mine)
+        if path == "":
+            path = find_latest_metadata(self.io, dir)
         self.metadata = read_metadata_file(self.io, path)
         self.metadata_location = path^
 
@@ -412,19 +517,47 @@ struct Table(Copyable, Movable):
     ) raises -> ExpireResult:
         """Drop old snapshots and the files nothing points at any more.
 
+        `older_than_ms` is an age cut (negative: none) and `keep_last` the
+        fewest ancestors each branch keeps; refs keep their own settings.
+        """
+        return self.expire(ExpirePolicy(older_than_ms, keep_last), dry_run)
+
+    def expire_by_properties(
+        mut self, dry_run: Bool = False
+    ) raises -> ExpireResult:
+        """Expire by the table's own `history.expire.*` properties (Java's
+        defaults where unset: five days, at least one snapshot)."""
+        return self.expire(ExpirePolicy.from_properties(self.metadata), dry_run)
+
+    def expire(
+        mut self, policy: ExpirePolicy, dry_run: Bool = False
+    ) raises -> ExpireResult:
+        """Expire by `policy`.
+
         The pruned metadata is committed **first** and the files go after, so
         an interruption leaves orphans rather than a snapshot with holes in
-        it. `dry_run` stops after the decision and returns the list.
+        it. A concurrent commit makes this reload and decide again: the files
+        to delete are only ever decided from the metadata that was committed.
+        `dry_run` stops after the decision and returns the list.
         """
-        var decided = expire_snapshots(
-            self.io, self.metadata, older_than_ms, keep_last, dry_run
-        )
-        var result = decided[1].copy()
-        if dry_run or len(result.expired) == 0:
+        var attempt = 0
+        while True:
+            var decided = expire_with_policy(
+                self.io, self.metadata, policy, dry_run
+            )
+            var result = decided[1].copy()
+            if dry_run or len(result.expired) + len(result.removed_refs) == 0:
+                return result^
+            try:
+                self.commit_metadata(decided[0].copy())
+            except e:
+                attempt += 1
+                if attempt > 4:
+                    raise e
+                self.refresh()
+                continue
+            _ = delete_expired_files(self.io, result)
             return result^
-        self.commit_metadata(decided[0].copy())
-        _ = delete_expired_files(self.io, result)
-        return result^
 
     def update_schema(mut self, update: UpdateSchema) raises -> Schema:
         """Commit schema changes; returns the new current schema.
@@ -465,30 +598,41 @@ struct Table(Copyable, Movable):
         """
         var dir = dirname(self.metadata_location)
         # The version we are about to write is derived from the file we read,
-        # so that file has to still be the newest one. A `<V>-<uuid>` name
-        # cannot collide on its own — the uuid makes every writer's name
-        # unique — so this comparison, not the create, is what detects a
-        # concurrent commit. It is a check-then-act and therefore racy in the
-        # window between them; the spec says as much about filesystem tables,
-        # which is why a catalog exists.
-        var latest = find_latest_metadata(self.io, dir)
-        if basename(latest) != basename(self.metadata_location):
+        # so that file has to still be the newest one: nobody may have written
+        # the next version yet. A `<V>-<uuid>` name cannot collide on its own
+        # — the uuid makes every writer's name unique — so this check, not
+        # the create, is what detects a concurrent commit. It is a
+        # check-then-act and therefore racy in the window between them; the
+        # spec says as much about filesystem tables, which is why a catalog
+        # exists.
+        #
+        # It used to list the whole metadata directory, twice per commit,
+        # which made every commit slower than the last. Looking for one
+        # version is one prefix listing, and `version-hint.text` covers the
+        # case the listing cannot: a writer so far behind that the version
+        # after its own was deleted by `delete-after-commit`.
+        var version = next_metadata_version(metadata)
+        var hadoop = _is_hadoop_name(basename(self.metadata_location))
+        var ahead = metadata_files_of_version(self.io, dir, version, hadoop)
+        var hint = read_version_hint(self.io, dir)
+        if len(ahead) > 0 or hint >= version:
             raise Error(
-                "iceberg: another writer committed "
-                + basename(latest)
+                "iceberg: another writer committed version "
+                + String(version)
                 + " while this commit was based on "
                 + basename(self.metadata_location)
             )
-        var version = next_metadata_version(metadata)
+        record_previous(
+            metadata, self.metadata_location, self.metadata.last_updated_ms
+        )
+        var forgotten = trim_metadata_log(metadata)
         var path = join_path(dir, metadata_file_name(version))
         var doc = metadata.to_json()
         self.io.write_new(path, doc.as_bytes())
         # And nobody else claimed the same version in the meantime.
-        var clashes = 0
-        var names = self.io.list_names(dir)
-        for k in range(len(names)):
-            if _metadata_version_of(names[k]) == version:
-                clashes += 1
+        var clashes = len(
+            metadata_files_of_version(self.io, dir, version, hadoop)
+        )
         if clashes > 1:
             try:
                 self.io.delete(path)
@@ -509,6 +653,10 @@ struct Table(Copyable, Movable):
             )
         except:
             pass
+        # Only now, with the new metadata in place, can what fell off the
+        # metadata log go.
+        if len(forgotten) > 0 and delete_after_commit(metadata):
+            _ = delete_metadata_files(self.io, forgotten)
         self.metadata = metadata^
         self.metadata.metadata_file_location = path
         self.metadata_location = path^

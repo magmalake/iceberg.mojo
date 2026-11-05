@@ -109,6 +109,9 @@ check = { depends-on = ["test", "cli", "lint"] }
 build-test = { cmd = "mkdir -p build && mojo build tests/iceberg_test.mojo $ICEBERG_INCLUDES -o build/iceberg-test" }
 cli = { cmd = "mkdir -p build && mojo build src/main.mojo $ICEBERG_INCLUDES -o build/iceberg-mojo" }
 bench = { cmd = "bash bench/run_bench.sh" }
+# Snapshot expiry and commit cost on a long hourly history (5,000 snapshots,
+# kept to 168): `pixi run bench-expiry [<dir> <snapshots>]`.
+bench-expiry = { cmd = "mkdir -p build && mojo build bench/bench_expiry.mojo $ICEBERG_INCLUDES -o build/bench-expiry && rm -rf build/bench-expiry-wh && ./build/bench-expiry build/bench-expiry-wh 5000 --keep 168" }
 # Per-stage profile of a full scan: where the milliseconds actually go.
 profile = { cmd = "mkdir -p build && mojo build bench/profile_scan.mojo $ICEBERG_INCLUDES -o build/iceberg-profile && ICEBERG_BENCH_ROOT=${ICEBERG_BENCH_ROOT:-build/bench-warehouse} ./build/iceberg-profile" }
 # The Arrow C Data Interface, from a nested scan into pyarrow. macOS wants

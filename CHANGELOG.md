@@ -10,6 +10,67 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Changed
+
+- **Snapshot expiry is linear, not quadratic** (magmalake/mojo-census GAPS #27).
+  It used to read every retained snapshot's manifest list and every manifest on
+  it, with no cache and `List` membership: snapshots x manifests reads (591,513
+  and 57 s on a local 1,000-snapshot table; ~600,000 S3 GETs on a real one).
+  Every manifest list is now read once, in batches; only the manifests expired
+  snapshots list and no retained one does are opened; and a retained manifest
+  is opened only when it could hold one of their files live (on one line of
+  history: one written by the snapshot that dropped such a manifest). The same
+  table: 1,097 reads and 0.27 s; 5,000 snapshots: 9,826 reads and 1.3 s
+  (`bench/bench_expiry.mojo`). With branches, tags or snapshots off the
+  current line, every retained manifest is opened once.
+- **Retention follows the spec.** Each branch keeps its head, its last
+  `min-snapshots-to-keep` and its ancestors younger than the age cut (the
+  ref's own `min-snapshots-to-keep` / `max-snapshot-age-ms` first); tags keep
+  their snapshot; refs older than `max-ref-age-ms` are removed (never `main`);
+  a snapshot no ref reaches is kept only by age. `keep_last` is now a floor
+  per branch rather than on the table's total. The snapshot log loses every
+  entry up to the last expired one, and statistics files of expired snapshots
+  are removed and deleted.
+- **A filesystem commit no longer lists the metadata directory** (twice). It
+  looks for the version it is about to write with one prefix listing
+  (`FileIO.list_names_with_prefix`) and reads `version-hint.text`, which
+  catches a writer so far behind that the next version was deleted; loading
+  and `refresh()` step forward from the hint or the version in hand. A
+  commit's requests stay flat with history (8 locally, at 30 versions or
+  3,000). `next_metadata_version` also reads `v<N>.metadata.json` names
+  rather than falling back to the metadata log's length.
+- **Appends fold small manifests** (merge-append, as Java's default append):
+  once there are `commit.manifest.min-count-to-merge` (100) small data
+  manifests of the default spec, they are rewritten into manifests of up to
+  `commit.manifest.target-size-bytes` (8 MB). One manifest per commit made the
+  manifest list every commit rewrites grow for ever: on 5,000 snapshots,
+  expired to 168, a commit took 30 ms; it takes 5.9 ms.
+  `commit.manifest-merge.enabled=false` keeps the old behaviour; v3 tables are
+  not folded yet.
+
+### Added
+
+- `write.metadata.previous-versions-max` (100) bounds the `metadata-log` on
+  every commit (filesystem and SQL catalogs), and
+  `write.metadata.delete-after-commit.enabled` deletes the metadata files
+  that fell off it after the commit succeeds (`iceberg.metadata_log`).
+- `history.expire.max-snapshot-age-ms`, `history.expire.min-snapshots-to-keep`
+  and `history.expire.max-ref-age-ms` drive `Table.expire_by_properties()`;
+  `Table.expire(ExpirePolicy)` takes a policy, with `retain` for snapshot ids
+  never to expire. `ExpireResult` reports `removed_refs`,
+  `deleted_statistics`, `manifest_lists_read`, `manifests_read` and whether
+  every retained manifest had to be read (`reachable`). `Table.expire*`
+  reloads and decides again when another writer commits first.
+- `FileIO.counts()` / `reset_counts()`: the requests a `FileIO` and its copies
+  made, by kind (`IOCounts`).
+- `bench/bench_expiry.mojo` (`pixi run bench-expiry`): a long hourly history,
+  its commit cost as it grows, and an expiry's requests and time.
+- The write-interop job expires five tables (copy-on-write, merge-on-read v3
+  deletion vectors, a partition overwrite, merged manifests, and old metadata
+  deleted after commit) and has PyIceberg 0.11.1 and DuckDB 1.5.5 read them
+  back: the same rows as before, every file the retained snapshots name still
+  there, and none that nothing names.
+
 ## [0.9.1] - 2026-11-05
 
 ### Added

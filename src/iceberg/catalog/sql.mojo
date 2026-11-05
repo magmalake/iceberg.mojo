@@ -58,6 +58,11 @@ from ._sqldriver import (
     is_unique_violation,
     sqlite_path_from_uri,
 )
+from ..metadata_log import (
+    delete_after_commit,
+    delete_metadata_files,
+    trim_metadata_log,
+)
 from ..append import (
     AppendResult,
     metadata_file_name,
@@ -699,10 +704,13 @@ struct SqlCatalog(Movable):
             var new_path = join_path(
                 dirname(loaded.metadata_location), metadata_file_name(version)
             )
+            var forgotten = trim_metadata_log(result.metadata)
             self.io.write_new(new_path, result.metadata.to_json().as_bytes())
             if self._guarded_swap(
                 namespace, name, loaded.metadata_location, new_path
             ):
+                if len(forgotten) > 0 and delete_after_commit(result.metadata):
+                    _ = delete_metadata_files(self.io, forgotten)
                 var out = loaded.copy()
                 out.metadata = result.metadata.copy()
                 out.metadata.metadata_file_location = new_path
@@ -777,10 +785,13 @@ struct SqlCatalog(Movable):
             var new_path = join_path(
                 dirname(loaded.metadata_location), metadata_file_name(version)
             )
+            var forgotten = trim_metadata_log(result.metadata)
             self.io.write_new(new_path, result.metadata.to_json().as_bytes())
             if self._guarded_swap(
                 namespace, name, loaded.metadata_location, new_path
             ):
+                if len(forgotten) > 0 and delete_after_commit(result.metadata):
+                    _ = delete_metadata_files(self.io, forgotten)
                 var out = loaded.copy()
                 out.metadata = result.metadata.copy()
                 out.metadata.metadata_file_location = new_path
@@ -824,10 +835,13 @@ struct SqlCatalog(Movable):
             var new_path = join_path(
                 dirname(loaded.metadata_location), metadata_file_name(version)
             )
+            var forgotten = trim_metadata_log(c.metadata)
             self.io.write_new(new_path, c.metadata.to_json().as_bytes())
             if self._guarded_swap(
                 namespace, name, loaded.metadata_location, new_path
             ):
+                if len(forgotten) > 0 and delete_after_commit(c.metadata):
+                    _ = delete_metadata_files(self.io, forgotten)
                 var out = loaded.copy()
                 out.metadata = c.metadata.copy()
                 out.metadata.metadata_file_location = new_path
