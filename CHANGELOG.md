@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-05
+
 ### Changed
 
 - **Snapshot expiry is linear, not quadratic** (magmalake/mojo-census GAPS #27).
