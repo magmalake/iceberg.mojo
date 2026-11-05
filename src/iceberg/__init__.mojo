@@ -97,6 +97,7 @@ from iceberg.maintain import (
     expire_snapshots,
 )
 from iceberg.manifest import (
+    DATA_FILE_WIRE_VERSION,
     DataFile,
     Manifest,
     ManifestEntry,
@@ -105,6 +106,8 @@ from iceberg.manifest import (
     read_manifest_io,
     read_manifest_list,
     read_manifest_list_io,
+    decode_data_files,
+    encode_data_files,
 )
 from iceberg.manifest_write import (
     WrittenManifest,

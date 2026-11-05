@@ -339,6 +339,28 @@ _ = tx.commit()
   may not have landed, and only a reload can say.
 - **`iceberg.batch`** turns Mojo values into an Arrow `RecordBatch`, for
   callers whose data is not already Arrow.
+- **Data files written elsewhere.** `write_data_files` writes Parquet files
+  without committing them and returns their `DataFile` entries, so one
+  process can write and another commit. `DataFile.encode` / `DataFile.decode`
+  (with `to_bytes` / `from_bytes`, and `encode_data_files` /
+  `decode_data_files` for a list) carry an entry between them as bytes:
+  every field, partition values and column metrics included, in a versioned
+  little-endian layout (`iceberg.wire`, `DATA_FILE_WIRE_VERSION`) that a
+  reader refuses rather than misreads when the versions differ. The methods
+  have the shape of dista's `Codec`, so a type wrapping a list of entries
+  conforms with two one-line methods; iceberg itself doesn't depend on dista.
+
+  ```mojo
+  # on a worker
+  var files = write_data_files(table.io, table.metadata.location, batches,
+      table.metadata.schema(), table.metadata.spec(), 0, WriteOptions())
+  var wire = List[UInt8]()
+  encode_data_files(files, wire)
+  # where the commit happens
+  var pos = 0
+  table.commit(prepare_append(table.io, table.metadata,
+      decode_data_files(Span(wire), pos), Dict[String, String]()))
+  ```
 
 ### Delete and overwrite
 
@@ -1083,7 +1105,8 @@ pixi run verify-pg-catalog  # the same, over PostgreSQL
 | `iceberg.transforms` | `Transform`, `PartitionSpec`, `SortOrder`, `bucket_of` |
 | `iceberg.expressions` | `parse_filter`, `bind`, projections, the two evaluators |
 | `iceberg.metadata` | `TableMetadata`, `Snapshot`, `SnapshotRef`, snapshot selection |
-| `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile`, `ManifestCache` |
+| `iceberg.manifest` | `read_manifest_list_io`, `read_manifest_io`, `DataFile` (with `encode`/`decode`), `encode_data_files`, `decode_data_files`, `ManifestCache` |
+| `iceberg.wire` | the byte primitives of `DataFile`'s wire form |
 | `iceberg.puffin` | `PuffinFile`, `PuffinWriter`, `BlobMetadata`, `read_deletion_vector` |
 | `iceberg.kernels` | the columnar kernels: `cast_array`, `constant_array`, `filter_array`, `concat_into` |
 | `iceberg.nested` | the same kernels for a struct/list/map tree: `cast_column`, `filter_tree`, `concat_tree`, `cell_json`, `flatten_leaf` |

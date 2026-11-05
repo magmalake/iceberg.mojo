@@ -33,6 +33,22 @@ from .json import (
     substr,
     format_double,
 )
+from .wire import (
+    get_bool,
+    get_bytes,
+    get_f64,
+    get_i64,
+    get_int,
+    get_string,
+    get_u8,
+    put_bool,
+    put_bytes,
+    put_f64,
+    put_i64,
+    put_int,
+    put_string,
+    put_u8,
+)
 from .types import (
     P_BOOLEAN,
     P_INT,
@@ -188,6 +204,34 @@ struct Datum(Copyable, Movable, Writable):
         if self.kind == P_UUID:
             return json_quote(uuid_text(self.b))
         return json_quote(hex_text(self.b))
+
+    def encode(self, mut out: List[UInt8]):
+        """Appends this value in iceberg's wire form (`iceberg.wire`): every
+        field, in declaration order, so a value decodes to exactly itself,
+        including a NaN's payload and an invalid value's leftovers."""
+        put_u8(out, self.kind)
+        put_i64(out, self.i)
+        put_f64(out, self.f)
+        put_string(out, self.s)
+        put_bytes(out, self.b)
+        put_int(out, self.precision)
+        put_int(out, self.scale)
+        put_int(out, self.length)
+        put_bool(out, self.valid)
+
+    @staticmethod
+    def decode(buf: Span[UInt8, _], mut pos: Int) raises -> Self:
+        """Reads what `encode` wrote at `buf[pos]` and advances `pos`."""
+        var kind = get_u8(buf, pos)
+        var i = get_i64(buf, pos)
+        var f = get_f64(buf, pos)
+        var s = get_string(buf, pos)
+        var b = get_bytes(buf, pos)
+        var precision = get_int(buf, pos)
+        var scale = get_int(buf, pos)
+        var length = get_int(buf, pos)
+        var valid = get_bool(buf, pos)
+        return Self(kind, i, f, s^, b^, precision, scale, length, valid)
 
 
 # ── ordering ────────────────────────────────────────────────────────────────
