@@ -528,6 +528,101 @@ def cast_tree(
     return dst.add(out^)
 
 
+def _same_arrow_type(a: ArrowType, b: ArrowType) -> Bool:
+    return (
+        a.id == b.id
+        and a.byte_width == b.byte_width
+        and a.precision == b.precision
+        and a.scale == b.scale
+        and a.unit == b.unit
+        and a.tz == b.tz
+        and a.extension == b.extension
+    )
+
+
+def tree_matches(
+    src: ArrayArena,
+    node: Int,
+    store: TypeStore,
+    ti: Int,
+    name: String,
+    field_id: Int,
+    nullable: Bool,
+) -> Bool:
+    """Is this column already what `cast_tree` would make of it?
+
+    True only when every node has the table's name, field id and Arrow type,
+    a container has the nullability it would be given, and a nested column's
+    children are the table's fields in the table's order — so that writing
+    the column as it is and writing `cast_tree`'s copy of it give the same
+    file. Anything this cannot vouch for answers False and takes the cast.
+    """
+    ref t = store.nodes[ti]
+    ref s = src.nodes[node]
+    if s.name != name or s.field_id != Int32(field_id):
+        return False
+    if t.kind == TK_PRIMITIVE:
+        # `cast_array` keeps a primitive's nullability and retags it with the
+        # table's type, so the type is all that has to agree.
+        if is_nested_arrow(s.type):
+            return False
+        try:
+            return _same_arrow_type(s.type, arrow_type_of(store, ti))
+        except:
+            return False
+    if s.nullable != nullable:
+        return False
+
+    if t.kind == TK_STRUCT:
+        if not _same_arrow_type(s.type, ArrowType(AT_STRUCT)):
+            return False
+        if len(s.children) != len(t.fields):
+            return False
+        for k in range(len(t.fields)):
+            ref f = t.fields[k]
+            if not tree_matches(
+                src, s.children[k], store, f.type, f.name, f.id, not f.required
+            ):
+                return False
+        return True
+
+    if len(s.offsets) == 0 or len(s.children) != 1:
+        return False
+    if t.kind == TK_LIST:
+        if not _same_arrow_type(s.type, ArrowType(AT_LIST)):
+            return False
+        return tree_matches(
+            src,
+            s.children[0],
+            store,
+            t.element,
+            ELEMENT_NAME,
+            t.element_id,
+            not t.element_required,
+        )
+
+    # A map. `cast_tree` rebuilds its entries struct under the canonical name
+    # with no id and no validity; none of those reach the file — the writer
+    # names the group `key_value` itself, and a non-nullable struct's
+    # validity is never read — so only the entries' shape has to agree.
+    if not _same_arrow_type(s.type, ArrowType(AT_MAP)):
+        return False
+    ref e = src.nodes[s.children[0]]
+    if e.type.id != AT_STRUCT or e.nullable or len(e.children) != 2:
+        return False
+    return tree_matches(
+        src, e.children[0], store, t.key, KEY_NAME, t.key_id, False
+    ) and tree_matches(
+        src,
+        e.children[1],
+        store,
+        t.value,
+        VALUE_NAME,
+        t.value_id,
+        not t.value_required,
+    )
+
+
 def _child_by_id(src: ArrayArena, node: Int, id: Int) -> Int:
     ref kids = src.nodes[node].children
     for k in range(len(kids)):
