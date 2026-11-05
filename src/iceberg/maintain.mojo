@@ -334,9 +334,8 @@ def choose_expired(
     A ref's head is never a candidate, and each branch keeps at least
     `keep_last` of its ancestors. A negative `older_than_ms` is no age limit.
     """
-    return (
-        plan_expiry(metadata, ExpirePolicy(older_than_ms, keep_last)).expired^
-    )
+    var plan = plan_expiry(metadata, ExpirePolicy(older_than_ms, keep_last))
+    return plan.expired.copy()
 
 
 def _is_pure_add(mf: ManifestFile) -> Bool:
