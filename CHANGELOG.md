@@ -10,6 +10,19 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent filesystem commits no longer duplicate or lose a snapshot.**
+  Writers racing on a metadata version used to write their
+  `<V>-<uuid>.metadata.json` first and delete it on seeing a clash, so a reader
+  could load a loser's file in that moment and commit the next version on top
+  of it: the loser's retry then appended its rows a second time, or a commit
+  that had won was dropped (orca.mojo#164). A commit now claims the version
+  with a `<V>-<uuid>.<ms>.claim` file first and writes its metadata only if no
+  other claim or metadata file of that version is there, so readers only ever
+  see a winner's metadata. A claim older than a minute (a writer that died) is
+  ignored and removed.
+
 ## [0.11.0] - 2026-11-06
 
 ### Added

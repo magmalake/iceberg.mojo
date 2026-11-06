@@ -23,8 +23,12 @@ from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
 from iceberg.maintain import ExpirePolicy
 from iceberg.io import FileIO, basename, dirname, join_path, strip_scheme
 from iceberg.catalog.filesystem import (
+    CLAIM_STALE_MS,
     FilesystemCatalog,
     Table,
+    claim_file_name,
+    metadata_files_of_version,
+    rivals_of_version,
     find_latest_metadata,
     read_metadata_file,
     read_version_hint,
@@ -96,7 +100,7 @@ from iceberg.batch import (
     batch_of,
     batch_of_columns,
 )
-from iceberg.util import now_ms, random_long, uuid4
+from iceberg.util import now_ms, random_long, uuid4, zero_pad
 from iceberg.update_schema import (
     UpdateSchema,
     prepare_schema_update,
@@ -6487,6 +6491,44 @@ def test_commit_cost_does_not_grow_with_history() raises:
     _append_rows(a, 400, 1)
     with assert_raises():
         b.commit_metadata(b.metadata.copy())
+
+
+def test_a_commit_claims_its_version_before_writing_metadata() raises:
+    """A writer that finds another's claim on its version backs out without
+    writing a metadata file of it, so no reader can load a commit that
+    lost (orca.mojo#164); a stale claim, from a writer that died, doesn't
+    block a commit and is removed; a commit leaves no claim behind."""
+    var table = build_written_table("commit_claims", "unpartitioned", 2, 3)
+    var dir = dirname(table.metadata_location)
+    var a = Table.load_local(dirname(dir))
+    var version = next_metadata_version(a.metadata)
+    var rival = join_path(dir, claim_file_name(version, now_ms()))
+    a.io.write_new(rival, String("").as_bytes())
+    with assert_raises(contains="claimed version"):
+        a.commit_metadata(a.metadata.copy())
+    assert_equal(len(metadata_files_of_version(a.io, dir, version)), 0)
+    assert_equal(
+        rivals_of_version(a.io, dir, version, False, String(""), now_ms()),
+        1,
+        "only the rival's claim is left",
+    )
+    assert_equal(a.metadata_location, table.metadata_location)
+
+    a.io.delete(rival)
+    var stale = join_path(
+        dir, claim_file_name(version, now_ms() - 2 * CLAIM_STALE_MS)
+    )
+    a.io.write_new(stale, String("").as_bytes())
+    a.commit_metadata(a.metadata.copy())
+    assert_false(a.io.exists(stale), "the stale claim is removed")
+    assert_equal(len(metadata_files_of_version(a.io, dir, version)), 1)
+    var left = a.io.list_names_with_prefix(dir, zero_pad(version, 5) + "-")
+    assert_equal(len(left), 1, "no claim is left: " + String(len(left)))
+    assert_true(left[0].endswith(".metadata.json"))
+
+    # A writer still on the old version is refused before it claims.
+    with assert_raises(contains="another writer committed"):
+        table.commit_metadata(table.metadata.copy())
 
 
 def test_appends_merge_small_manifests() raises:

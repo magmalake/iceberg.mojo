@@ -266,6 +266,84 @@ def metadata_files_of_version(
     return out^
 
 
+comptime CLAIM_SUFFIX = String(".claim")
+comptime CLAIM_STALE_MS: Int64 = 60_000
+"""How old a claim on a metadata version is when its writer is taken to
+have died before finishing its commit."""
+
+
+def claim_file_name(version: Int, at_ms: Int64) -> String:
+    """`<V>-<uuid>.<ms>.claim`: a writer's claim on metadata version `V`,
+    made at `at_ms`. Readers ignore it: it isn't a `*.metadata.json`."""
+    return (
+        zero_pad(version, 5)
+        + "-"
+        + uuid4()
+        + "."
+        + String(at_ms)
+        + CLAIM_SUFFIX
+    )
+
+
+def _claim_ms(name: String) -> Int64:
+    """When the claim `name` was made, or -1 if it isn't a claim."""
+    if not name.endswith(CLAIM_SUFFIX):
+        return -1
+    var stem = substr(name, 0, name.byte_length() - CLAIM_SUFFIX.byte_length())
+    var dot = stem.rfind(".")
+    if dot < 0:
+        return -1
+    try:
+        return Int64(Int(substr(stem, dot + 1, stem.byte_length())))
+    except:
+        return -1
+
+
+def rivals_of_version(
+    io: FileIO,
+    metadata_dir: String,
+    version: Int,
+    hadoop: Bool,
+    mine: String,
+    now: Int64,
+) raises -> Int:
+    """What stands in the way of the claim `mine` on `version`: the other
+    claims on it and its metadata files, found with one prefix listing (and
+    with `hadoop`, `v<V>.metadata.json` and its spellings checked by name).
+    Claims older than `CLAIM_STALE_MS` don't count, and are removed."""
+    var n = 0
+    var names = io.list_names_with_prefix(
+        metadata_dir, zero_pad(version, 5) + "-"
+    )
+    for k in range(len(names)):
+        if names[k] == mine:
+            continue
+        if _metadata_version_of(names[k]) == version:
+            n += 1
+            continue
+        var at = _claim_ms(names[k])
+        if at < 0:
+            continue
+        if now - at > CLAIM_STALE_MS:
+            _remove_claim(io, join_path(metadata_dir, names[k]))
+            continue
+        n += 1
+    if hadoop:
+        var spelled = _hadoop_names(version)
+        for k in range(len(spelled)):
+            if io.exists(join_path(metadata_dir, spelled[k])):
+                n += 1
+    return n
+
+
+def _remove_claim(io: FileIO, path: String):
+    """Deletes a claim; one left behind is ignored once it's stale."""
+    try:
+        io.delete(path)
+    except:
+        pass
+
+
 def _newest_of(io: FileIO, var paths: List[String]) -> String:
     """One version's files: the one with the latest `last-updated-ms`."""
     if len(paths) == 0:
@@ -590,21 +668,31 @@ struct Table(Copyable, Movable):
     def commit_metadata(mut self, var metadata: TableMetadata) raises:
         """Persist table metadata as a new `<V>-<uuid>.metadata.json`.
 
-        The new file is written with *create* semantics — it must not already
-        exist — which is what makes two writers racing on the same version
-        detectable. A local filesystem really provides that; an object store
-        does not, and the spec says so, so this is unsafe over `s3://` in
-        exactly the way every other filesystem-table writer is.
+        Writers racing on version `V` settle it before any of them writes a
+        metadata file: each writes a claim (`<V>-<uuid>.<ms>.claim`), lists
+        the version's files, and goes on only if it finds no other claim and
+        no metadata file of `V`; otherwise it removes its claim and raises,
+        having written nothing a reader could load. Of two claims, the later
+        one's listing sees the earlier, so at most one writer goes on; it
+        writes its metadata file and then removes its claim.
+
+        Readers never see a loser's metadata. They did when the metadata
+        file was itself the claim: a reader could load it in the moment
+        before its writer saw the clash and deleted it, and commit the next
+        version on top of it, so a commit its writer retried landed twice,
+        or one that won was lost (orca.mojo#164).
+
+        A claim older than a minute is from a writer that died before
+        finishing and is ignored (and removed). This is still a
+        check-then-act protocol: it needs a listing that sees every write
+        before it (a local filesystem, or S3 since 2020), and is unsafe over
+        an object store that lacks one, as every filesystem-table writer is.
         """
         var dir = dirname(self.metadata_location)
         # The version we are about to write is derived from the file we read,
         # so that file has to still be the newest one: nobody may have written
-        # the next version yet. A `<V>-<uuid>` name cannot collide on its own
-        # — the uuid makes every writer's name unique — so this check, not
-        # the create, is what detects a concurrent commit. It is a
-        # check-then-act and therefore racy in the window between them; the
-        # spec says as much about filesystem tables, which is why a catalog
-        # exists.
+        # the next version yet. This only saves a stale writer its claim; the
+        # claim is what detects a concurrent commit.
         #
         # It used to list the whole metadata directory, twice per commit,
         # which made every commit slower than the last. Looking for one
@@ -628,23 +716,32 @@ struct Table(Copyable, Movable):
         var forgotten = trim_metadata_log(metadata)
         var path = join_path(dir, metadata_file_name(version))
         var doc = metadata.to_json()
-        self.io.write_new(path, doc.as_bytes())
-        # And nobody else claimed the same version in the meantime.
-        var clashes = len(
-            metadata_files_of_version(self.io, dir, version, hadoop)
-        )
-        if clashes > 1:
-            try:
-                self.io.delete(path)
-            except:
-                pass
+        var claim = claim_file_name(version, now_ms())
+        var claim_path = join_path(dir, claim)
+        self.io.write_new(claim_path, String("").as_bytes())
+        var rivals: Int
+        try:
+            rivals = rivals_of_version(
+                self.io, dir, version, hadoop, claim, now_ms()
+            )
+        except e:
+            _remove_claim(self.io, claim_path)
+            raise e^
+        if rivals > 0:
+            _remove_claim(self.io, claim_path)
             raise Error(
                 "iceberg: "
-                + String(clashes)
-                + " writers wrote version "
+                + String(rivals + 1)
+                + " writers claimed version "
                 + String(version)
                 + "; reload and retry"
             )
+        try:
+            self.io.write_new(path, doc.as_bytes())
+        except e:
+            _remove_claim(self.io, claim_path)
+            raise e^
+        _remove_claim(self.io, claim_path)
         # `version-hint.text` is advisory: a reader that cannot find the file
         # it names falls back to listing, which is why it is written after.
         try:
