@@ -10,6 +10,17 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+
+- **A compression level for data files.** `WriteOptions.compression_level` and
+  the table property `write.parquet.compression-level` (Iceberg's own name) set
+  the ZSTD level, 1 to 22; unset keeps the codec default. Higher is smaller and
+  slower to write, and readers see no difference. It needs parquet.mojo's
+  `WriterOptions.compression_level`.
+- `WriteOptions.use_dictionary` and `write.parquet.dict-size-bytes=0` to switch
+  dictionary encoding off. Dictionary encoding was always on, still decided per
+  column chunk by the writer.
+
 ## [0.10.0] - 2026-11-05
 
 ### Changed
