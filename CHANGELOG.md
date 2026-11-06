@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-06
+
 ### Added
 
 - **A compression level for data files.** `WriteOptions.compression_level` and
