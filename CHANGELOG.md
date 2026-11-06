@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-06
+
 ### Fixed
 
 - **Concurrent filesystem commits no longer duplicate or lose a snapshot.**
