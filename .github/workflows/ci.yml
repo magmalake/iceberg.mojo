@@ -94,9 +94,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: magmalake/parquet.mojo
-          # TEMPORARY: the branch with WriterOptions.compression_level
-          # (magmalake/parquet.mojo#65). Drop this line once it is on main.
-          ref: compression-level
           path: parquet.mojo
 
       # parquet.mojo re-exports the Arrow layer from here, so its own sources
@@ -249,9 +246,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: magmalake/parquet.mojo
-          # TEMPORARY: the branch with WriterOptions.compression_level
-          # (magmalake/parquet.mojo#65). Drop this line once it is on main.
-          ref: compression-level
           path: parquet.mojo
 
       # parquet.mojo re-exports the Arrow layer from here, so its own sources
