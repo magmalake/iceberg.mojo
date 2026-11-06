@@ -8068,6 +8068,63 @@ def test_partitioned_write_reads_from_the_batch() raises:
     assert_equal(rows, 25)
 
 
+def _level_file(
+    schema: Schema, codec: String, level: Int, dictionary: Bool
+) raises -> List[UInt8]:
+    var batch = write_batch(schema, 0, 20000)
+    var opts = WriteOptions()
+    opts.codec = codec
+    opts.compression_level = level
+    opts.use_dictionary = dictionary
+    return write_parquet(align_batch(batch, schema), schema, opts)
+
+
+def _assert_ids_read_back(bytes: List[UInt8], n: Int) raises:
+    var r = ParquetReader[AllCodecs](bytes.copy())
+    var t = r.read_table()
+    assert_equal(t.num_rows, n)
+    ref b = t.batches[0]
+    ref ids = b.arena.nodes[b.roots[0]]
+    assert_equal(Int(ids.length), n)
+
+
+def test_compression_level_and_dictionary_options() raises:
+    """The ZSTD level and the dictionary switch reach the Parquet writer: a
+    higher level is smaller, no dictionary is larger, and every variant reads
+    back."""
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var fast = _level_file(schema, "zstd", 1, True)
+    var slow = _level_file(schema, "zstd", 19, True)
+    var dflt = _level_file(schema, "zstd", 0, True)
+    assert_true(len(slow) < len(fast), String(len(slow), " vs ", len(fast)))
+    assert_true(len(dflt) != len(slow))
+    _assert_ids_read_back(fast, 20000)
+    _assert_ids_read_back(slow, 20000)
+    _assert_ids_read_back(dflt, 20000)
+    # Uncompressed, so the dictionary is the only thing that can shrink the
+    # five-valued `region` column.
+    var with_dict = _level_file(schema, "uncompressed", 0, True)
+    var plain = _level_file(schema, "uncompressed", 0, False)
+    assert_true(
+        len(with_dict) < len(plain), String(len(with_dict), " vs ", len(plain))
+    )
+    _assert_ids_read_back(plain, 20000)
+
+
+def test_compression_properties_set_the_write_options() raises:
+    var props = Dict[String, String]()
+    var o = WriteOptions.from_properties(props)
+    assert_equal(o.compression_level, 0)
+    assert_true(o.use_dictionary)
+    props[String("write.parquet.compression-level")] = String("9")
+    props[String("write.parquet.dict-size-bytes")] = String("0")
+    o = WriteOptions.from_properties(props)
+    assert_equal(o.compression_level, 9)
+    assert_true(not o.use_dictionary)
+    props[String("write.parquet.dict-size-bytes")] = String("2097152")
+    assert_true(WriteOptions.from_properties(props).use_dictionary)
+
+
 def test_data_file_from_the_writers_footer() raises:
     """The `data_file` built from the footer the writer hands back is the one
     reading that footer back out of the bytes gives, field for field — on a

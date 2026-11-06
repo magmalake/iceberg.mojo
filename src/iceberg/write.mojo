@@ -105,6 +105,14 @@ comptime DEFAULT_METRICS_TRUNCATE = 16
 comptime HIVE_NULL = String("__HIVE_DEFAULT_PARTITION__")
 
 comptime PROP_COMPRESSION = String("write.parquet.compression-codec")
+comptime PROP_COMPRESSION_LEVEL = String("write.parquet.compression-level")
+"""Iceberg's name for the codec level. Honoured for ZSTD (1 to 22); the other
+codecs have no level here and ignore it."""
+comptime PROP_DICT_SIZE = String("write.parquet.dict-size-bytes")
+"""Iceberg's dictionary-page cap. parquet.mojo sizes its dictionary by value
+count rather than bytes, so only the one answer that means the same thing in
+both is honoured: `0` switches dictionary encoding off, anything else leaves it
+on, as the writer decides per column chunk whether a dictionary pays."""
 comptime PROP_PAGE_SIZE = String("write.parquet.page-size-bytes")
 comptime PROP_ROW_GROUP_ROWS = String("write.parquet.row-group-size-rows")
 """Not an Iceberg property.
@@ -146,6 +154,13 @@ struct WriteOptions(Copyable, Defaultable, Movable):
     """Rows per row group, which is what parquet.mojo's writer splits on."""
     var page_size: Int
     """Target *uncompressed* bytes of values per data page."""
+    var compression_level: Int
+    """The codec's level: `0` is the codec's own default. ZSTD takes 1 to 22
+    and is the only codec that reads it. A higher level writes a smaller file
+    more slowly and changes nothing for readers."""
+    var use_dictionary: Bool
+    """Whether column chunks may be dictionary-encoded. On, the writer still
+    falls back to plain for any chunk where a dictionary would not pay."""
     var truncate: Int
     """`write.metadata.metrics.default = truncate(N)`; 0 disables truncation."""
     var num_workers: Int
@@ -157,6 +172,8 @@ struct WriteOptions(Copyable, Defaultable, Movable):
         self.codec = String("zstd")
         self.row_group_rows = 1024 * 1024
         self.page_size = 1024 * 1024
+        self.compression_level = 0
+        self.use_dictionary = True
         self.truncate = DEFAULT_METRICS_TRUNCATE
         self.num_workers = 1
 
@@ -169,6 +186,10 @@ struct WriteOptions(Copyable, Defaultable, Movable):
             o.row_group_rows = Int(properties[PROP_ROW_GROUP_ROWS])
         if PROP_PAGE_SIZE in properties:
             o.page_size = Int(properties[PROP_PAGE_SIZE])
+        if PROP_COMPRESSION_LEVEL in properties:
+            o.compression_level = Int(properties[PROP_COMPRESSION_LEVEL])
+        if PROP_DICT_SIZE in properties:
+            o.use_dictionary = Int(properties[PROP_DICT_SIZE]) != 0
         return o^
 
 
@@ -655,6 +676,8 @@ def write_parquet_to[
     opts.codec = codec_value(options.codec)
     opts.row_group_size = options.row_group_rows
     opts.data_page_size = options.page_size
+    opts.compression_level = options.compression_level
+    opts.use_dictionary = options.use_dictionary
     opts.num_workers = options.num_workers
     var writer = ParquetWriter[AllCodecs](opts^)
     writer.add_metadata("iceberg.schema", schema.to_json())

@@ -286,6 +286,11 @@ _ = tx.commit()
   is **not**, because parquet.mojo's writer splits a batch by a row count and
   converting would mean guessing a compression ratio before compressing —
   `write.parquet.row-group-size-rows` says what it means instead.
+  `write.parquet.compression-level` sets the ZSTD level (1 to 22; unset is the
+  codec default, and other codecs ignore it), and `write.parquet.dict-size-bytes=0`
+  turns dictionary encoding off (any other value leaves it on; the writer still
+  decides per column chunk whether a dictionary pays). `WriteOptions` has the
+  same fields as `compression_level` and `use_dictionary`.
 - **Nested columns.** A struct, list or map column is aligned child by child
   **by field id**, so a batch whose struct has its fields in another order,
   under other names, or one field short still lines up with the table. The

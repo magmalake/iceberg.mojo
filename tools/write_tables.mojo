@@ -184,6 +184,34 @@ def main() raises:
                 String(len(table.metadata.snapshots)) + " snapshots",
                 "next-row-id=" + String(table.metadata.next_row_id),
             )
+    # Write options that change the bytes and not the rows: PyIceberg and
+    # DuckDB must read these exactly like the tables above.
+    var tuned: List[String] = [String("zstd9_v2"), String("nodict_v2")]
+    for ti in range(len(tuned)):
+        var props = Dict[String, String]()
+        if ti == 0:
+            props[String("write.parquet.compression-codec")] = String("zstd")
+            props[String("write.parquet.compression-level")] = String("9")
+        else:
+            props[String("write.parquet.dict-size-bytes")] = String("0")
+            props[String("write.parquet.row-group-size-rows")] = String("4")
+        var table = catalog.create_table(
+            String("db"),
+            tuned[ti],
+            schema,
+            spec_for(String("unpartitioned")),
+            props^,
+            2,
+        )
+        var total: Int64 = 0
+        for b in range(3):
+            var batches = List[RecordBatch]()
+            batches.append(make_batch(schema, b * 6, 6))
+            var tx = table.new_append()
+            tx.add_batches(batches)
+            total += tx.commit()
+            table.refresh()
+        print("wrote db." + tuned[ti], String(total) + " rows")
     write_delete_tables(catalog, schema)
     write_expire_tables(catalog, schema, warehouse)
     write_nested_tables(catalog, warehouse)
