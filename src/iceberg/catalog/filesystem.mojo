@@ -16,6 +16,7 @@ trailer are parsed here — `deflate.mojo` decodes the stream between them.
 """
 
 from std.collections import Dict
+from std.time import sleep
 
 from deflate import inflate
 from parquet import RecordBatch
@@ -66,7 +67,7 @@ from ..scan import TableScan
 from ..schema import Schema
 from ..transforms import PartitionSpec, SortOrder
 from ..update_schema import UpdateSchema, prepare_schema_update
-from ..util import now_ms, uuid4, zero_pad
+from ..util import now_ms, random_long, uuid4, zero_pad
 from ..write import WriteOptions, write_data_files
 
 
@@ -342,6 +343,76 @@ def _remove_claim(io: FileIO, path: String):
         io.delete(path)
     except:
         pass
+
+
+comptime CREATE_WAIT_MS: Int64 = 10_000
+"""How long a creator that lost the claim on version 0 waits for the
+winner's metadata to appear before giving up."""
+
+
+def _pause():
+    """A random 1 to 10 ms, so creators that all backed out don't claim again
+    in step."""
+    sleep(Float64(1 + Int(random_long() % 10)) / 1000.0)
+
+
+def write_first_metadata(
+    io: FileIO, metadata_dir: String, doc: String, wait_ms: Int64
+) raises -> String:
+    """Write `doc` as a new table's `00000-<uuid>.metadata.json`, under a
+    claim on version 0 like the one `Table.commit_metadata` takes on later
+    versions. Returns its path, or "" when another creator's version 0 got
+    there first.
+
+    A creator that finds a rival claim backs out with nothing written, then
+    waits: for the winner's metadata (and returns ""), or for every rival to
+    back out too, when it claims again after a random pause. Two creators can
+    each see the other's claim; without that retry, neither would create the
+    table. Past `wait_ms` it raises, which only a creator that died holding a
+    claim for under a minute can cause.
+    """
+    var deadline = now_ms() + wait_ms
+    while True:
+        var claim = claim_file_name(0, now_ms())
+        var claim_path = join_path(metadata_dir, claim)
+        io.write_new(claim_path, String("").as_bytes())
+        var rivals: Int
+        try:
+            rivals = rivals_of_version(
+                io, metadata_dir, 0, False, claim, now_ms()
+            )
+        except e:
+            _remove_claim(io, claim_path)
+            raise e^
+        if rivals == 0:
+            var path = join_path(metadata_dir, metadata_file_name(0))
+            try:
+                io.write_new(path, doc.as_bytes())
+            except e:
+                _remove_claim(io, claim_path)
+                raise e^
+            _remove_claim(io, claim_path)
+            return path^
+        _remove_claim(io, claim_path)
+        while True:
+            if len(metadata_files_of_version(io, metadata_dir, 0)) > 0:
+                return String("")
+            if (
+                rivals_of_version(
+                    io, metadata_dir, 0, False, String(""), now_ms()
+                )
+                == 0
+            ):
+                break
+            if now_ms() > deadline:
+                raise Error(
+                    "iceberg: another writer is still creating the table"
+                    " under '"
+                    + metadata_dir
+                    + "'; retry"
+                )
+            _pause()
+        _pause()
 
 
 def _newest_of(io: FileIO, var paths: List[String]) -> String:
@@ -907,6 +978,11 @@ struct FilesystemCatalog(Copyable, Movable):
         format_version: Int = 2,
     ) raises -> Table:
         """Create an empty table: one `00000-<uuid>.metadata.json`, no snapshot.
+
+        Raises if the table exists, and also when another writer creates it
+        at the same moment: creators claim version 0 first, as commits claim
+        theirs, so exactly one writes it and the others raise "already
+        exists" once the winner's table is there to load.
         """
         var loc = self.table_location(namespace, name)
         if self.table_exists(namespace, name):
@@ -915,8 +991,11 @@ struct FilesystemCatalog(Copyable, Movable):
             loc, schema, spec, properties^, format_version
         )
         var dir = join_path(loc, METADATA_DIR)
-        var path = join_path(dir, metadata_file_name(0))
-        self.io.write_new(path, m.to_json().as_bytes())
+        var path = write_first_metadata(
+            self.io, dir, m.to_json(), CREATE_WAIT_MS
+        )
+        if path == "":
+            raise Error("iceberg: table '" + loc + "' already exists")
         try:
             self.io.write_text(join_path(dir, VERSION_HINT), String("0\n"))
         except:

@@ -18,14 +18,25 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   `extra_summary` keys are kept. Deletes, overwrites and replaces that change
   nothing are still refused (#85).
 
+### Changed
+
+- **Behaviour change: a commit refuses to remove files that aren't all
+  current** (#83). A commit that removed some files that were no longer live
+  used to go through, removing the rest and keeping both writers' rows; it
+  now raises `STALE_REMOVAL` (`is_stale_removal(e)`) naming how many were
+  missing, commits nothing, and removes the manifests it wrote. Callers must
+  plan the change again, not retry the same `FileChanges`.
+
 ### Fixed
 
-- **A commit refuses to remove files that aren't all current** (#83). It used
-  to refuse only when *none* was, so a replace planned before another writer
-  replaced part of the same files removed the rest and kept both writers' rows.
-  `prepare_commit` now raises `STALE_REMOVAL` (`is_stale_removal(e)`) naming
-  how many were missing, commits nothing, and removes the manifests it wrote; a
-  caller re-plans rather than retrying the same `FileChanges`.
+- **Concurrent filesystem creates of one table no longer both write version
+  0** (#90). `FilesystemCatalog.create_table` now claims version 0 the way
+  commits claim theirs since 0.11.1: exactly one creator writes
+  `00000-<uuid>.metadata.json`, and the others raise "already exists", as a
+  create after it would, once the winner's table can be loaded. A creator
+  gives up after 10 s only if another died holding its claim less than a
+  minute ago. Like commits, this needs storage whose listing shows every
+  earlier write; it isn't safe on object stores without that guarantee.
 - **A removal opens only the manifests that can hold it** (#82). With the
   partitions of the removed files (`FileChanges.remove(file, spec_id)`, which
   the delete, overwrite and dynamic-overwrite helpers now use), `prepare_commit`
