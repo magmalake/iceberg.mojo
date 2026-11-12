@@ -25,6 +25,10 @@ removes (by path). The parent's manifest list is then walked once:
 * a rewritten manifest with nothing live left is **dropped from the list**
   entirely rather than written as an empty file.
 
+Every removed path must be live in the parent snapshot; if any is not, the
+commit raises `STALE_REMOVAL` (see `is_stale_removal`) and nothing is
+committed.
+
 The rewritten manifest's list entry is credited to the new snapshot
 (`added_snapshot_id`, `sequence_number`) while its `min_sequence_number` stays
 whatever its oldest surviving file says — which is what makes the delete scope
@@ -81,6 +85,20 @@ from .write import _partition_key
 comptime OP_DELETE = String("delete")
 comptime OP_OVERWRITE = String("overwrite")
 comptime OP_REPLACE = String("replace")
+
+comptime STALE_REMOVAL = "iceberg: missing required files to delete"
+"""How the error `prepare_commit` raises for a stale removal begins.
+
+It is a validation failure, not a commit conflict: the snapshot the removal
+was planned on is gone, so retrying the *same* `FileChanges` can never succeed
+— and must not, since that is what kept both writers' rows. Plan the change
+again against the current snapshot instead. `is_stale_removal` tells it apart
+from the conflicts a caller reloads and retries on."""
+
+
+def is_stale_removal(e: Error) -> Bool:
+    """Whether `e` is (or wraps) the stale-removal error of `prepare_commit`."""
+    return String(e).find(STALE_REMOVAL) >= 0
 
 
 def _is_dv(df: DataFile) -> Bool:
@@ -317,6 +335,10 @@ def prepare_commit(
 
     # ── the parent's manifests: carried, rewritten, or dropped ─────────────
     var removed = _Removed()
+    var wanted = Dict[String, Bool]()
+    for k in range(len(files.removed)):
+        wanted[files.removed[k]] = True
+    var found = Dict[String, Bool]()
     var parent_id: Int64 = 0
     var has_parent = False
     if metadata.has_current_snapshot:
@@ -334,19 +356,33 @@ def prepare_commit(
                 snapshot_id,
                 sequence_number,
                 carried[k],
-                files,
+                wanted,
+                found,
                 manifests,
                 written_paths,
                 removed,
             )
-    if (
-        len(files.removed) > 0
-        and removed.data_files + removed.delete_files == 0
-    ):
+    # Every file a commit removes has to be live in the snapshot it commits
+    # on, as Java's "Missing required files to delete" demands. A removal
+    # planned on an older snapshot, after another writer removed or replaced
+    # some of those files, would otherwise remove the rest and keep both
+    # writers' rows.
+    if len(found) < len(wanted):
+        for k in range(len(written_paths)):
+            try:
+                io.delete(written_paths[k])
+            except:
+                pass
         raise Error(
-            "iceberg: none of the "
-            + String(len(files.removed))
-            + " files this commit removes is in the current snapshot"
+            STALE_REMOVAL
+            + ": "
+            + String(len(wanted) - len(found))
+            + " of the "
+            + String(len(wanted))
+            + " files this commit removes are not in the current snapshot."
+            + " Another writer removed or replaced them since they were"
+            + " read; nothing was committed. Plan the change again against"
+            + " the current snapshot rather than retrying the same changes."
         )
 
     # ── the manifest list ──────────────────────────────────────────────────
@@ -512,20 +548,22 @@ def _carry_or_rewrite(
     snapshot_id: Int64,
     sequence_number: Int64,
     mf: ManifestFile,
-    files: FileChanges,
+    wanted: Dict[String, Bool],
+    mut found: Dict[String, Bool],
     mut manifests: List[ManifestFile],
     mut written_paths: List[String],
     mut removed: _Removed,
 ) raises:
-    """One parent manifest: carried untouched, rewritten, or dropped."""
-    if len(files.removed) == 0:
+    """One parent manifest: carried untouched, rewritten, or dropped. Each
+    removed path it holds live goes into `found`."""
+    if len(wanted) == 0:
         manifests.append(mf.copy())
         return
     var m = read_manifest_io(io, mf.manifest_path, mf)
     var touched = False
     for k in range(len(m.entries)):
         ref e = m.entries[k]
-        if e.is_live() and files.removes(e.data_file.file_path):
+        if e.is_live() and e.data_file.file_path in wanted:
             touched = True
             break
     if not touched:
@@ -540,7 +578,8 @@ def _carry_or_rewrite(
         # file it names is gone from every live manifest and nothing reads it.
         if not e.is_live():
             continue
-        if files.removes(e.data_file.file_path):
+        if e.data_file.file_path in wanted:
+            found[e.data_file.file_path] = True
             removed.add(e.data_file)
             entries.append(
                 ManifestEntry(

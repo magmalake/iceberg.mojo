@@ -18,6 +18,15 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   `extra_summary` keys are kept. Deletes, overwrites and replaces that change
   nothing are still refused (#85).
 
+### Changed
+
+- **Behaviour change: a commit refuses to remove files that aren't all
+  current** (#83). A commit that removed some files that were no longer live
+  used to go through, removing the rest and keeping both writers' rows; it
+  now raises `STALE_REMOVAL` (`is_stale_removal(e)`) naming how many were
+  missing, commits nothing, and removes the manifests it wrote. Callers must
+  plan the change again, not retry the same `FileChanges`.
+
 ### Fixed
 
 - **Concurrent filesystem creates of one table no longer both write version
