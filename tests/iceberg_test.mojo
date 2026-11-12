@@ -5083,6 +5083,146 @@ def test_append_carries_the_parent_manifests_forward() raises:
     assert_true(found_3, "the newest manifest has sequence 3")
 
 
+def _empty_append(mut table: Table, step: String) raises -> Int64:
+    """Commit an append of no data files, tagged the way a step runner tags
+    its own commits, and return the new snapshot's id."""
+    var extra = Dict[String, String]()
+    extra["orca.step"] = step
+    var result = prepare_append(
+        table.io, table.metadata, List[DataFile](), extra^
+    )
+    assert_equal(len(result.data_files), 0)
+    assert_equal(len(result.manifest_paths), 0, "no new, empty manifest")
+    assert_equal(result.added_records(), 0)
+    table.commit(result)
+    table.refresh()
+    return result.snapshot_id
+
+
+def test_empty_append_on_an_empty_table() raises:
+    var catalog = fresh_catalog(String("empty_append_new"))
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var table = catalog.create_table(String("db"), String("t"), schema)
+    assert_false(table.metadata.has_current_snapshot)
+    var id = _empty_append(table, String("hour-0"))
+
+    assert_true(table.metadata.has_current_snapshot)
+    assert_equal(len(table.metadata.snapshots), 1)
+    var s = table.metadata.current_snapshot()
+    assert_equal(s.snapshot_id, id)
+    assert_false(s.has_parent)
+    assert_equal(s.sequence_number, 1)
+    assert_equal(s.operation(), "append")
+    assert_equal(s.summary.get(String("orca.step"), String("")), "hour-0")
+    assert_equal(s.summary_int("added-data-files", -1), 0)
+    assert_equal(s.summary_int("added-records", -1), 0)
+    assert_equal(s.summary_int("total-records", -1), 0)
+    assert_equal(s.summary_int("total-data-files", -1), 0)
+    assert_equal(len(read_manifest_list_io(table.io, s.manifest_list)), 0)
+    assert_equal(table.scan().to_table().num_rows(), 0)
+    assert_equal(table.scan().use_snapshot(id).to_table().num_rows(), 0)
+
+    # The next append builds on it as on any parent.
+    var tx = table.new_append()
+    tx.add(write_batch(schema, 0, 6))
+    _ = tx.commit()
+    table.refresh()
+    var next = table.metadata.current_snapshot()
+    assert_equal(next.parent_snapshot_id, id)
+    assert_equal(next.summary_int("total-records", -1), 6)
+    assert_equal(table.scan().to_table().num_rows(), 6)
+
+
+def test_empty_append_on_a_table_with_data() raises:
+    var table = build_written_table(
+        String("empty_append_data"), String("ident"), 2, 2
+    )
+    var parent = table.metadata.current_snapshot()
+    var before = read_manifest_list_io(table.io, parent.manifest_list)
+    var id = _empty_append(table, String("hour-2"))
+
+    assert_equal(len(table.metadata.snapshots), 3)
+    var s = table.metadata.current_snapshot()
+    assert_equal(s.snapshot_id, id)
+    assert_equal(s.parent_snapshot_id, parent.snapshot_id)
+    assert_equal(s.sequence_number, parent.sequence_number + 1)
+    assert_equal(table.metadata.last_sequence_number, s.sequence_number)
+    assert_equal(s.operation(), "append")
+    assert_equal(s.summary.get(String("orca.step"), String("")), "hour-2")
+    assert_equal(s.summary_int("added-data-files", -1), 0)
+    assert_equal(s.summary_int("added-records", -1), 0)
+    assert_equal(s.summary_int("added-files-size", -1), 0)
+    assert_equal(s.summary_int("changed-partition-count", -1), 0)
+    for key in [
+        "total-records",
+        "total-data-files",
+        "total-files-size",
+        "total-delete-files",
+    ]:
+        assert_equal(
+            s.summary_int(key, -1), parent.summary_int(key, -2), String(key)
+        )
+    assert_equal(s.summary_int("total-records", -1), 12)
+
+    # The parent's manifests, by reference, and nothing else.
+    var after = read_manifest_list_io(table.io, s.manifest_list)
+    assert_equal(len(after), len(before))
+    for k in range(len(after)):
+        assert_equal(after[k].manifest_path, before[k].manifest_path)
+        assert_equal(after[k].sequence_number, before[k].sequence_number)
+
+    # A scan at the empty snapshot sees exactly what its parent did.
+    var at = table.scan().use_snapshot(id).to_table()
+    var was = table.scan().use_snapshot(parent.snapshot_id).to_table()
+    assert_equal(at.num_rows(), 12)
+    assert_equal(at.num_rows(), was.num_rows())
+    var ids = List[Int64]()
+    for r in range(at.num_rows()):
+        ids.append(at.value(r, 0).i)
+    for r in range(was.num_rows()):
+        var found = False
+        for j in range(len(ids)):
+            if ids[j] == was.value(r, 0).i:
+                found = True
+        assert_true(found, "row " + String(was.value(r, 0).i) + " is there")
+
+    # Expiring every snapshot before it deletes no data: it lists them all.
+    var done = table.expire_snapshots(-1, 1, False)
+    assert_equal(len(done.expired), 2)
+    assert_equal(len(done.deleted_files), 0)
+    table.refresh()
+    assert_equal(table.scan().to_table().num_rows(), 12)
+
+
+def test_prepare_commit_takes_an_empty_append_only() raises:
+    """An `append` of nothing is a snapshot; a delete of nothing is still a
+    mistake."""
+    var table = build_written_table(
+        String("empty_commit"), String("unpartitioned"), 2, 1
+    )
+    with assert_raises(contains="at least one file"):
+        _ = prepare_commit(
+            table.io,
+            table.metadata,
+            String("delete"),
+            FileChanges(),
+            Dict[String, String](),
+        )
+    var extra = Dict[String, String]()
+    extra["orca.step"] = String("hour-1")
+    var result = prepare_commit(
+        table.io, table.metadata, String("append"), FileChanges(), extra^
+    )
+    table.commit(result)
+    table.refresh()
+    var s = table.metadata.current_snapshot()
+    assert_equal(s.snapshot_id, result.snapshot_id)
+    assert_equal(s.operation(), "append")
+    assert_equal(s.summary.get(String("orca.step"), String("")), "hour-1")
+    assert_equal(s.summary_int("total-records", -1), 6)
+    assert_equal(table.scan().to_table().num_rows(), 6)
+
+
 def test_written_manifest_has_the_statistics_it_claims() raises:
     var table = build_written_table(String("stats"), String("unpartitioned"), 2)
     var tasks = table.scan().plan_files()
