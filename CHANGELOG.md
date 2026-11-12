@@ -10,13 +10,24 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+
+- **Empty appends.** `prepare_append` with no data files, and `prepare_commit`
+  of an `append` that adds nothing, commit an `append` snapshot that writes no
+  manifest and carries the parent's, as Java's `AppendFiles` does. Its
+  `extra_summary` keys are kept. Deletes, overwrites and replaces that change
+  nothing are still refused (#85).
+
 ### Fixed
 
 - **Concurrent filesystem creates of one table no longer both write version
   0** (#90). `FilesystemCatalog.create_table` now claims version 0 the way
   commits claim theirs since 0.11.1: exactly one creator writes
   `00000-<uuid>.metadata.json`, and the others raise "already exists", as a
-  create after it would, once the winner's table can be loaded.
+  create after it would, once the winner's table can be loaded. A creator
+  gives up after 10 s only if another died holding its claim less than a
+  minute ago. Like commits, this needs storage whose listing shows every
+  earlier write; it isn't safe on object stores without that guarantee.
 
 ## [0.11.1] - 2026-11-06
 

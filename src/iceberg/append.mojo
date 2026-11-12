@@ -267,9 +267,15 @@ def prepare_append(
     var extra_summary: Dict[String, String],
 ) raises -> AppendResult:
     """Write the manifest and manifest list for an append, and build the new
-    table metadata. Nothing is committed: the caller persists the metadata."""
-    if len(data_files) == 0:
-        raise Error("iceberg: an append needs at least one data file")
+    table metadata. Nothing is committed: the caller persists the metadata.
+
+    No data files is an **empty append**, as Java's `AppendFiles` commits
+    one: a new `append` snapshot that adds nothing. It writes no manifest;
+    its manifest list carries the parent's manifests (none, on an empty
+    table), its `added-*` keys are 0 and its `total-*` keys the parent's, and
+    `extra_summary` is kept on it like on any other. A writer that commits
+    once per step can so commit a step that had nothing to write.
+    """
     var schema = metadata.schema()
     var spec = metadata.spec()
     var v = metadata.format_version
@@ -280,44 +286,54 @@ def prepare_append(
     var timestamp = now_ms()
 
     # ── the manifest of everything this commit adds ────────────────────────
-    var entries = List[ManifestEntry]()
+    #
+    # None for an empty append: an empty manifest would only be one more
+    # file for every later scan and commit to read.
     var added_rows: Int64 = 0
     for k in range(len(data_files)):
         added_rows += data_files[k].record_count
-        entries.append(
-            ManifestEntry(
-                STATUS_ADDED,
+    var first_row_id = metadata.next_row_id
+    var manifests = List[ManifestFile]()
+    var paths = List[String]()
+    if len(data_files) > 0:
+        var entries = List[ManifestEntry]()
+        for k in range(len(data_files)):
+            entries.append(
+                ManifestEntry(
+                    STATUS_ADDED,
+                    snapshot_id,
+                    True,
+                    sequence_number,
+                    sequence_number,
+                    data_files[k].copy(),
+                )
+            )
+        var written = write_manifest(
+            v,
+            schema,
+            spec,
+            MANIFEST_CONTENT_DATA,
+            snapshot_id,
+            sequence_number,
+            entries,
+        )
+        var manifest_path = join_path(
+            _metadata_dir(metadata), uuid4() + "-m0.avro"
+        )
+        io.write_all(manifest_path, Span(written.bytes))
+        manifests.append(
+            written.to_manifest_file(
+                manifest_path,
+                spec.spec_id,
                 snapshot_id,
-                True,
                 sequence_number,
-                sequence_number,
-                data_files[k].copy(),
+                first_row_id,
+                v >= 3,
             )
         )
-    var written = write_manifest(
-        v,
-        schema,
-        spec,
-        MANIFEST_CONTENT_DATA,
-        snapshot_id,
-        sequence_number,
-        entries,
-    )
-    var manifest_path = join_path(_metadata_dir(metadata), uuid4() + "-m0.avro")
-    io.write_all(manifest_path, Span(written.bytes))
+        paths.append(manifest_path^)
 
     # ── the manifest list: ours, then the parent's, unchanged ──────────────
-    var first_row_id = metadata.next_row_id
-    var new_mf = written.to_manifest_file(
-        manifest_path,
-        spec.spec_id,
-        snapshot_id,
-        sequence_number,
-        first_row_id,
-        v >= 3,
-    )
-    var manifests = List[ManifestFile]()
-    manifests.append(new_mf^)
     var parent_id: Int64 = 0
     var has_parent = False
     if metadata.has_current_snapshot:
@@ -431,8 +447,6 @@ def prepare_append(
         out.next_row_id = first_row_id + added_rows
         out.has_next_row_id = True
 
-    var paths = List[String]()
-    paths.append(manifest_path)
     return AppendResult(out^, snapshot_id, list_path^, paths^, data_files^)
 
 
