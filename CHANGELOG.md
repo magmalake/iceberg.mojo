@@ -37,6 +37,11 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   gives up after 10 s only if another died holding its claim less than a
   minute ago. Like commits, this needs storage whose listing shows every
   earlier write; it isn't safe on object stores without that guarantee.
+- **A removal opens only the manifests that can hold it** (#82). With the
+  partitions of the removed files (`FileChanges.remove(file, spec_id)`, which
+  the delete, overwrite and dynamic-overwrite helpers now use), `prepare_commit`
+  carries a manifest whose partition summaries rule them all out without
+  reading it. Replacing one day of a table of 888 manifests read all 888.
 
 ## [0.11.1] - 2026-11-06
 

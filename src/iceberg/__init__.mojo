@@ -40,6 +40,7 @@ from iceberg.batch import (
     batch_of_columns,
 )
 from iceberg.commit import (
+    RemovedFile,
     FileChanges,
     OP_DELETE,
     OP_OVERWRITE,

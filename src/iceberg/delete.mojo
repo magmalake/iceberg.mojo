@@ -647,7 +647,7 @@ def prepare_delete_from(
         changes.added_data = rewrite_files(io, metadata, plans, options)
     for k in range(len(plans)):
         if plans[k].whole_file or chosen == MODE_COPY_ON_WRITE:
-            changes.removed.append(plans[k].task.data_file.file_path)
+            changes.remove(plans[k].task.data_file, plans[k].task.spec_id)
     var operation = OP_DELETE if len(changes.added_data) == 0 else OP_OVERWRITE
     return prepare_commit(io, metadata, operation, changes^, extra^)
 
@@ -671,7 +671,7 @@ def prepare_overwrite(
     var changes = FileChanges()
     changes.added_data = rewrite_files(io, metadata, plans, options)
     for k in range(len(plans)):
-        changes.removed.append(plans[k].task.data_file.file_path)
+        changes.remove(plans[k].task.data_file, plans[k].task.spec_id)
     if len(batches) > 0:
         var write_options = WriteOptions.from_properties(metadata.properties)
         var fresh = write_data_files(
@@ -739,7 +739,10 @@ def prepare_dynamic_partition_overwrite(
         var key = _partition_key(tasks[k].data_file.partition)
         for j in range(len(keys)):
             if keys[j] == key:
-                changes.removed.append(tasks[k].data_file.file_path)
+                changes.remove(tasks[k].data_file, tasks[k].spec_id)
+                # Delete files get no partition: one can live under another
+                # spec (an equality delete is written unpartitioned), so the
+                # commit opens every manifest when there are any.
                 for d in range(len(tasks[k].delete_files)):
                     changes.removed.append(tasks[k].delete_files[d].file_path)
                 break
