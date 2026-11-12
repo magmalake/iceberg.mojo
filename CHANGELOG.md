@@ -10,6 +10,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Added
+
+- **Empty appends.** `prepare_append` with no data files, and `prepare_commit`
+  of an `append` that adds nothing, commit an `append` snapshot that writes no
+  manifest and carries the parent's, as Java's `AppendFiles` does. Its
+  `extra_summary` keys are kept. Deletes, overwrites and replaces that change
+  nothing are still refused (#85).
+
 ## [0.11.1] - 2026-11-06
 
 ### Fixed
