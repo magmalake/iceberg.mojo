@@ -18,6 +18,11 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
   `prepare_commit` now raises `STALE_REMOVAL` (`is_stale_removal(e)`) naming
   how many were missing, commits nothing, and removes the manifests it wrote; a
   caller re-plans rather than retrying the same `FileChanges`.
+- **A removal opens only the manifests that can hold it** (#82). With the
+  partitions of the removed files (`FileChanges.remove(file, spec_id)`, which
+  the delete, overwrite and dynamic-overwrite helpers now use), `prepare_commit`
+  carries a manifest whose partition summaries rule them all out without
+  reading it. Replacing one day of a table of 888 manifests read all 888.
 
 ## [0.11.1] - 2026-11-06
 

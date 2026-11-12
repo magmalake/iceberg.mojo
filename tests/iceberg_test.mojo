@@ -89,6 +89,7 @@ from iceberg.append import (
 )
 from iceberg.commit import (
     FileChanges,
+    RemovedFile,
     OP_DELETE,
     OP_OVERWRITE,
     is_stale_removal,
@@ -6224,6 +6225,119 @@ def test_is_stale_removal_ignores_other_errors() raises:
             )
         )
     )
+
+
+def _id_partitioned_table(scenario: String, appends: Int) raises -> Table:
+    """`appends` one-row appends to a table partitioned by `identity(id)`:
+    one manifest per append, each over a partition of its own."""
+    var catalog = fresh_catalog(scenario)
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var spec = PartitionSpec(
+        0,
+        [
+            PartitionField.single(
+                1, 1000, String("id"), parse_transform("identity")
+            )
+        ],
+    )
+    var table = catalog.create_table(
+        String("db"), String("t"), schema, spec, Dict[String, String](), 2
+    )
+    for k in range(appends):
+        _append_rows(table, k, 1)
+    return table^
+
+
+def _live_paths(table: Table, metadata: TableMetadata) raises -> List[String]:
+    var tasks = TableScan(metadata.copy(), table.io.copy()).plan_files()
+    var out = List[String]()
+    for k in range(len(tasks)):
+        out.append(tasks[k].data_file.file_path)
+    sort(out)
+    return out^
+
+
+def test_a_removal_opens_only_the_manifests_that_can_hold_it() raises:
+    """Removing one partition's file from a table of twelve manifests opens
+    the manifest list and the one manifest whose summary admits it (#82),
+    and commits exactly what opening all twelve would."""
+    var table = _id_partitioned_table("skip_manifests", 12)
+    var manifests = read_manifest_list_io(
+        table.io, table.metadata.current_snapshot().manifest_list
+    )
+    assert_equal(len(manifests), 12)
+    var tasks = table.scan().filter(String('["=","id",5]')).plan_files()
+    assert_equal(len(tasks), 1)
+
+    var plain = FileChanges()
+    plain.removed.append(tasks[0].data_file.file_path)
+    table.io.reset_counts()
+    var opened_all = prepare_commit(
+        table.io, table.metadata, OP_DELETE, plain^, Dict[String, String]()
+    )
+    assert_equal(table.io.counts().reads, 13, "the list and every manifest")
+
+    var hinted = FileChanges()
+    hinted.remove(tasks[0].data_file, tasks[0].spec_id)
+    table.io.reset_counts()
+    var skipped = prepare_commit(
+        table.io, table.metadata, OP_DELETE, hinted^, Dict[String, String]()
+    )
+    assert_equal(table.io.counts().reads, 2, "the list and one manifest")
+
+    var a = _live_paths(table, opened_all.metadata)
+    var b = _live_paths(table, skipped.metadata)
+    assert_equal(len(a), 11)
+    assert_equal(len(a), len(b))
+    for k in range(len(a)):
+        assert_equal(a[k], b[k])
+    var sa = opened_all.metadata.current_snapshot()
+    var sb = skipped.metadata.current_snapshot()
+    var keys: List[String] = [
+        "deleted-data-files",
+        "deleted-records",
+        "total-records",
+        "total-data-files",
+        "changed-partition-count",
+    ]
+    for key in keys:
+        assert_equal(sa.summary_int(key, -1), sb.summary_int(key, -1), key)
+    table.commit(skipped)
+    table.refresh()
+    var ids = ids_of(table)
+    assert_equal(len(ids), 11)
+    assert_false(has_id(ids, 5))
+
+
+def test_a_skipped_manifest_cannot_make_a_stale_removal_pass() raises:
+    """A removed file whose partition no summary admits is not current: a
+    wrong partition is refused as a stale removal, never half-applied, and a
+    removed path without a partition makes the commit open everything."""
+    var table = _id_partitioned_table("skip_agrees", 6)
+    var tasks = table.scan().filter(String('["=","id",2]')).plan_files()
+    var wrong = FileChanges()
+    var lie = List[Datum]()
+    lie.append(Datum.long_(Int64(99)))
+    wrong.removed.append(tasks[0].data_file.file_path)
+    wrong.removed_files.append(
+        RemovedFile(tasks[0].data_file.file_path, tasks[0].spec_id, lie^)
+    )
+    with assert_raises(contains="missing required files to delete"):
+        _ = prepare_commit(
+            table.io, table.metadata, OP_DELETE, wrong^, Dict[String, String]()
+        )
+
+    # Two removed, one without a partition: nothing is skipped.
+    var other = table.scan().filter(String('["=","id",4]')).plan_files()
+    var mixed = FileChanges()
+    mixed.remove(tasks[0].data_file, tasks[0].spec_id)
+    mixed.removed.append(other[0].data_file.file_path)
+    table.io.reset_counts()
+    var result = prepare_commit(
+        table.io, table.metadata, OP_DELETE, mixed^, Dict[String, String]()
+    )
+    assert_equal(table.io.counts().reads, 7)
+    assert_equal(len(_live_paths(table, result.metadata)), 4)
 
 
 def test_rewritten_manifests_keep_their_sequence_numbers() raises:

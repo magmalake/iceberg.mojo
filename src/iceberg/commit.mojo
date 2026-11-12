@@ -15,6 +15,8 @@ removes (by path). The parent's manifest list is then walked once:
   reference** — same path, same counts, same `sequence_number`,
   `min_sequence_number` and `first_row_id`. Nothing is rewritten that does not
   have to be, which is what keeps a delete from touching the whole table;
+  when every removed path has its partition (`FileChanges.remove`), one whose
+  partition summaries can't hold any of them is carried without being read;
 * a manifest that mentions one is **rewritten**. Every live entry it keeps
   becomes `EXISTING` with its `sequence_number`, `file_sequence_number`,
   `snapshot_id` and (v3) `first_row_id` written out **explicitly** — sequence
@@ -76,8 +78,26 @@ from .metadata import (
     SnapshotRef,
     TableMetadata,
 )
+from .expressions import FieldSummary
 from .schema import Schema
-from .transforms import PartitionSpec
+from .transforms import PartitionSpec, T_UNKNOWN
+from .types import (
+    P_BINARY,
+    P_BOOLEAN,
+    P_DATE,
+    P_DECIMAL,
+    P_FIXED,
+    P_INT,
+    P_LONG,
+    P_STRING,
+    P_TIME,
+    P_TIMESTAMP,
+    P_TIMESTAMP_NS,
+    P_TIMESTAMPTZ,
+    P_TIMESTAMPTZ_NS,
+    P_UUID,
+)
+from .values import Datum, compare, datum_from_bytes_prim
 from .util import now_ms, random_long, uuid4
 from .write import _partition_key
 
@@ -105,6 +125,15 @@ def _is_dv(df: DataFile) -> Bool:
     return df.is_deletion_vector()
 
 
+@fieldwise_init
+struct RemovedFile(Copyable, Movable):
+    """Where a removed file lives: its partition tuple under spec `spec_id`."""
+
+    var path: String
+    var spec_id: Int
+    var partition: List[Datum]
+
+
 struct FileChanges(Copyable, Defaultable, Movable):
     """What one snapshot adds and what it takes away."""
 
@@ -113,21 +142,40 @@ struct FileChanges(Copyable, Defaultable, Movable):
     var removed: List[String]
     """Paths of files this snapshot removes — data or delete, either way the
     manifest entry that names them becomes `DELETED`."""
+    var removed_files: List[RemovedFile]
+    """The partitions of removed files, where the caller knows them (`remove`
+    records both). When every path in `removed` has one, the commit skips a
+    parent manifest whose partition summaries can't hold any of them instead
+    of opening it. A path without one makes it open every manifest."""
 
     def __init__(out self):
         self.added_data = []
         self.added_deletes = []
         self.removed = []
+        self.removed_files = []
 
     def __init__(out self, *, copy: Self):
         self.added_data = copy.added_data.copy()
         self.added_deletes = copy.added_deletes.copy()
         self.removed = copy.removed.copy()
+        self.removed_files = copy.removed_files.copy()
 
     def __init__(out self, *, deinit move: Self):
         self.added_data = move.added_data^
         self.added_deletes = move.added_deletes^
         self.removed = move.removed^
+        self.removed_files = move.removed_files^
+
+    def remove(mut self, file: DataFile, spec_id: Int):
+        """Remove `file`, which a plan found under partition spec `spec_id`
+        (`FileScanTask.spec_id`). Its partition lets the commit skip the
+        manifests that can't hold it. A wrong partition can't remove the
+        wrong rows: the file is then not found, and the commit is refused as
+        a stale removal."""
+        self.removed.append(file.file_path)
+        self.removed_files.append(
+            RemovedFile(file.file_path, spec_id, file.partition.copy())
+        )
 
     def is_empty(self) -> Bool:
         return (
@@ -337,6 +385,7 @@ def prepare_commit(
     for k in range(len(files.removed)):
         wanted[files.removed[k]] = True
     var found = Dict[String, Bool]()
+    var hints = _partition_hints(files, wanted)
     var parent_id: Int64 = 0
     var has_parent = False
     if metadata.has_current_snapshot:
@@ -347,6 +396,14 @@ def prepare_commit(
         if parent.manifest_list != "":
             carried = read_manifest_list_io(io, parent.manifest_list)
         for k in range(len(carried)):
+            if len(hints) > 0 and not _might_hold(
+                metadata, schema, carried[k], hints
+            ):
+                # Not opened. Its files are carried by reference, and none
+                # of them can be a removed one, so `found` is right without
+                # them.
+                manifests.append(carried[k].copy())
+                continue
             _carry_or_rewrite(
                 io,
                 dir,
@@ -537,6 +594,113 @@ def _equality_files(files: List[DataFile]) -> Int:
         if files[k].content == CONTENT_EQUALITY_DELETES:
             n += 1
     return n
+
+
+def _partition_hints(
+    files: FileChanges, wanted: Dict[String, Bool]
+) -> List[RemovedFile]:
+    """`files.removed_files`, if it covers every removed path; empty
+    otherwise, which opens every manifest."""
+    if len(wanted) == 0:
+        return []
+    var covered = Dict[String, Bool]()
+    for k in range(len(files.removed_files)):
+        covered[files.removed_files[k].path] = True
+    for entry in wanted.items():
+        if entry.key not in covered:
+            return []
+    return files.removed_files.copy()
+
+
+def _evaluable(prim: UInt8) -> Bool:
+    """Partition result types whose summary bounds `compare` orders exactly.
+    Floats are left out (NaN and signed zeros), and so is anything unknown.
+    """
+    return (
+        prim == P_BOOLEAN
+        or prim == P_INT
+        or prim == P_LONG
+        or prim == P_DATE
+        or prim == P_TIME
+        or prim == P_TIMESTAMP
+        or prim == P_TIMESTAMPTZ
+        or prim == P_TIMESTAMP_NS
+        or prim == P_TIMESTAMPTZ_NS
+        or prim == P_STRING
+        or prim == P_UUID
+        or prim == P_FIXED
+        or prim == P_BINARY
+        or prim == P_DECIMAL
+    )
+
+
+def _might_hold(
+    metadata: TableMetadata,
+    schema: Schema,
+    mf: ManifestFile,
+    hints: List[RemovedFile],
+) -> Bool:
+    """Whether manifest `mf` might hold a live entry for one of the removed
+    files, judged from its partition summaries alone. True whenever that
+    can't be decided: no summaries, a spec this metadata lacks, a removed file
+    under another spec, a transform or type it can't compare, a missing bound,
+    or anything that raises."""
+    if not mf.has_partitions or len(mf.partitions) == 0:
+        return True
+    if not metadata.has_spec(mf.partition_spec_id):
+        return True
+    try:
+        var spec = metadata.spec_by_id(mf.partition_spec_id)
+        if len(spec.fields) != len(mf.partitions):
+            return True
+        var part_type = spec.partition_type(schema)
+        for h in range(len(hints)):
+            ref hint = hints[h]
+            if hint.spec_id != mf.partition_spec_id:
+                return True
+            if len(hint.partition) != len(spec.fields):
+                return True
+            if _summaries_hold(spec, part_type, mf.partitions, hint.partition):
+                return True
+        return False
+    except:
+        return True
+
+
+def _summaries_hold(
+    spec: PartitionSpec,
+    part_type: Schema,
+    summaries: List[FieldSummary],
+    value: List[Datum],
+) raises -> Bool:
+    """Whether a file with partition tuple `value` can be under these field
+    summaries. Only a field that rules it out with certainty says no."""
+    for i in range(len(spec.fields)):
+        ref v = value[i]
+        ref sum = summaries[i]
+        if not v.valid:
+            if not sum.contains_null:
+                return False
+            continue
+        if spec.fields[i].transform.kind == T_UNKNOWN:
+            continue
+        if not sum.has_lower or not sum.has_upper:
+            continue
+        var ptype = part_type.find_field(spec.fields[i].field_id).type
+        ref tn = part_type.store.nodes[ptype]
+        if not _evaluable(tn.prim):
+            continue
+        var lo = datum_from_bytes_prim(
+            tn.prim, tn.precision, tn.scale, tn.length, sum.lower_bound
+        )
+        var hi = datum_from_bytes_prim(
+            tn.prim, tn.precision, tn.scale, tn.length, sum.upper_bound
+        )
+        if lo.kind != v.kind or hi.kind != v.kind:
+            continue
+        if compare(lo, v) > 0 or compare(hi, v) < 0:
+            return False
+    return True
 
 
 def _carry_or_rewrite(

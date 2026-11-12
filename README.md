@@ -383,6 +383,10 @@ happens. The parent's manifest list is walked once:
 - a manifest that mentions nothing removed is **carried by reference** — same
   path, same counts, same `sequence_number`, `min_sequence_number` and
   `first_row_id`. A delete of one row does not touch the rest of the table;
+  when every removed file comes with its partition (`FileChanges.remove`, as
+  the delete and overwrite helpers do), a manifest whose partition summaries
+  can't hold any of them is carried **without being opened**. Missing bounds,
+  float partitions, another spec or an unknown transform open it;
 - a manifest that does is **rewritten**: the entries it keeps become
   `EXISTING` with their `sequence_number`, `file_sequence_number`,
   `snapshot_id` and (v3) `first_row_id` spelled out, because inheritance is
