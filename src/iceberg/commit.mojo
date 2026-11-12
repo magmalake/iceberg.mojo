@@ -50,7 +50,7 @@ range moves and none overlap. Rows in a data file this commit *rewrites*
 
 from std.collections import Dict
 
-from .append import AppendResult, _metadata_dir, _total
+from .append import OP_APPEND, AppendResult, _metadata_dir, _total
 from .io import FileIO, join_path
 from .manifest import (
     CONTENT_DATA,
@@ -308,7 +308,9 @@ def prepare_commit(
 ) raises -> AppendResult:
     """Write the manifests and manifest list for a commit, and build the new
     table metadata. Nothing is persisted: the caller commits it."""
-    if files.is_empty():
+    # An `append` that adds nothing is a snapshot, as in `prepare_append`;
+    # a delete, overwrite or replace that changes nothing is a mistake.
+    if files.is_empty() and operation != OP_APPEND:
         raise Error("iceberg: a commit must add or remove at least one file")
     var schema = metadata.schema()
     var spec = metadata.spec()
