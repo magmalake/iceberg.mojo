@@ -27,6 +27,7 @@ from iceberg.catalog.filesystem import (
     FilesystemCatalog,
     Table,
     claim_file_name,
+    write_first_metadata,
     metadata_files_of_version,
     rivals_of_version,
     find_latest_metadata,
@@ -108,6 +109,7 @@ from iceberg.batch import (
     batch_of_columns,
 )
 from iceberg.util import now_ms, random_long, uuid4, zero_pad
+from threads import parallel_for
 from iceberg.update_schema import (
     UpdateSchema,
     prepare_schema_update,
@@ -9426,3 +9428,112 @@ def test_data_files_from_write_data_files_commit_after_a_round_trip() raises:
     # The metrics survived: a filter outside every file's id bounds prunes
     # all of them.
     assert_equal(len(reread.scan().filter('[">","id",100]').plan_files()), 0)
+
+
+# ── concurrent table creation (#90) ─────────────────────────────────────────
+
+
+comptime _CREATORS = 8
+
+
+struct _CreateRace(Movable):
+    """What each racing creator is given, and one slot per creator for what
+    happened to it: the uuid of the table it got, or the error it raised."""
+
+    var warehouse: String
+    var name: String
+    var created: List[String]
+    var errors: List[String]
+
+    def __init__(out self, warehouse: String, name: String):
+        self.warehouse = warehouse
+        self.name = name
+        self.created = List[String](length=_CREATORS, fill=String(""))
+        self.errors = List[String](length=_CREATORS, fill=String(""))
+
+
+def _create_one(i: Int, mut race: _CreateRace):
+    try:
+        var catalog = FilesystemCatalog.local(race.warehouse)
+        var t = catalog.create_table(
+            String("db"), race.name, Schema.parse(WRITE_SCHEMA)
+        )
+        race.created[i] = t.metadata.table_uuid
+    except e:
+        race.errors[i] = String(e)
+
+
+def test_concurrent_creates_write_one_version_zero() raises:
+    """Creators racing on one table: exactly one creates it, every other one
+    raises "already exists" (as a create after it would), and the table has
+    a single version-0 metadata file and no claim left over. Before #90 more
+    than one could write version 0."""
+    var catalog = fresh_catalog("create-race")
+    for round in range(12):
+        var name = "t" + String(round)
+        var race = _CreateRace(catalog.warehouse, name)
+        parallel_for[_create_one](_CREATORS, race, _CREATORS)
+        var winners = 0
+        var uuid = String("")
+        for k in range(_CREATORS):
+            if race.created[k] != "":
+                winners += 1
+                uuid = race.created[k]
+            else:
+                assert_true(
+                    race.errors[k].find("already exists") >= 0,
+                    "a losing creator raised: " + race.errors[k],
+                )
+        assert_equal(winners, 1, "creators that won round " + String(round))
+        var loc = catalog.table_location(String("db"), name)
+        var dir = join_path(loc, String("metadata"))
+        assert_equal(len(metadata_files_of_version(catalog.io, dir, 0)), 1)
+        var left = catalog.io.list_names_with_prefix(dir, String("00000-"))
+        assert_equal(len(left), 1, "no claim is left: " + String(len(left)))
+        var t = catalog.load_table(String("db"), name)
+        assert_equal(t.metadata.table_uuid, uuid)
+
+
+def test_create_claims_version_zero() raises:
+    """A creator that finds another's live claim on version 0 waits for its
+    metadata and reports the table as created by someone else; one whose
+    rival never finishes gives up after the wait; a stale claim, from a
+    creator that died, doesn't block a create and is removed."""
+    var catalog = fresh_catalog("create-claims")
+    var io = catalog.io.copy()
+    var dir = join_path(
+        catalog.table_location(String("db"), String("t")), String("metadata")
+    )
+    makedirs(dir, exist_ok=True)
+    var doc = String('{"stand-in": true}')
+
+    var rival = join_path(dir, claim_file_name(0, now_ms()))
+    io.write_new(rival, String("").as_bytes())
+    with assert_raises(contains="still creating"):
+        _ = write_first_metadata(io, dir, doc, 200)
+    assert_equal(len(metadata_files_of_version(io, dir, 0)), 0)
+
+    # The rival finished: its metadata is there, so this creator lost.
+    var theirs = join_path(dir, metadata_file_name(0))
+    io.write_new(theirs, doc.as_bytes())
+    assert_equal(write_first_metadata(io, dir, doc, 200), "")
+    assert_equal(len(metadata_files_of_version(io, dir, 0)), 1)
+    io.delete(theirs)
+    io.delete(rival)
+
+    var stale = join_path(
+        dir, claim_file_name(0, now_ms() - 2 * CLAIM_STALE_MS)
+    )
+    io.write_new(stale, String("").as_bytes())
+    var t = catalog.create_table(
+        String("db"), String("t"), Schema.parse(WRITE_SCHEMA)
+    )
+    assert_false(io.exists(stale), "the stale claim is removed")
+    var left = io.list_names_with_prefix(dir, String("00000-"))
+    assert_equal(len(left), 1, "no claim is left: " + String(len(left)))
+    assert_true(left[0].endswith(".metadata.json"))
+    assert_equal(t.metadata_location, join_path(dir, left[0]))
+    with assert_raises(contains="already exists"):
+        _ = catalog.create_table(
+            String("db"), String("t"), Schema.parse(WRITE_SCHEMA)
+        )
