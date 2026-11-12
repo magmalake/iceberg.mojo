@@ -87,6 +87,13 @@ from iceberg.append import (
     next_metadata_version,
     prepare_append,
 )
+from iceberg.commit import (
+    FileChanges,
+    OP_DELETE,
+    OP_OVERWRITE,
+    is_stale_removal,
+    prepare_commit,
+)
 from iceberg.delete import (
     MODE_COPY_ON_WRITE,
     MODE_MERGE_ON_READ,
@@ -6112,6 +6119,109 @@ def test_dynamic_partition_overwrite_touches_only_its_partitions() raises:
     assert_true(has_id(ids, 1), "the `us` partition is untouched")
     var eu = table.scan().filter('["=","region","eu"]').to_table().num_rows()
     assert_equal(eu, 1)
+
+
+def _paths_in(table: Table, region: String) raises -> List[String]:
+    """The data files of one `region` partition of an `ident` table."""
+    var tasks = (
+        table.scan()
+        .filter(String('["=","region","') + region + '"]')
+        .plan_files()
+    )
+    var out = List[String]()
+    for k in range(len(tasks)):
+        out.append(tasks[k].data_file.file_path)
+    return out^
+
+
+def _rows_in(table: Table, region: String) raises -> Int:
+    return (
+        table.scan()
+        .filter(String('["=","region","') + region + '"]')
+        .to_table()
+        .num_rows()
+    )
+
+
+def test_a_removal_planned_on_a_stale_snapshot_is_refused() raises:
+    """Writer B plans to remove the `eu` and `us` files; writer A replaces
+    `eu` first. B's retry with the same changes is refused whole, rather than
+    removing `us` and keeping both writers' `eu` rows (#83), and a removal of
+    files that are all current still commits."""
+    var a = build_written_table("stale_removal", "ident", 2)
+    var b = Table.load_local(dirname(dirname(a.metadata_location)))
+    var eu = _paths_in(b, "eu")
+    var us = _paths_in(b, "us")
+    assert_true(len(eu) > 0 and len(us) > 0)
+    var stale = FileChanges()
+    for k in range(len(eu)):
+        stale.removed.append(eu[k])
+    for k in range(len(us)):
+        stale.removed.append(us[k])
+    # A path named twice counts once.
+    stale.removed.append(us[0])
+
+    var schema = Schema.parse(WRITE_SCHEMA)
+    var one = List[RecordBatch]()
+    one.append(write_batch(schema, 100, 1))  # id 100 is `eu`
+    _ = a.dynamic_partition_overwrite(one)
+    b.refresh()
+    var before = len(b.metadata.snapshots)
+    var refused = False
+    try:
+        _ = prepare_commit(
+            b.io, b.metadata, OP_DELETE, stale.copy(), Dict[String, String]()
+        )
+    except e:
+        refused = True
+        assert_true(is_stale_removal(e), String(e))
+        var want = String(len(eu)) + " of the " + String(len(eu) + len(us))
+        assert_true(String(e).find(want) >= 0, String(e))
+    assert_true(refused, "a partly stale removal must not commit")
+    b.refresh()
+    assert_equal(len(b.metadata.snapshots), before)
+    assert_equal(_rows_in(b, "eu"), 1, "A's eu row, and only it")
+    assert_true(_rows_in(b, "us") > 0, "us is untouched")
+
+    # Only stale files: refused the same way.
+    var gone = FileChanges()
+    gone.removed = eu.copy()
+    with assert_raises(contains="missing required files to delete"):
+        _ = prepare_commit(
+            b.io, b.metadata, OP_DELETE, gone^, Dict[String, String]()
+        )
+
+    # All current: commits, and A's eu row stays.
+    var fresh = FileChanges()
+    fresh.removed = us.copy()
+    b.commit(
+        prepare_commit(
+            b.io, b.metadata, OP_DELETE, fresh^, Dict[String, String]()
+        )
+    )
+    b.refresh()
+    assert_equal(_rows_in(b, "us"), 0)
+    assert_equal(_rows_in(b, "eu"), 1)
+    assert_equal(
+        b.metadata.current_snapshot().summary_int(
+            String("deleted-data-files"), -1
+        ),
+        len(us),
+    )
+
+
+def test_is_stale_removal_ignores_other_errors() raises:
+    assert_false(
+        is_stale_removal(
+            Error("iceberg: 2 writers claimed version 4; reload and retry")
+        )
+    )
+    assert_true(
+        is_stale_removal(
+            Error("orca: can't commit: iceberg: missing required files to"
+                  " delete: 1 of the 2 files")
+        )
+    )
 
 
 def test_rewritten_manifests_keep_their_sequence_numbers() raises:

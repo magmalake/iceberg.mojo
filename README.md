@@ -392,6 +392,14 @@ happens. The parent's manifest list is walked once:
 - a rewritten manifest with nothing live left is **dropped from the list**
   rather than written empty.
 
+Every file a commit removes must be live in the snapshot it commits on, as
+Java's "missing required files to delete" check demands. If another writer
+removed or replaced some of them since they were read, `prepare_commit` raises
+an error starting with `STALE_REMOVAL` and commits nothing; `is_stale_removal(e)`
+recognises it. Don't retry the same `FileChanges` on it: plan the change again
+against the current snapshot (the catalogs' `delete_where`, `overwrite` and
+`dynamic_partition_overwrite` already re-plan on every try).
+
 `write.delete.mode` picks the strategy, and the default is **copy-on-write**,
 as in Java (PyIceberg has nothing else):
 

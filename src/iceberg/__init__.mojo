@@ -39,7 +39,14 @@ from iceberg.batch import (
     batch_of,
     batch_of_columns,
 )
-from iceberg.commit import FileChanges, OP_DELETE, OP_OVERWRITE, prepare_commit
+from iceberg.commit import (
+    FileChanges,
+    OP_DELETE,
+    OP_OVERWRITE,
+    STALE_REMOVAL,
+    is_stale_removal,
+    prepare_commit,
+)
 from iceberg.delete import (
     MODE_COPY_ON_WRITE,
     MODE_MERGE_ON_READ,
