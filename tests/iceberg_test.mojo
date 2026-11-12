@@ -6206,7 +6206,7 @@ def test_a_removal_planned_on_a_stale_snapshot_is_refused() raises:
         b.metadata.current_snapshot().summary_int(
             String("deleted-data-files"), -1
         ),
-        len(us),
+        Int64(len(us)),
     )
 
 
@@ -6218,8 +6218,10 @@ def test_is_stale_removal_ignores_other_errors() raises:
     )
     assert_true(
         is_stale_removal(
-            Error("orca: can't commit: iceberg: missing required files to"
-                  " delete: 1 of the 2 files")
+            Error(
+                "orca: can't commit: iceberg: missing required files to"
+                " delete: 1 of the 2 files"
+            )
         )
     )
 
