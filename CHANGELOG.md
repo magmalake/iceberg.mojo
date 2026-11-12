@@ -10,6 +10,14 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Fixed
+
+- **Concurrent filesystem creates of one table no longer both write version
+  0** (#90). `FilesystemCatalog.create_table` now claims version 0 the way
+  commits claim theirs since 0.11.1: exactly one creator writes
+  `00000-<uuid>.metadata.json`, and the others raise "already exists", as a
+  create after it would, once the winner's table can be loaded.
+
 ## [0.11.1] - 2026-11-06
 
 ### Fixed
