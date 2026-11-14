@@ -205,10 +205,10 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "d5b26ccefa8
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "23cd6e54967d7e41573371507228ca5c958ca685" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ff66975c095f392695facc1b6dd56823dec914bc" }
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "178aae6e0da0dbe105f9cb02632a51cfd35b9dda" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "d2fc48903dc4c6d7c0a251a9efb1337e138c8908" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "5d265f9004fdad1522b80c8770c8a7a7f5f9f089", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "66ef8f5c00892fbde039ca1a93037ab5a2dc99cb", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "324b2bb61e2e80327654abecf70fd4b2defbc50d" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "a90a7bd30cf1c21403a29059282072e93fbeeee2" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "f45e780a8de77278c140cee36904e46e93e0ca1c" }
@@ -225,10 +225,10 @@ avro-mojo = { git = "https://github.com/magmalake/avro.mojo", rev = "d5b26ccefa8
 hashes-mojo = { git = "https://github.com/magmalake/hashes.mojo", rev = "395aca597f9410bd0511df44d972f14b10a8b01d" }
 lz4-mojo = { git = "https://github.com/magmalake/lz4.mojo", rev = "23cd6e54967d7e41573371507228ca5c958ca685" }
 objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev = "ff66975c095f392695facc1b6dd56823dec914bc" }
-arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "178aae6e0da0dbe105f9cb02632a51cfd35b9dda" }
+arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "d2fc48903dc4c6d7c0a251a9efb1337e138c8908" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "5d265f9004fdad1522b80c8770c8a7a7f5f9f089", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "66ef8f5c00892fbde039ca1a93037ab5a2dc99cb", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "324b2bb61e2e80327654abecf70fd4b2defbc50d" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "a90a7bd30cf1c21403a29059282072e93fbeeee2" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "f45e780a8de77278c140cee36904e46e93e0ca1c" }

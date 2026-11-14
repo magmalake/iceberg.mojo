@@ -20,6 +20,7 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ### Changed
 
+- arrow-mlake-mojo 0.3.0 (was 0.2.1).
 - **Behaviour change: a commit refuses to remove files that aren't all
   current** (#83). A commit that removed some files that were no longer live
   used to go through, removing the rest and keeping both writers' rows; it
