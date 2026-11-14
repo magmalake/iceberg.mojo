@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-14
+
 ### Added
 
 - **Empty appends.** `prepare_append` with no data files, and `prepare_commit`
