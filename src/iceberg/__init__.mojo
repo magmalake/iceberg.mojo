@@ -77,7 +77,9 @@ from iceberg.expressions import (
     project_strict,
     rewrite_not,
 )
-from iceberg.io import FileIO, IOCounts, InputFile, LocalInputFile, strip_scheme
+from iceberg.io import FileIO, IOCounts, strip_scheme
+from objectstore.fileio import InputFile
+from objectstore.local import LocalInputFile
 from iceberg.metadata_log import (
     DEFAULT_PREVIOUS_VERSIONS_MAX,
     DELETE_AFTER_COMMIT,

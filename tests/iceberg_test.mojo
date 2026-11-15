@@ -48,13 +48,13 @@ from iceberg.catalog.rest import (
 from iceberg.catalog.sql import (
     NamespacePropertiesUpdateSummary,
     SqlCatalog,
-    sqlite_path_from_uri,
 )
 from iceberg.catalog._sqldriver import (
     SqlDriver,
     _placeholders,
     is_postgres_uri,
     is_unique_violation,
+    sqlite_path_from_uri,
 )
 from iceberg.puffin import (
     BLOB_DELETION_VECTOR_V1,

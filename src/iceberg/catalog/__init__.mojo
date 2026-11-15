@@ -8,7 +8,12 @@ writers can share — with `_sqldriver` holding the small part that differs
 between the two.
 """
 
-from ._sqldriver import SqlDriver, is_postgres_uri, is_unique_violation
+from ._sqldriver import (
+    SqlDriver,
+    is_postgres_uri,
+    is_unique_violation,
+    sqlite_path_from_uri,
+)
 from .filesystem import (
     FilesystemCatalog,
     Table,
@@ -25,5 +30,4 @@ from .rest import (
 from .sql import (
     NamespacePropertiesUpdateSummary,
     SqlCatalog,
-    sqlite_path_from_uri,
 )
