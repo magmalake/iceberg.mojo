@@ -19,7 +19,7 @@ from std.testing import (
 
 from iceberg.json import parse_json, Json, substr
 from iceberg.schema import Schema
-from iceberg.metadata import TableMetadata, Snapshot, SnapshotRef
+from iceberg.metadata import TableMetadata, SnapshotRef
 from iceberg.maintain import ExpirePolicy
 from iceberg.io import FileIO, basename, dirname, join_path, strip_scheme
 from iceberg.catalog.filesystem import (
@@ -31,7 +31,6 @@ from iceberg.catalog.filesystem import (
     metadata_files_of_version,
     rivals_of_version,
     find_latest_metadata,
-    read_metadata_file,
     read_version_hint,
     gunzip,
 )
@@ -46,7 +45,6 @@ from iceberg.catalog.rest import (
     VENDED_CREDENTIALS,
 )
 from iceberg.catalog.sql import (
-    NamespacePropertiesUpdateSummary,
     SqlCatalog,
 )
 from iceberg.catalog._sqldriver import (
@@ -58,7 +56,6 @@ from iceberg.catalog._sqldriver import (
 )
 from iceberg.puffin import (
     BLOB_DELETION_VECTOR_V1,
-    BlobMetadata,
     PuffinFile,
     PuffinWriter,
     decompress_blob,
@@ -70,7 +67,6 @@ from roaring import Bitmap64
 from iceberg.read import (
     _vector_leaf,
     eval_leaf,
-    read_data_file,
     read_data_file_table,
     META_FILE,
     META_LAST_UPDATED,
@@ -81,7 +77,6 @@ from iceberg.read import (
     NameMapping,
     ScanOptions,
     ScanResult,
-    arrow_type_of,
 )
 from iceberg.append import (
     metadata_file_name,
@@ -92,7 +87,6 @@ from iceberg.commit import (
     FileChanges,
     RemovedFile,
     OP_DELETE,
-    OP_OVERWRITE,
     is_stale_removal,
     prepare_commit,
 )
@@ -101,7 +95,6 @@ from iceberg.delete import (
     MODE_MERGE_ON_READ,
     PROP_DELETE_MODE,
     delete_mode_of,
-    plan_row_deletes,
 )
 from iceberg.batch import (
     ColumnBuilder,
@@ -123,7 +116,6 @@ from iceberg.manifest_write import (
     PartitionTyping,
 )
 from iceberg.scan import (
-    BatchReader,
     FileScanTask,
     TableScan,
     _worker_split,
@@ -186,22 +178,13 @@ from objectstore.http import (
 )
 from iceberg.manifest import (
     ManifestCache,
-    ManifestFile,
-    ManifestEntry,
     DataFile,
-    Manifest,
     read_manifest_list,
     read_manifest_list_io,
-    read_manifest,
     read_manifest_at,
     STATUS_ADDED,
-    STATUS_EXISTING,
-    STATUS_DELETED,
     CONTENT_DATA,
     CONTENT_POSITION_DELETES,
-    CONTENT_EQUALITY_DELETES,
-    MANIFEST_CONTENT_DATA,
-    MANIFEST_CONTENT_DELETES,
     DATA_FILE_WIRE_VERSION,
     decode_data_files,
     encode_data_files,
@@ -222,7 +205,6 @@ from iceberg.types import (
     P_BOOLEAN,
     P_DOUBLE,
     P_FLOAT,
-    P_UNKNOWN,
 )
 from iceberg.values import (
     Datum,

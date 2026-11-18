@@ -1,15 +1,12 @@
 """`Schema` — an Iceberg struct type with a schema id and identifier fields."""
 
-from .json import Json, json_quote, parse_json
+from .json import Json, parse_json
 from .types import (
     TypeStore,
-    TypeNode,
     NestedField,
-    TK_PRIMITIVE,
     TK_STRUCT,
     TK_LIST,
     TK_MAP,
-    P_UNKNOWN,
 )
 
 

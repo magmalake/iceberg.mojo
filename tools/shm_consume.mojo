@@ -16,13 +16,12 @@ lets Arrow buffers cross a process at all: the C Data Interface hands over
 pointers, and a pointer means nothing in another address space.
 """
 
-from std.ffi import external_call
 from std.os import getenv
 
 from stdin_lines import StdinLines
 from std.time import perf_counter_ns
 
-from iceberg.json import JSON_OBJECT, Json, parse_json
+from iceberg.json import JSON_OBJECT, parse_json
 from memory_region import SharedMapping
 
 

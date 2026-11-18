@@ -42,7 +42,6 @@ every delete by sequence number and partition.
 """
 
 from std.collections import Dict
-from std.memory import bitcast
 
 from parquet import (
     ParquetReader,
@@ -61,18 +60,13 @@ from parquet.reader import (
 from parquet.stats import SV_NONE, ScalarValue
 from parquet.arrow import (
     AT_BINARY,
-    AT_BOOL,
     AT_DATE32,
-    AT_DECIMAL128,
-    AT_FIXED_SIZE_BINARY,
     AT_FLOAT32,
     AT_FLOAT64,
     AT_INT16,
     AT_INT32,
     AT_INT64,
     AT_INT8,
-    AT_LARGE_BINARY,
-    AT_LARGE_UTF8,
     AT_TIME32,
     AT_TIME64,
     AT_TIMESTAMP,
@@ -81,15 +75,10 @@ from parquet.arrow import (
     AT_UINT64,
     AT_UINT8,
     AT_UTF8,
-    TU_MICRO,
-    TU_NANO,
     ArrayArena,
     ArrayData,
     ArrowType,
     bit_get,
-    bit_set,
-    load_f32,
-    load_i32,
 )
 from parquet_full import AllCodecs
 
@@ -120,7 +109,7 @@ from .expressions import (
 from objectstore.ranges import ByteRange
 
 from .io import FileIO
-from .json import Json, json_quote, parse_json, substr
+from .json import Json, json_quote, parse_json
 from .nested import (
     ColumnTree,
     ColumnType,
@@ -134,7 +123,6 @@ from .nested import (
     concat_tree,
     move_tree_into,
     flatten_leaf,
-    null_tree,
     subtree_copy,
     take_subtree,
 )
@@ -148,19 +136,14 @@ from .kernels import (
     bytes_at,
     cast_array,
     compare_class,
-    concat_into,
     constant_array,
     decimal_le16,
     empty_array,
     extract_datum,
-    filter_array,
     float_at,
     hash_key,
     int64_array,
     int_at,
-    is_binary_type,
-    is_large_binary_type,
-    is_var_width,
     keys_equal,
     sel_and,
     sel_any,
@@ -173,7 +156,6 @@ from .kernels import (
     value_extent,
 )
 from .manifest import DataFile
-from .metadata import TableMetadata
 from .puffin import deleted_positions
 from .schema import Schema
 from .transforms import PartitionSpec, T_IDENTITY
@@ -197,14 +179,12 @@ from .types import (
     P_UNKNOWN,
     P_UUID,
     TK_PRIMITIVE,
-    TK_STRUCT,
     TypeStore,
 )
 from .values import (
     Datum,
     compare,
     datum_from_json_prim,
-    int64_to_be_twos,
 )
 
 

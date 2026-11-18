@@ -32,7 +32,7 @@ from ..delete import (
     prepare_overwrite,
 )
 from ..io import FileIO
-from ..json import Json, json_quote, parse_json, substr
+from ..json import json_quote, parse_json, substr
 from ..manifest import DataFile
 from ..metadata import MAIN_BRANCH, REF_BRANCH, TableMetadata
 from ..schema import Schema

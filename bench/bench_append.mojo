@@ -17,7 +17,7 @@ from std.time import perf_counter_ns
 from parquet import RecordBatch
 
 from iceberg.batch import ColumnBuilder, batch_of
-from iceberg.catalog.filesystem import FilesystemCatalog, Table
+from iceberg.catalog.filesystem import FilesystemCatalog
 from iceberg.io import FileIO
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionSpec

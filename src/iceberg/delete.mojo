@@ -41,15 +41,14 @@ replaced by removing every data file in it.
 from std.collections import Dict
 
 from parquet import RecordBatch
-from parquet.arrow import ArrayData
 from roaring import Bitmap64
 
 from .append import AppendResult
-from .batch import ColumnBuilder, batch_of
+from .batch import ColumnBuilder
 from .commit import FileChanges, OP_DELETE, OP_OVERWRITE, prepare_commit
 from .expressions import ColumnMetrics, parse_filter
 from .io import FileIO, join_path
-from .kernels import filter_array, int_at
+from .kernels import int_at
 from .manifest import (
     CONTENT_EQUALITY_DELETES,
     CONTENT_POSITION_DELETES,

@@ -20,9 +20,8 @@ The pieces, in the order a scan uses them:
    predicate to a data file's per-column bounds and counts.
 """
 
-from std.collections import Dict
 
-from .json import Json, parse_json, json_quote, substr
+from .json import Json, parse_json, json_quote
 from .wire import (
     get_bool,
     get_bytes,
@@ -33,7 +32,7 @@ from .wire import (
     put_i64,
     put_int,
 )
-from .schema import Schema, AccessorField
+from .schema import Schema
 from .transforms import (
     PartitionSpec,
     PartitionField,
@@ -41,33 +40,20 @@ from .transforms import (
     T_IDENTITY,
     T_BUCKET,
     T_TRUNCATE,
-    T_YEAR,
-    T_MONTH,
     T_DAY,
-    T_HOUR,
     T_VOID,
-    T_UNKNOWN,
     truncate_codepoints,
 )
 from .types import (
     TypeStore,
     TK_PRIMITIVE,
-    P_BOOLEAN,
     P_INT,
-    P_LONG,
     P_FLOAT,
     P_DOUBLE,
     P_DATE,
-    P_TIME,
-    P_TIMESTAMP,
-    P_TIMESTAMPTZ,
-    P_TIMESTAMP_NS,
-    P_TIMESTAMPTZ_NS,
     P_STRING,
-    P_UUID,
     P_FIXED,
     P_BINARY,
-    P_DECIMAL,
     P_UNKNOWN,
     primitive_name,
     is_integer_like,
@@ -75,10 +61,6 @@ from .types import (
 from .values import (
     Datum,
     compare,
-    decimal_from_text,
-    hex_bytes,
-    uuid_bytes,
-    parse_iso,
     datum_from_bytes_prim,
     datum_from_json_prim,
 )

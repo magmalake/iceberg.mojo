@@ -31,7 +31,6 @@ from parquet.arrow import (
     AT_LARGE_LIST,
     AT_LIST,
     AT_MAP,
-    AT_NULL,
     AT_STRUCT,
     ArrayArena,
     ArrayData,
@@ -40,7 +39,7 @@ from parquet.arrow import (
     bit_set,
 )
 
-from .json import Json, json_quote, parse_json
+from .json import json_quote, parse_json
 from .kernels import (
     arrow_type_for,
     cast_array,
@@ -49,8 +48,6 @@ from .kernels import (
     constant_array,
     empty_array,
     filter_array,
-    is_binary_type,
-    is_large_binary_type,
 )
 from .types import (
     NestedField,

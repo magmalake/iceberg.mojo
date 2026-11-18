@@ -29,7 +29,6 @@ from iceberg.append import prepare_append
 from iceberg.batch import ColumnBuilder, batch_of
 from iceberg.catalog.filesystem import FilesystemCatalog, Table
 from iceberg.commit import FileChanges, prepare_commit
-from iceberg.io import FileIO
 from iceberg.manifest import DataFile
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionSpec

@@ -20,15 +20,13 @@ from hashes import (
     iceberg_hash_bytes,
     iceberg_hash_long,
     iceberg_hash_string,
-    murmur3_x86_32,
 )
 
-from .json import Json, json_quote, substr, parse_json
+from .json import Json, json_quote, substr
 from .schema import Schema
 from .types import (
     TypeStore,
     NestedField,
-    TK_PRIMITIVE,
     P_BOOLEAN,
     P_INT,
     P_LONG,
@@ -46,10 +44,6 @@ from .types import (
     P_BINARY,
     P_DECIMAL,
     P_UNKNOWN,
-    P_VARIANT,
-    P_GEOMETRY,
-    P_GEOGRAPHY,
-    P_UNRECOGNIZED,
     primitive_name,
 )
 from .values import (
@@ -59,8 +53,6 @@ from .values import (
     civil_from_days,
     floor_div,
     floor_mod,
-    int64_to_be_twos,
-    be_twos_to_int64,
 )
 
 

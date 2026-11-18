@@ -20,15 +20,12 @@ from std.collections import Dict
 
 from .json import (
     Json,
-    JsonNode,
     parse_json,
     json_quote,
-    substr,
     write_json_string,
 )
 from .schema import Schema
 from .transforms import PartitionSpec, SortOrder, PARTITION_DATA_ID_START
-from .types import TypeStore
 
 comptime MAIN_BRANCH = String("main")
 comptime SUPPORTED_FORMAT_VERSION: Int = 3

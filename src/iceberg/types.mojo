@@ -14,7 +14,7 @@ forward-compatible metadata (the spec requires readers to tolerate it) still
 parses instead of blowing up.
 """
 
-from .json import Json, JsonNode, json_quote, substr
+from .json import Json, json_quote, substr
 
 
 # ── type kinds ──────────────────────────────────────────────────────────────

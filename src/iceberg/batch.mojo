@@ -28,7 +28,6 @@ from std.memory import bitcast
 from parquet import RecordBatch
 from parquet.arrow import (
     AT_BINARY,
-    AT_STRUCT,
     AT_BOOL,
     AT_DECIMAL128,
     AT_FIXED_SIZE_BINARY,
@@ -49,20 +48,13 @@ from .json import Json, parse_json
 from .nested import (
     ColumnTree,
     ColumnType,
-    ELEMENT_NAME,
-    ENTRIES_NAME,
-    KEY_NAME,
-    VALUE_NAME,
-    arrow_type_of,
     empty_tree,
     move_tree_into,
 )
 from .schema import Schema
 from .types import (
-    P_LONG,
     P_STRING,
     TK_LIST,
-    TK_MAP,
     TK_PRIMITIVE,
     TK_STRUCT,
     TypeStore,

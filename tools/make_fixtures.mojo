@@ -20,7 +20,7 @@ Run from the iceberg-rs.mojo project dir:
 """
 
 from std.os import getenv
-from iceberg_rs import Catalog, Table, Batch, version
+from iceberg_rs import Catalog, Table, version
 
 
 # All five bridge-built tables share one schema; only the partition spec
