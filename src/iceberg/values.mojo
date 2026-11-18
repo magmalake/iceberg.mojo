@@ -27,7 +27,6 @@ from std.memory import bitcast
 
 from .json import (
     Json,
-    parse_json,
     parse_int64,
     json_quote,
     substr,
@@ -68,9 +67,6 @@ from .types import (
     P_DECIMAL,
     P_UNKNOWN,
     P_VARIANT,
-    P_GEOMETRY,
-    P_GEOGRAPHY,
-    P_UNRECOGNIZED,
     primitive_name,
     is_integer_like,
     TypeStore,

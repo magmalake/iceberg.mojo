@@ -27,16 +27,12 @@ makes a partition tuple readable at all: the manifest's own file metadata is
 the only place that typing exists.
 """
 
-from avro import DataFileWriter, Schema as AvroSchema, Value, parse_schema
+from avro import DataFileWriter, Value, parse_schema
 
 from .expressions import ColumnMetrics, FieldSummary
 from .json import json_quote
 from .manifest import (
-    CONTENT_DATA,
-    CONTENT_EQUALITY_DELETES,
-    CONTENT_POSITION_DELETES,
     DataFile,
-    Manifest,
     ManifestEntry,
     ManifestFile,
     MANIFEST_CONTENT_DATA,
@@ -48,7 +44,6 @@ from .manifest import (
 from .schema import Schema
 from .transforms import PartitionSpec
 from .types import (
-    P_BINARY,
     P_BOOLEAN,
     P_DATE,
     P_DECIMAL,
@@ -64,7 +59,6 @@ from .types import (
     P_TIMESTAMPTZ_NS,
     P_TIMESTAMP_NS,
     P_UUID,
-    TypeStore,
 )
 from .values import Datum, compare, datum_from_bytes_prim, datum_to_bytes
 

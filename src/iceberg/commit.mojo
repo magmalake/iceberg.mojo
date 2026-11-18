@@ -53,11 +53,8 @@ from std.collections import Dict
 from .append import OP_APPEND, AppendResult, _metadata_dir, _total
 from .io import FileIO, join_path
 from .manifest import (
-    CONTENT_DATA,
     CONTENT_EQUALITY_DELETES,
-    CONTENT_POSITION_DELETES,
     DataFile,
-    Manifest,
     ManifestEntry,
     ManifestFile,
     MANIFEST_CONTENT_DATA,

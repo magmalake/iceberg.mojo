@@ -29,7 +29,6 @@ against the manifest this writer produced.
     write-tables <warehouse-dir>
 """
 
-from std.memory import bitcast
 from std.sys import argv
 
 from parquet import RecordBatch

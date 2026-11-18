@@ -32,7 +32,6 @@ from parquet.arrow import (
     AT_DATE32,
     AT_DECIMAL128,
     AT_FIXED_SIZE_BINARY,
-    AT_FLOAT16,
     AT_FLOAT32,
     AT_FLOAT64,
     AT_INT16,

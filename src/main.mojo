@@ -35,14 +35,12 @@ actually are.
 
 from std.sys import argv
 
-from iceberg.catalog.filesystem import Table, find_latest_metadata
+from iceberg.catalog.filesystem import Table
 from iceberg.catalog.rest import RestCatalog, RestCatalogConfig
 from iceberg.catalog.sql import SqlCatalog
 from iceberg.io import FileIO
 from iceberg.json import substr
-from iceberg.metadata import TableMetadata
 from iceberg.read import ScanOptions
-from iceberg.scan import TableScan
 
 
 comptime USAGE = String(

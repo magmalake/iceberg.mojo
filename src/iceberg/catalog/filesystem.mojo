@@ -26,15 +26,10 @@ from ..append import (
     metadata_file_name,
     next_metadata_version,
     prepare_append,
-    write_and_prepare_append,
 )
 from ..delete import (
-    MODE_COPY_ON_WRITE,
-    MODE_MERGE_ON_READ,
-    delete_mode_of,
     deleted_row_count,
     plan_row_deletes,
-    prepare_delete,
     prepare_delete_from,
     prepare_dynamic_partition_overwrite,
     prepare_equality_delete,
@@ -53,13 +48,12 @@ from ..metadata_log import (
     trim_metadata_log,
 )
 from ..read import ScanOptions
-from ..io import FileIO, basename, dirname, join_path, strip_scheme
+from ..io import FileIO, basename, dirname, join_path
 from ..json import substr
 from ..manifest import DataFile
 from ..metadata import (
     INITIAL_SORT_ORDER_ID,
     INITIAL_SPEC_ID,
-    MAIN_BRANCH,
     SUPPORTED_FORMAT_VERSION,
     TableMetadata,
 )

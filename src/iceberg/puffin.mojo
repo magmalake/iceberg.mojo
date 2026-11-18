@@ -35,7 +35,7 @@ from lz4 import compress_frame, decompress_frame
 from roaring import Bitmap64, decode_iceberg_dv, encode_iceberg_dv
 
 from .io import FileIO
-from .json import Json, json_quote, parse_json, substr
+from .json import json_quote, parse_json
 
 
 comptime PUFFIN_MAGIC_0: UInt8 = 0x50

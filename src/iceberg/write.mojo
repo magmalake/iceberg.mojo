@@ -21,20 +21,17 @@ from std.collections import Dict
 from parquet import (
     ByteSink,
     ListSink,
-    ParquetReader,
     ParquetWriter,
     RecordBatch,
     WriterOptions,
     WrittenFile,
     build_schema,
 )
-from parquet.arrow import ArrayArena, ArrayData, ArrowType
+from parquet.arrow import ArrayArena, ArrayData
 from parquet_full import AllCodecs
 from parquet.stats import (
-    SV_BOOL,
     SV_BYTES,
     SV_FLOAT,
-    SV_INT,
     SV_NONE,
     SV_UINT,
     ScalarValue,
@@ -44,12 +41,6 @@ from thrift import CompressionCodec, FileMetaData, read_footer
 
 from .expressions import ColumnMetrics
 from .io import FileIO, join_path
-from .kernels import (
-    arrow_type_for,
-    cast_array,
-    constant_array,
-    filter_array,
-)
 from .nested import (
     ColumnTree,
     cast_tree,
@@ -68,7 +59,6 @@ from .transforms import (
     T_DAY,
     T_HOUR,
     T_MONTH,
-    T_VOID,
     T_YEAR,
 )
 from .types import (
@@ -80,16 +70,8 @@ from .types import (
     P_DOUBLE,
     P_FIXED,
     P_FLOAT,
-    P_INT,
-    P_LONG,
     P_STRING,
-    P_TIME,
-    P_TIMESTAMP,
-    P_TIMESTAMPTZ,
-    P_TIMESTAMPTZ_NS,
-    P_TIMESTAMP_NS,
     P_UUID,
-    TK_PRIMITIVE,
 )
 from .util import uuid4, zero_pad
 from .values import (

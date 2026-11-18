@@ -30,7 +30,7 @@ from parquet import RecordBatch
 from iceberg.batch import ColumnBuilder, batch_of
 from iceberg.catalog.filesystem import FilesystemCatalog, Table
 from iceberg.io import FileIO
-from iceberg.manifest import read_manifest_io, read_manifest_list_io
+from iceberg.manifest import read_manifest_list_io
 from iceberg.schema import Schema
 from iceberg.transforms import PartitionSpec
 from iceberg.values import Datum

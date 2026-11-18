@@ -30,13 +30,8 @@ from std.os.path import exists as path_exists
 from objectstore.fileio import (
     AnyInputFile,
     FileIOResolver,
-    InputFile,
-    OutputFile,
-    StorageCredential,
 )
 from objectstore.fileio import AnyOutputFile
-from objectstore.local import LocalInputFile, LocalOutputFile
-from objectstore.path import parse_uri
 from objectstore.ranges import ByteRange
 
 from .json import substr

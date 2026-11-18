@@ -42,7 +42,6 @@ from .manifest import (
     ManifestEntry,
     ManifestFile,
     MANIFEST_CONTENT_DATA,
-    MANIFEST_CONTENT_DELETES,
     STATUS_ADDED,
     STATUS_EXISTING,
     read_manifest_bytes,
@@ -58,8 +57,6 @@ from .metadata import (
     SnapshotRef,
     TableMetadata,
 )
-from .schema import Schema
-from .transforms import PartitionSpec
 from .util import now_ms, random_long, uuid4, zero_pad
 from .write import WriteOptions, _partition_key, write_data_files
 

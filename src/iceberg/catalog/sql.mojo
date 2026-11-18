@@ -54,9 +54,7 @@ from parquet import RecordBatch
 
 from ._sqldriver import (
     SqlDriver,
-    is_postgres_uri,
     is_unique_violation,
-    sqlite_path_from_uri,
 )
 from ..metadata_log import (
     delete_after_commit,

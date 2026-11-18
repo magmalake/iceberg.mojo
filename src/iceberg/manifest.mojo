@@ -51,12 +51,11 @@ from std.collections import Dict
 
 from avro import PlanCache, RecordCursor
 from avro.cursor import DecodePlan, schema_hash
-from avro.datafile import DataFileReader
-from avro.schema import BOOLEAN, BYTES, DOUBLE, FIXED, FLOAT, INT, LONG, STRING
+from avro.schema import BOOLEAN, DOUBLE, FLOAT, INT, LONG, STRING
 
 from .expressions import ColumnMetrics, FieldSummary
 from .io import FileIO
-from .json import Json, parse_json, json_quote
+from .json import parse_json
 from .schema import Schema
 from .transforms import PartitionSpec
 from .types import TypeStore, TK_PRIMITIVE, P_UNKNOWN

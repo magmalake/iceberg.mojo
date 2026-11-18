@@ -33,9 +33,8 @@ from .expressions import (
     ResidualEvaluator,
     bind,
     parse_filter,
-    rewrite_not,
 )
-from .io import FileIO, basename
+from .io import FileIO
 from parquet import RecordBatch
 
 from .read import (
@@ -54,18 +53,10 @@ from objectstore.ranges import ByteRange
 from .json import json_quote
 from .nested import concat_tree
 from .manifest import (
-    CONTENT_DATA,
-    CONTENT_EQUALITY_DELETES,
-    CONTENT_POSITION_DELETES,
     DataFile,
-    Manifest,
-    ManifestEntry,
     ManifestFile,
-    MANIFEST_CONTENT_DELETES,
-    STATUS_DELETED,
     ManifestCache,
     read_manifest_bytes_cached,
-    read_manifest_io_cached,
     read_manifest_list_io_cached,
 )
 from .metadata import Snapshot, TableMetadata
