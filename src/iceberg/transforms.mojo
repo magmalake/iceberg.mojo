@@ -233,7 +233,7 @@ def truncate_codepoints(s: String, w: Int) -> String:
         count += 1
     if i > len(b):
         i = len(b)
-    return String(StringSlice(unsafe_from_utf8=Span(b)[0:i]))
+    return String(StringSpan(unsafe_from_utf8=Span(b)[0:i]))
 
 
 # ── year / month / day / hour ───────────────────────────────────────────────
@@ -294,16 +294,16 @@ def parse_transform(s: String) raises -> Transform:
 
 
 def _bracket_int(s: String) raises -> Int:
-    var a = s.find("[")
-    var b = s.find("]")
+    var a = s.find("[").or_else(-1)
+    var b = s.find("]").or_else(-1)
     if a < 0 or b < 0:
         raise Error("iceberg: malformed transform '" + s + "'")
     return Int(String(substr(s, a + 1, b).strip()))
 
 
 def _paren_int(s: String) raises -> Int:
-    var a = s.find("(")
-    var b = s.find(")")
+    var a = s.find("(").or_else(-1)
+    var b = s.find(")").or_else(-1)
     if a < 0 or b < 0:
         raise Error("iceberg: malformed transform '" + s + "'")
     return Int(String(substr(s, a + 1, b).strip()))

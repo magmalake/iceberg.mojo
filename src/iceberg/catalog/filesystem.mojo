@@ -109,7 +109,7 @@ def read_metadata_file(io: FileIO, location: String) raises -> TableMetadata:
     if location.endswith(".gz") or location.endswith(GZ_METADATA_SUFFIX):
         var raw = io.read_all(location)
         var plain = gunzip(raw)
-        text = String(StringSlice(unsafe_from_utf8=Span(plain)))
+        text = String(StringSpan(unsafe_from_utf8=Span(plain)))
     else:
         text = io.read_text(location)
     var m = TableMetadata.parse(text)
@@ -129,7 +129,7 @@ def read_version_hint(io: FileIO, metadata_dir: String) raises -> Int:
     var b = text.as_bytes()
     for k in range(len(b)):
         if b[k] >= 48 and b[k] <= 57:
-            digits += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            digits += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
         elif digits != "":
             break
     if digits == "":
@@ -152,7 +152,7 @@ def _version_of(name: String) raises -> Int:
     var b = s.as_bytes()
     for k in range(len(b)):
         if b[k] >= 48 and b[k] <= 57:
-            digits += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            digits += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
         else:
             break
     if digits == "":
@@ -285,7 +285,7 @@ def _claim_ms(name: String) -> Int64:
     if not name.endswith(CLAIM_SUFFIX):
         return -1
     var stem = substr(name, 0, name.byte_length() - CLAIM_SUFFIX.byte_length())
-    var dot = stem.rfind(".")
+    var dot = stem.rfind(".").or_else(-1)
     if dot < 0:
         return -1
     try:
@@ -430,7 +430,7 @@ def _newest_of(io: FileIO, var paths: List[String]) -> String:
 
 
 def _is_hadoop_name(name: String) -> Bool:
-    return name.startswith("v") or name.find("-") < 0
+    return name.startswith("v") or "-" not in name
 
 
 def latest_from_version(

@@ -105,7 +105,7 @@ def strip_scheme(location: String) -> String:
 
 def is_local_location(location: String) -> Bool:
     """True when this location names an ordinary filesystem path."""
-    var i = location.find("://")
+    var i = location.find("://").or_else(-1)
     if i < 0:
         return True
     return location.startswith(FILE_SCHEME)
@@ -199,7 +199,7 @@ struct FileIO(Copyable, Movable):
         """A relative location joined to the table root; anything else as is."""
         if self.base_location == "":
             return location
-        if location.find("://") >= 0 or location.startswith("/"):
+        if "://" in location or location.startswith("/"):
             return location
         return self.base_location + "/" + location
 
@@ -272,7 +272,7 @@ struct FileIO(Copyable, Movable):
 
     def read_text(self, location: String) raises -> String:
         var raw = self.read_all(location)
-        return String(StringSlice(unsafe_from_utf8=Span(raw)))
+        return String(StringSpan(unsafe_from_utf8=Span(raw)))
 
     def exists(self, location: String) -> Bool:
         self._counts[].exists += 1
@@ -353,7 +353,7 @@ struct FileIO(Copyable, Movable):
             if not e.startswith(resolved) or e.byte_length() <= cut:
                 continue
             var rest = substr(e, cut, e.byte_length())
-            var slash = rest.find("/")
+            var slash = rest.find("/").or_else(-1)
             var name = rest if slash < 0 else substr(rest, 0, slash)
             if name not in seen:
                 seen[name] = True
@@ -393,21 +393,21 @@ struct FileIO(Copyable, Movable):
             if not e.startswith(resolved) or e.byte_length() <= cut:
                 continue
             var rest = substr(e, cut, e.byte_length())
-            if rest.find("/") < 0 and rest.startswith(name_prefix):
+            if "/" not in rest and rest.startswith(name_prefix):
                 out.append(rest^)
         return out^
 
 
 # ── path helpers ────────────────────────────────────────────────────────────
 def basename(path: String) -> String:
-    var i = path.rfind("/")
+    var i = path.rfind("/").or_else(-1)
     if i < 0:
         return path
     return substr(path, i + 1, path.byte_length())
 
 
 def dirname(path: String) -> String:
-    var i = path.rfind("/")
+    var i = path.rfind("/").or_else(-1)
     if i < 0:
         return String(".")
     return substr(path, 0, i)

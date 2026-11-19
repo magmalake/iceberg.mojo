@@ -34,7 +34,9 @@ struct StdinLines(Movable):
         comptime CHUNK = 1 << 16
         var scratch = List[UInt8]()
         scratch.resize(unsafe_uninit_length=CHUNK)
-        var n = external_call["read", Int](0, scratch.unsafe_ptr(), CHUNK)
+        var n = external_call["read", Int](
+            Int32(0), scratch.unsafe_ptr(), CHUNK
+        )
         if n <= 0:
             self.eof = True
             return False

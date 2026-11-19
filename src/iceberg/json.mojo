@@ -38,7 +38,7 @@ comptime JSON_OBJECT: UInt8 = 6
 
 
 @always_inline
-def _o(c: StringSlice) -> UInt8:
+def _o(c: StringLiteral[_]) -> UInt8:
     """Byte value of a one-character ASCII literal (`ord` returns `Int`)."""
     return UInt8(ord(c))
 
@@ -307,7 +307,7 @@ def write_json_string(s: String, mut out: String):
             out += String(_HEX[byte=Int(c >> 4)])
             out += String(_HEX[byte=Int(c & 0xF)])
         else:
-            out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            out += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
     out += '"'
 
 
@@ -539,7 +539,7 @@ struct _Parser(Copyable, Movable):
                 continue
             out.append(c)
             self.p += 1
-        return String(StringSlice(unsafe_from_utf8=Span(out)))
+        return String(StringSpan(unsafe_from_utf8=Span(out)))
 
     def hex4(mut self) raises -> Int:
         if self.p + 4 > self.n:
@@ -582,7 +582,7 @@ struct _Parser(Copyable, Movable):
         if self.p == start:
             raise self._err("expected a value")
         var text = String(
-            StringSlice(unsafe_from_utf8=Span(self.b)[start : self.p])
+            StringSpan(unsafe_from_utf8=Span(self.b)[start : self.p])
         )
         if is_float:
             return self.doc.add(JsonNode.float_(Float64(text)))
@@ -623,4 +623,4 @@ def substr(s: String, start: Int, end: Int) -> String:
     var z = end if end < len(b) else len(b)
     if a >= z:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=Span(b)[a:z]))
+    return String(StringSpan(unsafe_from_utf8=Span(b)[a:z]))

@@ -479,12 +479,7 @@ struct ScanResult(Copyable, Defaultable, Movable):
 
 
 def _csv_cell(s: String) -> String:
-    var needs = (
-        s.find(",") >= 0
-        or s.find('"') >= 0
-        or s.find("\n") >= 0
-        or s.find("\r") >= 0
-    )
+    var needs = "," in s or '"' in s or "\n" in s or "\r" in s
     if not needs:
         return s
     var out = String('"')
@@ -493,7 +488,7 @@ def _csv_cell(s: String) -> String:
         if b[k] == 34:
             out += '""'
         else:
-            out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            out += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
     out += '"'
     return out^
 

@@ -213,7 +213,7 @@ def _sanitize(name: String) -> String:
             or c == 95
         )
         out += String(
-            StringSlice(unsafe_from_utf8=Span(b)[k : k + 1])
+            StringSpan(unsafe_from_utf8=Span(b)[k : k + 1])
         ) if ok else "_"
     if out == "":
         return String("_")

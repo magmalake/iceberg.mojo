@@ -37,22 +37,17 @@ jobs:
       # The test legs below are skipped on release PRs, and the consumer build
       # is the check (the tests build against sibling checkouts of the other tins).
       task: ""
+      mojo-compiler: "==1.3.0.dev2026111805"
 
   test:
     needs: release
     if: ${{ !cancelled() && needs.release.outputs.release_only != 'true' }}
-    # Stable only. Every FFI sibling below is a pixi git source dependency,
-    # and its source build drops a `.mojoc` compiled with 1.2.0 into the
-    # environment; a nightly compiler refuses to load it. The `default`
-    # (nightly) environment stays in pixi.toml for local use with a matching
-    # compiler.
-    name: ${{ matrix.env }} / ${{ matrix.os }}
+    name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest", "macos-latest"]' || '["ubuntu-latest"]') }}
-        env: [stable]
     steps:
       # This repo consumes sibling magmalake tins by source path
       # (`-I ../parquet.mojo/src`, …), so CI has to lay the siblings out next
@@ -164,7 +159,6 @@ jobs:
           # out of date.
           pixi-version: v0.78.0
           manifest-path: iceberg.mojo/pixi.toml
-          environments: ${{ matrix.env }}
 
       # `check` = tests + a CLI build. tests/run_tests.sh starts the REST
       # mock, MinIO and a throwaway PostgreSQL cluster (from the conda
@@ -174,11 +168,11 @@ jobs:
       # Both the ubuntu and the macos legs get it.
       - name: Unit tests and CLI build
         working-directory: iceberg.mojo
-        run: pixi run -e ${{ matrix.env }} check
+        run: pixi run check
 
       - name: Lint (mojolint --lsp)
         working-directory: iceberg.mojo
-        run: pixi run -e ${{ matrix.env }} lint
+        run: pixi run lint
 
       # Through `pixi run`, because the CLI dlopens the objectstore/zstd/lz4
       # shims from $CONDA_PREFIX/lib and that variable only exists inside the
@@ -186,27 +180,27 @@ jobs:
       - name: CLI smoke
         working-directory: iceberg.mojo
         run: |
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo describe tests/fixtures/ident_part
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo schema tests/fixtures/evolved
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
+          pixi run ./build/iceberg-mojo describe tests/fixtures/ident_part
+          pixi run ./build/iceberg-mojo schema tests/fixtures/evolved
+          pixi run ./build/iceberg-mojo snapshots tests/fixtures/unpartitioned
           REBASE='file:///Users/mseritan/dev/magmalake/iceberg.mojo/build/warehouse-root/warehouse/db=tests/fixtures'
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo files tests/fixtures/ident_part \
+          pixi run ./build/iceberg-mojo files tests/fixtures/ident_part \
             --filter '["=","region","eu"]' --rebase "$REBASE"
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/dv_v3 \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/dv_v3 \
             --rebase "$REBASE"
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/eq_deletes_v2 \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/eq_deletes_v2 \
             --rebase "$REBASE" --select id,region,_file --limit 2 --format json
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/evolved \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/evolved \
             --rebase "$REBASE" --filter '[">","id",3]' --lazy
           # Nested columns: JSON out, then a sub-field projection and a
           # predicate on a struct leaf, then CSV (the same JSON, one field).
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
             --rebase "$REBASE" --format json
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/nested_v2 \
             --rebase "$REBASE" --select addr.city,id --format json
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo cat tests/fixtures/nested_evo_v2 \
+          pixi run ./build/iceberg-mojo cat tests/fixtures/nested_evo_v2 \
             --rebase "$REBASE" --filter '["=","addr.town","eu"]'
-          pixi run -e ${{ matrix.env }} ./build/iceberg-mojo schema tests/fixtures/nested_part_v2
+          pixi run ./build/iceberg-mojo schema tests/fixtures/nested_part_v2
 
   write-interop:
     needs: release
@@ -306,7 +300,6 @@ jobs:
         with:
           pixi-version: v0.78.0
           manifest-path: iceberg.mojo/pixi.toml
-          environments: stable
 
       - uses: astral-sh/setup-uv@v5
 
@@ -316,14 +309,14 @@ jobs:
       # to two of them for this reader to read.
       - name: Write tables and verify them elsewhere
         working-directory: iceberg.mojo
-        run: pixi run -e stable verify-writes
+        run: pixi run verify-writes
 
       # The SQL catalog's own parity gate: writes through our SqlCatalog and
       # reads them back with PyIceberg's, then the other way round, over the
       # same sqlite file both times. See tools/verify_sql_catalog.py.
       - name: Verify the SQL catalog against PyIceberg's
         working-directory: iceberg.mojo
-        run: pixi run -e stable verify-sql-catalog
+        run: pixi run verify-sql-catalog
 
       # The same gate over PostgreSQL, against
       # `SqlCatalog("postgresql+psycopg://…")` — including a catalog PyIceberg
@@ -331,7 +324,7 @@ jobs:
       # from scripts/with-pg-server.sh, not a service container.
       - name: Verify the SQL catalog against PyIceberg's, over PostgreSQL
         working-directory: iceberg.mojo
-        run: pixi run -e stable verify-pg-catalog
+        run: pixi run verify-pg-catalog
 
   # Imports: no cycles between modules, and each name imported from the
   # module that defines it (github.com/magmalake/customs).

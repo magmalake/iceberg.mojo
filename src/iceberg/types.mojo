@@ -471,7 +471,7 @@ struct TypeStore(Copyable, Movable):
                 if s.startswith("geography("):
                     var inner = substr(s, 10, s.byte_length() - 1)
                     var n = TypeNode.prim_(P_GEOGRAPHY)
-                    var comma = inner.find(",")
+                    var comma = inner.find(",").or_else(-1)
                     if comma < 0:
                         n.crs = String(inner.strip())
                         n.algorithm = DEFAULT_EDGE_ALGORITHM
@@ -540,8 +540,8 @@ struct TypeStore(Copyable, Movable):
 
 def _parse_one_int(s: String) raises -> Int:
     """`fixed[16]` → 16."""
-    var a = s.find("[")
-    var b = s.find("]")
+    var a = s.find("[").or_else(-1)
+    var b = s.find("]").or_else(-1)
     if a < 0 or b < 0:
         raise Error("iceberg: malformed type '" + s + "'")
     return Int(String(substr(s, a + 1, b).strip()))
@@ -549,9 +549,9 @@ def _parse_one_int(s: String) raises -> Int:
 
 def _parse_two_ints(s: String, what: String) raises -> List[Int]:
     """`decimal(9, 2)` → [9, 2]."""
-    var a = s.find("(")
-    var b = s.find(")")
-    var comma = s.find(",")
+    var a = s.find("(").or_else(-1)
+    var b = s.find(")").or_else(-1)
+    var comma = s.find(",").or_else(-1)
     if a < 0 or b < 0 or comma < 0:
         raise Error("iceberg: malformed " + what + " type '" + s + "'")
     return [

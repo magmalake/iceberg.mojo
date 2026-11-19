@@ -573,9 +573,9 @@ def datum_for(
     if type_name.startswith("fixed"):
         return Datum.fixed_(hex_bytes(doc.as_string(node)))
     if type_name.startswith("decimal"):
-        var ps = type_name.find("(")
-        var comma = type_name.find(",")
-        var close = type_name.find(")")
+        var ps = type_name.find("(").or_else(-1)
+        var comma = type_name.find(",").or_else(-1)
+        var close = type_name.find(")").or_else(-1)
         var p = Int(String(substr(type_name, ps + 1, comma).strip()))
         var sc = Int(String(substr(type_name, comma + 1, close).strip()))
         return decimal_from_text(doc.as_string(node), p, sc)
@@ -756,7 +756,7 @@ def _split_commas(t: String) -> List[String]:
     var out = List[String]()
     var start = 0
     while True:
-        var c = t.find(",", start)
+        var c = t.find(",", start).or_else(-1)
         if c < 0:
             out.append(substr(t, start, t.byte_length()))
             break
@@ -1055,7 +1055,7 @@ def test_metadata_rejects_future_version() raises:
 def test_snapshot_selection() raises:
     """Gate (b): current / by-id / by-ref / as-of against the oracle."""
     var tables = fixture_table_names()
-    var idx = fixture_index()
+    _ = fixture_index()
     var checked = 0
     for k in range(len(tables)):
         var table = tables[k]
@@ -2079,7 +2079,7 @@ def test_manifest_metrics_decoded() raises:
     var io = fixture_io()
     var m = load_fixture_metadata("ident_part")
     var snap = m.current_snapshot()
-    var schema = m.schema()
+    _ = m.schema()
     var mfs = read_manifest_list(io.resolve(snap.manifest_list))
     var man = read_manifest_at(io.resolve(mfs[0].manifest_path), mfs[0])
     ref df = man.entries[0].data_file
@@ -2546,7 +2546,7 @@ def test_gunzip() raises:
     # "iceberg" gzipped: 1f8b header, deflate payload, crc32 + isize trailer.
     var gz = hex_bytes("1f8b08000000000002ffcb4c4e4d4a2d4a07004d8a1c4d07000000")
     var out = gunzip(gz)
-    assert_equal(String(StringSlice(unsafe_from_utf8=Span(out))), "iceberg")
+    assert_equal(String(StringSpan(unsafe_from_utf8=Span(out))), "iceberg")
     with assert_raises():
         _ = gunzip(hex_bytes("00010203"))
 
@@ -2767,9 +2767,9 @@ def test_rest_error_mapping() raises:
         _ = cat.load_table("db", "no_such_table")
     except e:
         missing = String(e)
-    assert_true(missing.find("404") >= 0)
-    assert_true(missing.find("not found") >= 0)
-    assert_true(missing.find("NoSuchTableException") >= 0)
+    assert_true("404" in missing)
+    assert_true("not found" in missing)
+    assert_true("NoSuchTableException" in missing)
 
     # 401 when the bearer token is wrong.
     var bad = _rest_catalog("wrong-token")
@@ -2778,8 +2778,8 @@ def test_rest_error_mapping() raises:
         bad.connect()
     except e:
         unauth = String(e)
-    assert_true(unauth.find("401") >= 0)
-    assert_true(unauth.find("not authenticated") >= 0)
+    assert_true("401" in unauth)
+    assert_true("not authenticated" in unauth)
 
 
 # ══ S3 end to end ═══════════════════════════════════════════════════════════
@@ -3724,13 +3724,13 @@ def test_nested_sub_field_projection_prunes_the_read() raises:
         if rows.value(r, 0).i == 0:
             pass
         seen += rows.cell(r, 0) + ";"
-    assert_true(seen.find('"zip"') < 0, "zip must not be read: " + seen)
-    assert_true(seen.find('{"city":"eu"}') >= 0, seen)
+    assert_true('"zip"' not in seen, "zip must not be read: " + seen)
+    assert_true('{"city":"eu"}' in seen, seen)
 
     # The whole column, for comparison.
     var whole = fixture_scan("nested_v2").select([String("addr")]).to_table()
     assert_equal(whole.num_columns(), 1)
-    assert_true(whole.cell(0, 0).find('"zip"') >= 0)
+    assert_true('"zip"' in whole.cell(0, 0))
 
     # Metadata columns sit beside a nested one exactly as beside a flat one.
     var meta = (
@@ -3752,9 +3752,7 @@ def test_nested_sub_field_projection_prunes_the_read() raises:
     for r in range(meta.num_rows()):
         assert_true(meta.value(r, 2).s.endswith(".parquet"))
         assert_true(meta.value(r, 3).i >= 0)
-        assert_true(
-            meta.cell(r, 1).find('"city"') < 0, "city was not asked for"
-        )
+        assert_true('"city"' not in meta.cell(r, 1), "city was not asked for")
 
 
 def test_nested_cells_render_as_json_and_csv() raises:
@@ -3776,9 +3774,7 @@ def test_nested_cells_render_as_json_and_csv() raises:
         ),
     )
     var csv = rows.to_csv()
-    assert_true(
-        csv.find('"{""keys"":[""x"",""y""],""values"":[1,2]}"') >= 0, csv
-    )
+    assert_true('"{""keys"":[""x"",""y""],""values"":[1,2]}"' in csv, csv)
 
 
 def _file_exists(path: String) -> Bool:
@@ -4942,7 +4938,7 @@ def test_nested_bucket_partition_on_a_struct_leaf() raises:
     var tasks = table.scan().plan_files()
     for k in range(len(tasks)):
         var dir = tasks[k].data_file.file_path
-        var at = dir.rfind("/")
+        var at = dir.rfind("/").or_else(-1)
         paths.append(substr(dir, 0, at))
     var buckets = 0
     for k in range(len(paths)):
@@ -5251,7 +5247,8 @@ def test_append_partitions_by_the_spec() raises:
         assert_true(t.data_file.partition[0].valid)
         var region = t.data_file.partition[0].s
         assert_true(
-            t.data_file.file_path.find("/region=" + region + "/") > 0,
+            t.data_file.file_path.find("/region=" + region + "/").or_else(-1)
+            > 0,
             "the file path should carry its partition: "
             + t.data_file.file_path,
         )
@@ -5290,7 +5287,7 @@ def test_append_bucket_and_day_partitions() raises:
         var v = btasks[k].data_file.partition[0].copy()
         assert_true(v.valid and v.i >= 0 and v.i < 4, "bucket in 0..3")
         assert_true(
-            btasks[k].data_file.file_path.find("/id_bucket=") > 0,
+            btasks[k].data_file.file_path.find("/id_bucket=").or_else(-1) > 0,
             btasks[k].data_file.file_path,
         )
 
@@ -5307,7 +5304,8 @@ def test_append_bucket_and_day_partitions() raises:
             "day partition value " + String(v.i),
         )
         assert_true(
-            dtasks[k].data_file.file_path.find("/ts_day=2024-01-0") > 0,
+            dtasks[k].data_file.file_path.find("/ts_day=2024-01-0").or_else(-1)
+            > 0,
             dtasks[k].data_file.file_path,
         )
 
@@ -5422,34 +5420,34 @@ def test_manifest_schemas_match_the_format_version() raises:
     var v3 = manifest_entry_schema_json(3, typing)
 
     # v1: required snapshot_id, block_size_in_bytes, no content.
-    assert_true(v1.find('"block_size_in_bytes"') > 0)
-    assert_true(v1.find('"content"') < 0)
-    assert_true(v1.find('"sequence_number"') < 0)
-    assert_true(v1.find('"equality_ids"') < 0)
+    assert_true(v1.find('"block_size_in_bytes"').or_else(-1) > 0)
+    assert_true('"content"' not in v1)
+    assert_true('"sequence_number"' not in v1)
+    assert_true('"equality_ids"' not in v1)
     # v2: content, sequence numbers, equality ids; no block size, no v3 fields.
-    assert_true(v2.find('"content"') > 0)
-    assert_true(v2.find('"sequence_number"') > 0)
-    assert_true(v2.find('"file_sequence_number"') > 0)
-    assert_true(v2.find('"equality_ids"') > 0)
-    assert_true(v2.find('"block_size_in_bytes"') < 0)
-    assert_true(v2.find('"first_row_id"') < 0)
+    assert_true(v2.find('"content"').or_else(-1) > 0)
+    assert_true(v2.find('"sequence_number"').or_else(-1) > 0)
+    assert_true(v2.find('"file_sequence_number"').or_else(-1) > 0)
+    assert_true(v2.find('"equality_ids"').or_else(-1) > 0)
+    assert_true('"block_size_in_bytes"' not in v2)
+    assert_true('"first_row_id"' not in v2)
     # v3 adds row lineage and the deletion-vector fields.
-    assert_true(v3.find('"first_row_id"') > 0)
-    assert_true(v3.find('"referenced_data_file"') > 0)
-    assert_true(v3.find('"content_offset"') > 0)
-    assert_true(v3.find('"content_size_in_bytes"') > 0)
+    assert_true(v3.find('"first_row_id"').or_else(-1) > 0)
+    assert_true(v3.find('"referenced_data_file"').or_else(-1) > 0)
+    assert_true(v3.find('"content_offset"').or_else(-1) > 0)
+    assert_true(v3.find('"content_size_in_bytes"').or_else(-1) > 0)
     # The partition record is typed by the spec, under field id 102.
-    assert_true(v2.find('"name":"r102"') > 0)
-    assert_true(v2.find('"field-id":1000') > 0)
+    assert_true(v2.find('"name":"r102"').or_else(-1) > 0)
+    assert_true(v2.find('"field-id":1000').or_else(-1) > 0)
 
     var l1 = manifest_list_schema_json(1)
     var l2 = manifest_list_schema_json(2)
     var l3 = manifest_list_schema_json(3)
-    assert_true(l1.find('"content"') < 0)
-    assert_true(l1.find('"sequence_number"') < 0)
-    assert_true(l2.find('"min_sequence_number"') > 0)
-    assert_true(l2.find('"first_row_id"') < 0)
-    assert_true(l3.find('"first_row_id"') > 0)
+    assert_true('"content"' not in l1)
+    assert_true('"sequence_number"' not in l1)
+    assert_true(l2.find('"min_sequence_number"').or_else(-1) > 0)
+    assert_true('"first_row_id"' not in l2)
+    assert_true(l3.find('"first_row_id"').or_else(-1) > 0)
     # And every one of them parses as Avro.
     for k in range(3):
         var v = k + 1
@@ -5471,12 +5469,12 @@ def test_metric_bounds_are_truncated() raises:
     var lower = truncate_lower(long_, P_STRING, 16)
     assert_equal(len(lower), 16)
     assert_equal(
-        String(StringSlice(unsafe_from_utf8=Span(lower))), "abcdefghijklmnop"
+        String(StringSpan(unsafe_from_utf8=Span(lower))), "abcdefghijklmnop"
     )
     var upper = truncate_upper(long_, P_STRING, 16)
     assert_true(upper[1])
     assert_equal(
-        String(StringSlice(unsafe_from_utf8=Span(upper[0]))),
+        String(StringSpan(unsafe_from_utf8=Span(upper[0]))),
         "abcdefghijklmnoq",
         "an upper bound is incremented so it still bounds",
     )
@@ -5490,7 +5488,7 @@ def test_metric_bounds_are_truncated() raises:
     var u_upper = truncate_upper(utf8, P_STRING, 16)
     assert_true(u_upper[1])
     assert_equal(
-        String(StringSlice(unsafe_from_utf8=Span(u_upper[0]))),
+        String(StringSpan(unsafe_from_utf8=Span(u_upper[0]))),
         "αααααααααααααααβ",
     )
 
@@ -5795,7 +5793,7 @@ def test_rest_commit_state_unknown_on_5xx() raises:
     except e:
         raised = String(e)
     assert_true(
-        raised.find("CommitStateUnknown") >= 0,
+        "CommitStateUnknown" in raised,
         "a 5xx the server will not deduplicate is reported as unknown state: "
         + raised,
     )
@@ -5903,7 +5901,7 @@ def test_rest_commit_rejects_a_stale_requirement() raises:
         headers,
     )
     assert_equal(resp.status, 409, "a wrong table uuid is a conflict")
-    assert_true(resp.text().find("assert-table-uuid") >= 0, resp.text())
+    assert_true("assert-table-uuid" in resp.text(), resp.text())
 
 
 # ══ delete, overwrite, and the manifest maintenance they need ═══════════════
@@ -6059,7 +6057,7 @@ def test_merge_on_read_delete_writes_position_deletes() raises:
     assert_equal(deletes[0].record_count, 4)
     assert_false(deletes[0].has_referenced_data_file)
     assert_false(deletes[0].has_sort_order_id)
-    assert_true(deletes[0].file_path.find("position-deletes") >= 0)
+    assert_true("position-deletes" in deletes[0].file_path)
 
     var snap = table.metadata.current_snapshot()
     assert_equal(snap.operation(), "delete")
@@ -6301,7 +6299,7 @@ def test_a_removal_planned_on_a_stale_snapshot_is_refused() raises:
         refused = True
         assert_true(is_stale_removal(e), String(e))
         var want = String(len(eu)) + " of the " + String(len(eu) + len(us))
-        assert_true(String(e).find(want) >= 0, String(e))
+        assert_true(want in String(e), String(e))
     assert_true(refused, "a partly stale removal must not commit")
     b.refresh()
     assert_equal(len(b.metadata.snapshots), before)
@@ -9019,7 +9017,7 @@ def test_residual_drops_satisfied_conjuncts() raises:
     )
     var res2 = partial.residual_for(june)
     assert_true(
-        res2.text(res2.root).find("ts") >= 0,
+        "ts" in res2.text(res2.root),
         String("a mid-month bound must survive, got ", res2.text(res2.root)),
     )
     # A disjunction is one conjunct, not two: dropping the side a partition
@@ -9038,7 +9036,7 @@ def test_residual_drops_satisfied_conjuncts() raises:
     var res3 = either.residual_for(june)
     var text3 = res3.text(res3.root)
     assert_true(
-        text3.find("amount") >= 0 and text3.find("ts") >= 0,
+        "amount" in text3 and "ts" in text3,
         String("an `or` must survive whole, got ", text3),
     )
 
@@ -9096,13 +9094,13 @@ def test_residual_conjuncts_never_overclaim() raises:
                     var res = r.residual_for(part)
                     var text = res.text(res.root)
                     assert_true(
-                        text.find("amount") >= 0,
+                        "amount" in text,
                         String(
                             "the data predicate must always survive, got ",
                             text,
                         ),
                     )
-                    if text.find("ts") >= 0:
+                    if "ts" in text:
                         continue
                     # The timestamp conjunct was dropped: every instant this
                     # bucket can hold must satisfy it.
@@ -9577,7 +9575,7 @@ def test_concurrent_creates_write_one_version_zero() raises:
                 uuid = race.created[k]
             else:
                 assert_true(
-                    race.errors[k].find("already exists") >= 0,
+                    "already exists" in race.errors[k],
                     "a losing creator raised: " + race.errors[k],
                 )
         assert_equal(winners, 1, "creators that won round " + String(round))

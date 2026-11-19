@@ -245,7 +245,7 @@ def encode_namespace(dotted: String) -> String:
             out.append(0x1F)
         else:
             out.append(b[k])
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 comptime _HEXUP = String("0123456789ABCDEF")
@@ -267,7 +267,7 @@ def url_encode(s: String) -> String:
             or c == 126
         )
         if unreserved:
-            out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            out += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
         else:
             out += "%"
             out += String(_HEXUP[byte=Int(c >> 4)])
