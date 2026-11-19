@@ -183,7 +183,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "472380b5d329230b8280d6b70ff70f7211f52538" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "cf8580375f7fd42ef8d1cf78cae1f9589c146195", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c74aa76a58150233e5d6629572b6709a8383eaf7", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "54ab11c1c9a33fb252cd23fd78a418ba5df5bfe9" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "aec9b768aa3b570d33dc39c77e863826eaaf5c5b" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "820a7c6e8619d49e13f944dfba73328236eb4903" }
@@ -203,7 +203,7 @@ objectstore-mojo = { git = "https://github.com/magmalake/objectstore.mojo", rev 
 arrow-mlake-mojo = { git = "https://github.com/magmalake/arrow-mlake.mojo", rev = "472380b5d329230b8280d6b70ff70f7211f52538" }
 # iceberg reads and writes ZSTD, so it wants the full codec set. This is the
 # tin in parquet.mojo's full/ subdirectory; it pulls parquet-mojo with it.
-parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "cf8580375f7fd42ef8d1cf78cae1f9589c146195", subdirectory = "full" }
+parquet-full-mojo = { git = "https://github.com/magmalake/parquet.mojo", rev = "c74aa76a58150233e5d6629572b6709a8383eaf7", subdirectory = "full" }
 postgres-mojo = { git = "https://github.com/magmalake/postgres.mojo", rev = "54ab11c1c9a33fb252cd23fd78a418ba5df5bfe9" }
 roaring-mojo = { git = "https://github.com/magmalake/roaring.mojo", rev = "aec9b768aa3b570d33dc39c77e863826eaaf5c5b" }
 threads-mojo = { git = "https://github.com/magmalake/threads.mojo", rev = "820a7c6e8619d49e13f944dfba73328236eb4903" }
