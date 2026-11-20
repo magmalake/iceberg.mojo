@@ -10,6 +10,8 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-20
+
 ### Fixed
 
 - **Local filesystem commits no longer rely on a complete directory
