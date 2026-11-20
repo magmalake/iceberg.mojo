@@ -10,6 +10,15 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+### Fixed
+
+- **Local filesystem commits no longer rely on a complete directory
+  listing** (morca-dev/morca#531). A writer also takes the version's lock,
+  `<V>.lock`, created with `link(2)`, around its claim, so a `readdir` that
+  misses a rival's claim while the rival removes it can't let both win the
+  version. A lock older than a minute, from a writer that died, is broken.
+  Object stores keep the claims alone.
+
 ## [0.12.0] - 2026-11-14
 
 ### Added

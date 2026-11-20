@@ -34,6 +34,7 @@ from iceberg.catalog.filesystem import (
     read_version_hint,
     gunzip,
 )
+from iceberg.catalog.version_lock import take_version_lock, version_lock_name
 from iceberg.catalog.rest import (
     LoadTableResult,
     commit_append_body,
@@ -6877,6 +6878,46 @@ def test_a_commit_claims_its_version_before_writing_metadata() raises:
     # A writer still on the old version is refused before it claims.
     with assert_raises(contains="another writer committed"):
         table.commit_metadata(table.metadata.copy())
+
+
+def test_a_local_commit_holds_its_versions_lock() raises:
+    """On local disk a writer holding the version's lock stops a commit even
+    when the listing shows no claim of it, as a `readdir` running while the
+    rival removes its claim may not (morca-dev/morca#531). A stale lock,
+    from a writer that died, is broken; a commit leaves no lock behind; and
+    a creator waits on a live lock on version 0 as on a claim."""
+    var table = build_written_table("commit_lock", "unpartitioned", 2, 3)
+    var dir = dirname(table.metadata_location)
+    var a = Table.load_local(dirname(dir))
+    var version = next_metadata_version(a.metadata)
+    var lock = join_path(dir, version_lock_name(version))
+    a.io.write_new(lock, String(now_ms()).as_bytes())
+    with assert_raises(contains="claimed version"):
+        a.commit_metadata(a.metadata.copy())
+    assert_equal(len(metadata_files_of_version(a.io, dir, version)), 0)
+    assert_true(a.io.exists(lock), "the rival's lock is left")
+    assert_true(
+        take_version_lock(a.io, dir, version, now_ms(), CLAIM_STALE_MS).busy,
+        "a live lock is busy",
+    )
+    assert_equal(a.metadata_location, table.metadata_location)
+
+    a.io.write_all(lock, String(now_ms() - 2 * CLAIM_STALE_MS).as_bytes())
+    a.commit_metadata(a.metadata.copy())
+    assert_equal(len(metadata_files_of_version(a.io, dir, version)), 1)
+    var left = a.io.list_names_with_prefix(dir, zero_pad(version, 5) + ".")
+    assert_equal(len(left), 0, "no lock is left: " + String(len(left)))
+
+    var created = fresh_catalog("create-lock")
+    var mdir = join_path(
+        created.table_location(String("db"), String("t")), String("metadata")
+    )
+    makedirs(mdir, exist_ok=True)
+    var zero = join_path(mdir, version_lock_name(0))
+    created.io.write_new(zero, String(now_ms()).as_bytes())
+    with assert_raises(contains="still creating"):
+        _ = write_first_metadata(created.io, mdir, String("{}"), 200)
+    assert_equal(len(metadata_files_of_version(created.io, mdir, 0)), 0)
 
 
 def test_appends_merge_small_manifests() raises:
