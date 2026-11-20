@@ -63,6 +63,11 @@ from ..transforms import PartitionSpec, SortOrder
 from ..update_schema import UpdateSchema, prepare_schema_update
 from ..util import now_ms, random_long, uuid4, zero_pad
 from ..write import WriteOptions, write_data_files
+from .version_lock import (
+    release_version_lock,
+    take_version_lock,
+    version_locked,
+)
 
 
 comptime VERSION_HINT = String("version-hint.text")
@@ -355,39 +360,46 @@ def write_first_metadata(
 ) raises -> String:
     """Write `doc` as a new table's `00000-<uuid>.metadata.json`, under a
     claim on version 0 like the one `Table.commit_metadata` takes on later
-    versions. Returns its path, or "" when another creator's version 0 got
-    there first.
+    versions (and on a local filesystem, under its lock). Returns its path,
+    or "" when another creator's version 0 got there first.
 
-    A creator that finds a rival claim backs out with nothing written, then
-    waits: for the winner's metadata (and returns ""), or for every rival to
-    back out too, when it claims again after a random pause. Two creators can
-    each see the other's claim; without that retry, neither would create the
-    table. Past `wait_ms` it raises, which only a creator that died holding a
-    claim for under a minute can cause.
+    A creator that finds a rival claim (or lock) backs out with nothing
+    written, then waits: for the winner's metadata (and returns ""), or for
+    every rival to back out too, when it claims again after a random pause.
+    Two creators can each see the other's claim; without that retry, neither
+    would create the table. Past `wait_ms` it raises, which only a creator
+    that died holding a claim for under a minute can cause.
     """
     var deadline = now_ms() + wait_ms
     while True:
-        var claim = claim_file_name(0, now_ms())
-        var claim_path = join_path(metadata_dir, claim)
-        io.write_new(claim_path, String("").as_bytes())
-        var rivals: Int
-        try:
-            rivals = rivals_of_version(
-                io, metadata_dir, 0, False, claim, now_ms()
-            )
-        except e:
-            _remove_claim(io, claim_path)
-            raise e^
-        if rivals == 0:
-            var path = join_path(metadata_dir, metadata_file_name(0))
+        var lock = take_version_lock(
+            io, metadata_dir, 0, now_ms(), CLAIM_STALE_MS
+        )
+        if not lock.busy:
             try:
-                io.write_new(path, doc.as_bytes())
-            except e:
+                var claim = claim_file_name(0, now_ms())
+                var claim_path = join_path(metadata_dir, claim)
+                io.write_new(claim_path, String("").as_bytes())
+                var rivals: Int
+                try:
+                    rivals = rivals_of_version(
+                        io, metadata_dir, 0, False, claim, now_ms()
+                    )
+                except e:
+                    _remove_claim(io, claim_path)
+                    raise e^
+                if rivals == 0:
+                    var path = join_path(metadata_dir, metadata_file_name(0))
+                    try:
+                        io.write_new(path, doc.as_bytes())
+                    except e:
+                        _remove_claim(io, claim_path)
+                        raise e^
+                    _remove_claim(io, claim_path)
+                    return path^
                 _remove_claim(io, claim_path)
-                raise e^
-            _remove_claim(io, claim_path)
-            return path^
-        _remove_claim(io, claim_path)
+            finally:
+                release_version_lock(lock)
         while True:
             if len(metadata_files_of_version(io, metadata_dir, 0)) > 0:
                 return String("")
@@ -396,6 +408,9 @@ def write_first_metadata(
                     io, metadata_dir, 0, False, String(""), now_ms()
                 )
                 == 0
+                and not version_locked(
+                    io, metadata_dir, 0, now_ms(), CLAIM_STALE_MS
+                )
             ):
                 break
             if now_ms() > deadline:
@@ -750,8 +765,12 @@ struct Table(Copyable, Movable):
         A claim older than a minute is from a writer that died before
         finishing and is ignored (and removed). This is still a
         check-then-act protocol: it needs a listing that sees every write
-        before it (a local filesystem, or S3 since 2020), and is unsafe over
-        an object store that lacks one, as every filesystem-table writer is.
+        before it (S3 since 2020), and is unsafe over an object store that
+        lacks one, as every filesystem-table writer is. A local directory
+        listing isn't one (a `readdir` may miss entries made or removed while
+        it runs), so on a local filesystem a writer also holds the version's
+        lock (`version_lock.take_version_lock`) from before its claim until
+        its metadata file is written.
         """
         var dir = dirname(self.metadata_location)
         # The version we are about to write is derived from the file we read,
@@ -781,32 +800,44 @@ struct Table(Copyable, Movable):
         var forgotten = trim_metadata_log(metadata)
         var path = join_path(dir, metadata_file_name(version))
         var doc = metadata.to_json()
-        var claim = claim_file_name(version, now_ms())
-        var claim_path = join_path(dir, claim)
-        self.io.write_new(claim_path, String("").as_bytes())
-        var rivals: Int
-        try:
-            rivals = rivals_of_version(
-                self.io, dir, version, hadoop, claim, now_ms()
-            )
-        except e:
-            _remove_claim(self.io, claim_path)
-            raise e^
-        if rivals > 0:
-            _remove_claim(self.io, claim_path)
+        var lock = take_version_lock(
+            self.io, dir, version, now_ms(), CLAIM_STALE_MS
+        )
+        if lock.busy:
             raise Error(
-                "iceberg: "
-                + String(rivals + 1)
-                + " writers claimed version "
+                "iceberg: 2 writers claimed version "
                 + String(version)
                 + "; reload and retry"
             )
         try:
-            self.io.write_new(path, doc.as_bytes())
-        except e:
+            var claim = claim_file_name(version, now_ms())
+            var claim_path = join_path(dir, claim)
+            self.io.write_new(claim_path, String("").as_bytes())
+            var rivals: Int
+            try:
+                rivals = rivals_of_version(
+                    self.io, dir, version, hadoop, claim, now_ms()
+                )
+            except e:
+                _remove_claim(self.io, claim_path)
+                raise e^
+            if rivals > 0:
+                _remove_claim(self.io, claim_path)
+                raise Error(
+                    "iceberg: "
+                    + String(rivals + 1)
+                    + " writers claimed version "
+                    + String(version)
+                    + "; reload and retry"
+                )
+            try:
+                self.io.write_new(path, doc.as_bytes())
+            except e:
+                _remove_claim(self.io, claim_path)
+                raise e^
             _remove_claim(self.io, claim_path)
-            raise e^
-        _remove_claim(self.io, claim_path)
+        finally:
+            release_version_lock(lock)
         # `version-hint.text` is advisory: a reader that cannot find the file
         # it names falls back to listing, which is why it is written after.
         try:
