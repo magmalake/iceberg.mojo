@@ -488,10 +488,10 @@ def next_metadata_version(metadata: TableMetadata) -> Int:
     else, or a brand new one, needs.
     """
     var name = metadata.metadata_file_location
-    var slash = name.rfind("/")
+    var slash = name.rfind("/").or_else(-1)
     if slash >= 0:
         name = substr(name, slash + 1, name.byte_length())
-    var dash = name.find("-")
+    var dash = name.find("-").or_else(-1)
     if dash > 0:
         var head = substr(name, 0, dash)
         var ok = head.byte_length() > 0

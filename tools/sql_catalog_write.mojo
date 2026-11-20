@@ -80,7 +80,7 @@ def main() raises:
         return
     var target = String(args[1])
     var warehouse = String(args[2])
-    var uri = target if target.find("://") >= 0 else "sqlite:///" + target
+    var uri = target if "://" in target else "sqlite:///" + target
 
     var cat = SqlCatalog.local("default", uri, warehouse)
     # A shared server keeps whatever the last run left; this tool owns the

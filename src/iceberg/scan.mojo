@@ -737,7 +737,7 @@ struct TableScan(Copyable, Movable):
 
         # ── pass 2: data manifests, pruned by their partition summaries ────
         var tasks = List[FileScanTask]()
-        var project = self.projected_field_ids()
+        _ = self.projected_field_ids()
         for k in range(len(manifests)):
             ref mf = manifests[k]
             if mf.is_delete_manifest() or not wanted[k]:

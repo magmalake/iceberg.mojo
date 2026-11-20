@@ -46,7 +46,7 @@ def _us(ns: Int) -> String:
     return String(us // 1000, ".", (us % 1000) // 100, (us % 100) // 10)
 
 
-def _row(name: StringSlice, ns: Int, total: Int) -> String:
+def _row(name: StringSpan, ns: Int, total: Int) -> String:
     var pct = 0
     if total > 0:
         pct = (ns * 1000) // total
@@ -101,7 +101,7 @@ def profile(
     var decode_ns = 0
     var read_ns = 0
     var concat_ns = 0
-    var rows = 0
+    var rows: Int
     var batches = 0
 
     # The stages parquet owns, timed on the same files with the same options.

@@ -592,11 +592,11 @@ def nested_batch(schema: Schema, start: Int, n: Int) raises -> RecordBatch:
         items.add(doc.dump(doc.get(row, "items")))
     return batch_of_columns(
         [
-            ids^.build_tree(),
-            addr^.build(),
-            tags^.build(),
-            props^.build(),
-            items^.build(),
+            ids.build_tree(),
+            addr.build(),
+            tags.build(),
+            props.build(),
+            items.build(),
         ]
     )
 

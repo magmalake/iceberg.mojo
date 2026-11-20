@@ -442,7 +442,7 @@ def escape_path(s: String) -> String:
             or c == 46
         )
         if ok:
-            out += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            out += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
         else:
             out += "%"
             out += _HEXD[byte=Int(c >> 4)].upper()

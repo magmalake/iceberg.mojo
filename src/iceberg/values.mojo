@@ -398,7 +398,7 @@ def uuid_bytes(s: String) raises -> List[UInt8]:
     var b = s.as_bytes()
     for k in range(len(b)):
         if b[k] != UInt8(45):  # '-'
-            clean += String(StringSlice(unsafe_from_utf8=Span(b)[k : k + 1]))
+            clean += String(StringSpan(unsafe_from_utf8=Span(b)[k : k + 1]))
     if clean.byte_length() != 32:
         raise Error("iceberg: '" + s + "' is not a uuid")
     return hex_bytes(clean)
@@ -523,7 +523,7 @@ def decimal_from_text(s: String, precision: Int, scale: Int) raises -> Datum:
     """Parse decimal text at the column's scale, to full 38-digit width."""
     var neg = s.startswith("-")
     var t = substr(s, 1, s.byte_length()) if (neg or s.startswith("+")) else s
-    var dot = t.find(".")
+    var dot = t.find(".").or_else(-1)
     var digits: String
     var frac = 0
     if dot < 0:
@@ -669,9 +669,9 @@ def parse_iso(kind: UInt8, text: String) raises -> Int64:
     if kind == P_TIME:
         return _parse_time(s, 1000000)
     # timestamp: <date>T<time>[Z|+hh:mm]
-    var tpos = s.find("T")
+    var tpos = s.find("T").or_else(-1)
     if tpos < 0:
-        tpos = s.find(" ")
+        tpos = s.find(" ").or_else(-1)
     if tpos < 0:
         raise Error("iceberg: '" + text + "' is not a timestamp")
     var date_part = substr(s, 0, tpos)
@@ -684,7 +684,7 @@ def parse_iso(kind: UInt8, text: String) raises -> Int64:
         if pp >= 0:
             var sign: Int64 = -1 if time_part.as_bytes()[pp] == UInt8(43) else 1
             var off = substr(time_part, pp + 1, time_part.byte_length())
-            var colon = off.find(":")
+            var colon = off.find(":").or_else(-1)
             var oh = parse_int64(
                 String(substr(off, 0, colon))
             ) if colon > 0 else parse_int64(off)
@@ -713,8 +713,8 @@ def _find_offset(t: String) -> Int:
 def _split_date(s: String) raises -> List[Int64]:
     var neg = s.startswith("-")
     var t = substr(s, 1, s.byte_length()) if neg else s
-    var a = t.find("-")
-    var b = t.find("-", a + 1)
+    var a = t.find("-").or_else(-1)
+    var b = t.find("-", a + 1).or_else(-1)
     if a < 0 or b < 0:
         raise Error("iceberg: '" + s + "' is not a date")
     var y = parse_int64(String(substr(t, 0, a)))
@@ -726,10 +726,10 @@ def _split_date(s: String) raises -> List[Int64]:
 
 
 def _parse_time(s: String, per_sec: Int64) raises -> Int64:
-    var a = s.find(":")
+    var a = s.find(":").or_else(-1)
     if a < 0:
         raise Error("iceberg: '" + s + "' is not a time")
-    var b = s.find(":", a + 1)
+    var b = s.find(":", a + 1).or_else(-1)
     var h = parse_int64(String(substr(s, 0, a)))
     var mi: Int64
     var sec: Int64 = 0
@@ -739,7 +739,7 @@ def _parse_time(s: String, per_sec: Int64) raises -> Int64:
     else:
         mi = parse_int64(String(substr(s, a + 1, b)))
         var rest = substr(s, b + 1, s.byte_length())
-        var dot = rest.find(".")
+        var dot = rest.find(".").or_else(-1)
         if dot < 0:
             sec = parse_int64(String(rest))
         else:
@@ -822,7 +822,7 @@ def datum_from_bytes_prim(
             return Datum.integral(prim, _le_int(sp, 4) * MICROS_PER_DAY * 1000)
         return Datum.integral(prim, _le_int(sp, 8))
     if prim == P_STRING:
-        return Datum.string_(String(StringSlice(unsafe_from_utf8=sp)))
+        return Datum.string_(String(StringSpan(unsafe_from_utf8=sp)))
     if prim == P_UUID:
         return Datum.uuid_(b.copy())
     if prim == P_FIXED:

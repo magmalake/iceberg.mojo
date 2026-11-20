@@ -160,8 +160,8 @@ def is_unique_violation(err: Error) -> Bool:
         return True
     var message = String(err)
     return (
-        message.find("UNIQUE constraint failed") >= 0
-        or message.find("PRIMARY KEY must be unique") >= 0
+        "UNIQUE constraint failed" in message
+        or "PRIMARY KEY must be unique" in message
     )
 
 
@@ -247,7 +247,7 @@ struct SqlDriver(Movable):
             var p = postgres.Params()
             for k in range(len(params)):
                 p = p^.text(params[k])
-            return self._pg.value()[].execute(_placeholders(sql), p^)
+            return self._pg.value()[].execute(_placeholders(sql), p)
         ref db = self._sqlite.value()
         var stmt = db.prepare(sql)
         for k in range(len(params)):
@@ -279,7 +279,7 @@ struct SqlDriver(Movable):
             var p = postgres.Params()
             for k in range(len(params)):
                 p = p^.text(params[k])
-            var res = self._pg.value()[].query(_placeholders(sql), p^)
+            var res = self._pg.value()[].query(_placeholders(sql), p)
             for r in range(res.num_rows()):
                 var row = List[Optional[String]](capacity=res.num_cols())
                 for c in range(res.num_cols()):

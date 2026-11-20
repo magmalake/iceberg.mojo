@@ -149,11 +149,11 @@ def _batch_root(mut batch: RecordBatch) raises -> Int:
 
 @export("ib_plan_splits")
 def ib_plan_splits(
-    table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    table_dir_ptr: Pointer[UInt8, ImmUntrackedOrigin],
     split_size: Int64,
-    filter_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    filter_ptr: Pointer[UInt8, ImmUntrackedOrigin],
     snapshot_id: Int64,
-    dest: UnsafePointer[UInt8, MutUntrackedOrigin],
+    dest: Pointer[UInt8, MutUntrackedOrigin],
     dest_len: Int64,
 ) abi("C") -> Int64:
     """The scan plan as newline-separated tickets; returns the byte length.
@@ -204,7 +204,7 @@ def ib_plan_splits(
 
 @export("ib_snapshot")
 def ib_snapshot(
-    table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    table_dir_ptr: Pointer[UInt8, ImmUntrackedOrigin],
 ) abi("C") -> Int64:
     """The table's current snapshot id; 0 if it has none, -1 on error.
 
@@ -225,11 +225,11 @@ def ib_snapshot(
 
 @export("ib_scan_split")
 def ib_scan_split(
-    table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
-    ticket_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    table_dir_ptr: Pointer[UInt8, ImmUntrackedOrigin],
+    ticket_ptr: Pointer[UInt8, ImmUntrackedOrigin],
     split_size: Int64,
-    columns_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
-    filter_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    columns_ptr: Pointer[UInt8, ImmUntrackedOrigin],
+    filter_ptr: Pointer[UInt8, ImmUntrackedOrigin],
 ) abi("C") -> Int:
     """One ticket's rows as an `ArrowArrayStream`; returns its address, 0 on
     error.
@@ -270,7 +270,7 @@ def ib_scan_split(
             table_dir, Int(split_size), columns, filter_dsl
         ).use_snapshot(parsed[0])
         var t1 = perf_counter_ns()
-        var batches = scan.to_batches_for_splits(paths^, starts^, ScanOptions())
+        var batches = scan.to_batches_for_splits(paths, starts, ScanOptions())
         var t2 = perf_counter_ns()
         if len(batches) == 0:
             return 0
@@ -299,9 +299,9 @@ def ib_scan_split(
 
 @export("ib_schema")
 def ib_schema(
-    table_dir_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    table_dir_ptr: Pointer[UInt8, ImmUntrackedOrigin],
     split_size: Int64,
-    columns_ptr: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    columns_ptr: Pointer[UInt8, ImmUntrackedOrigin],
 ) abi("C") -> Int:
     """The projected schema as a `CArrowSchema` address; 0 on error.
 
@@ -333,7 +333,7 @@ def ib_schema(
         var batches = (
             _scan(table_dir, Int(split_size), columns, String(""))
             .use_snapshot(snapshot)
-            .to_batches_for_splits(paths^, starts^, options)
+            .to_batches_for_splits(paths, starts, options)
         )
         if len(batches) == 0:
             return 0

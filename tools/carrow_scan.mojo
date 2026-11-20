@@ -40,11 +40,11 @@ def _read_file(path: String) raises -> String:
 
 @export("ib_export_scan_column")
 def ib_export_scan_column(
-    meta_path: UnsafePointer[UInt8, ImmUntrackedOrigin],
-    fixtures: UnsafePointer[UInt8, ImmUntrackedOrigin],
+    meta_path: Pointer[UInt8, ImmUntrackedOrigin],
+    fixtures: Pointer[UInt8, ImmUntrackedOrigin],
     col: Int32,
-    arr_out: UnsafePointer[UInt8, MutUntrackedOrigin],
-    sch_out: UnsafePointer[UInt8, MutUntrackedOrigin],
+    arr_out: Pointer[UInt8, MutUntrackedOrigin],
+    sch_out: Pointer[UInt8, MutUntrackedOrigin],
 ) abi("C") -> Int32:
     """Export column `col` of a whole scan of the table at `meta_path`.
 
@@ -65,12 +65,8 @@ def ib_export_scan_column(
             return -1
         var e = export_c(batch.arena, batch.roots[ci])
         var raw = e.into_raw()
-        var a = UnsafePointer[UInt8, ImmUntrackedOrigin](
-            unsafe_from_address=raw[0]
-        )
-        var s = UnsafePointer[UInt8, ImmUntrackedOrigin](
-            unsafe_from_address=raw[1]
-        )
+        var a = Pointer[UInt8, ImmUntrackedOrigin](unsafe_from_address=raw[0])
+        var s = Pointer[UInt8, ImmUntrackedOrigin](unsafe_from_address=raw[1])
         for i in range(80):
             arr_out[unsafe_offset=i] = a[unsafe_offset=i]
         for i in range(72):

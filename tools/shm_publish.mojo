@@ -164,7 +164,7 @@ def main() raises:
         # fixed cost per unit of work that made flight.mojo's DoGet slow, and
         # just as invisible until it is measured.
         var batches = scan.use_snapshot(parsed[0]).to_batches_for_splits(
-            paths^, starts^, ScanOptions()
+            paths, starts, ScanOptions()
         )
 
         var t1 = perf_counter_ns()

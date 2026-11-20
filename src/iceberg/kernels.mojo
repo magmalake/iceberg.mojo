@@ -598,7 +598,7 @@ def extract_datum(
         return Datum.double_(float_at(a, i))
     if kind == P_STRING:
         var b = bytes_at(a, i)
-        return Datum.string_(String(StringSlice(unsafe_from_utf8=Span(b))))
+        return Datum.string_(String(StringSpan(unsafe_from_utf8=Span(b))))
     if kind == P_UUID:
         var b = bytes_at(a, i)
         return Datum.uuid_(b^)

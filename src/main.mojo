@@ -90,7 +90,7 @@ def split_commas(s: String) -> List[String]:
         return out^
     var start = 0
     while True:
-        var c = s.find(",", start)
+        var c = s.find(",", start).or_else(-1)
         if c < 0:
             out.append(substr(s, start, s.byte_length()))
             break
@@ -152,7 +152,7 @@ def main() raises:
                 k += 2
             case "--rebase" if k + 1 < len(args):
                 var spec = String(args[k + 1])
-                var eq = spec.find("=")
+                var eq = spec.find("=").or_else(-1)
                 if eq < 0:
                     raise Error("--rebase needs FROM=TO")
                 io.rebase(
@@ -171,7 +171,7 @@ def main() raises:
                 k += 1
             case "--property" if k + 1 < len(args):
                 var kv = String(args[k + 1])
-                var eq = kv.find("=")
+                var eq = kv.find("=").or_else(-1)
                 if eq < 0:
                     raise Error("--property needs K=V")
                 io.set(substr(kv, 0, eq), substr(kv, eq + 1, kv.byte_length()))
@@ -320,7 +320,7 @@ def _open(
     if rest_uri != "":
         if rest_table == "":
             raise Error("--rest needs --table NS.NAME")
-        var dot = rest_table.rfind(".")
+        var dot = rest_table.rfind(".").or_else(-1)
         if dot < 0:
             raise Error("--table wants a dotted NAMESPACE.NAME")
         var config = RestCatalogConfig(rest_uri)
@@ -338,7 +338,7 @@ def _open(
     if sql_uri != "":
         if rest_table == "":
             raise Error("--sql needs --table NS.NAME")
-        var dot = rest_table.rfind(".")
+        var dot = rest_table.rfind(".").or_else(-1)
         if dot < 0:
             raise Error("--table wants a dotted NAMESPACE.NAME")
         var catalog = SqlCatalog(

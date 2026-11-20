@@ -199,7 +199,7 @@ struct PuffinFile(Copyable, Movable):
         var location: String, payload: Span[UInt8, _], compressed: Bool
     ) raises -> Self:
         """Parse a `FileMetadata` JSON payload."""
-        var doc = parse_json(String(StringSlice(unsafe_from_utf8=payload)))
+        var doc = parse_json(String(StringSpan(unsafe_from_utf8=payload)))
         var blobs = List[BlobMetadata]()
         var arr = doc.get(doc.root, "blobs")
         if arr < 0:

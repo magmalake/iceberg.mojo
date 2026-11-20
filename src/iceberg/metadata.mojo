@@ -885,7 +885,7 @@ comptime _KNOWN_KEYS = String(
 
 
 def _is_known_key(k: String) -> Bool:
-    return _KNOWN_KEYS.find("|" + k + "|") >= 0
+    return ("|" + k + "|") in _KNOWN_KEYS
 
 
 def _string_map_json(m: Dict[String, String]) -> String:

@@ -115,7 +115,7 @@ from the conflicts a caller reloads and retries on."""
 
 def is_stale_removal(e: Error) -> Bool:
     """Whether `e` is (or wraps) the stale-removal error of `prepare_commit`."""
-    return String(e).find(STALE_REMOVAL) >= 0
+    return STALE_REMOVAL in String(e)
 
 
 def _is_dv(df: DataFile) -> Bool:
