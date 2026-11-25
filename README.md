@@ -1,6 +1,6 @@
 # iceberg.mojo
 
-[![mojoshelf](https://mojoshelf.org/badge/iceberg-mojo.svg)](https://mojoshelf.org/tins/iceberg-mojo) [![mojo nightly](https://mojoshelf.org/badge/iceberg-mojo/nightly.svg)](https://mojoshelf.org/tins/iceberg-mojo)
+[![mojoshelf](https://mojoshelf.org/badge/iceberg-mojo.svg)](https://mojoshelf.org/tins/iceberg-mojo) [![mojo nightly](https://mojoshelf.org/badge/iceberg-mojo/nightly.svg)](https://mojoshelf.org/tins/iceberg-mojo) [![Used by](https://mojourney.dev/badge/magmalake/iceberg.mojo/used-by.svg)](https://mojourney.dev/repos/magmalake/iceberg.mojo#used-by) [![Mojo version](https://mojourney.dev/badge/magmalake/iceberg.mojo/mojo.svg)](https://mojourney.dev/repos/magmalake/iceberg.mojo)
 
 > Part of [**magmalake**](https://magmalake.org) — data lake building blocks in Mojo.
 
