@@ -10,6 +10,12 @@ Releases before 0.6.0 predate this file; their contents are in the commit log
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-26
+
+### Changed
+
+- Pins arrow-mlake-mojo 0.4.2, avro-mojo 0.5.2, brotli-mojo 0.2.2, deflate-mojo 0.3.2, hashes-mojo 0.2.2, lint-mojo 0.2.2, lz4-mojo 0.2.2, objectstore-mojo 0.5.2, parquet-mojo 0.15.2, postgres-mojo 0.4.2, roaring-mojo 0.2.2, sqlite-mojo 0.4.2, threads-mojo 0.7.2, thrift-mojo 0.2.2, zstd-mojo 0.4.0.
+
 ## [0.13.1] - 2026-11-25
 
 ### Changed
